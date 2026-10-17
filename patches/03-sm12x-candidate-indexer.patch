@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/layers/attention/dsv4/v41_indexer/__init__.py b/python/sglang/srt/layers/attention/dsv4/v41_indexer/__init__.py
-index 548977a58082ce04dd13a187a072b921391191e6..96ae8aee3e56dbad4a3d94371597d55d1b202472 100644
+index dd03f26d51..069d8d2d20 100644
 --- a/python/sglang/srt/layers/attention/dsv4/v41_indexer/__init__.py
 +++ b/python/sglang/srt/layers/attention/dsv4/v41_indexer/__init__.py
-@@ -91,7 +91,7 @@ def make_candidate_indexer(
+@@ -94,7 +94,7 @@ def make_candidate_indexer(
      candidate_topk_blocks: int,
      candidate_block_size: int,
  ) -> Tuple[PrefillCandidates, DecodeCandidates]:
@@ -11,7 +11,7 @@ index 548977a58082ce04dd13a187a072b921391191e6..96ae8aee3e56dbad4a3d94371597d55d
  
      from .dense_blocks import DenseBlocksBackend
  
-@@ -112,6 +112,10 @@ def make_candidate_indexer(
+@@ -115,6 +115,10 @@ def make_candidate_indexer(
      )
  
      if not DEEPGEMM_PAGED_SPARSE_MQA_LOGITS:
@@ -23,10 +23,10 @@ index 548977a58082ce04dd13a187a072b921391191e6..96ae8aee3e56dbad4a3d94371597d55d
              "the candidate indexer needs DeepGEMM's paged sparse MQA logits "
              "(sgl-deep-gemm >= 0.2.0 with SGLANG_ENABLE_JIT_DEEPGEMM on)"
 diff --git a/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py b/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py
-index ea90f9a5cd09f2a2820da5f3cd2d48f98bf619df..9cd90ac0a234c359b5a4fa0c8a96e94f3215e96c 100644
+index 4423b2033c..2916d1a94e 100644
 --- a/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py
 +++ b/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py
-@@ -383,7 +383,7 @@ def decode_scores(
+@@ -399,7 +399,7 @@ def decode_scores(
      ratio = inputs.compress_ratio
      indexer = inputs.indexer
      req, pos = inputs.req_rows, inputs.positions
@@ -36,7 +36,7 @@ index ea90f9a5cd09f2a2820da5f3cd2d48f98bf619df..9cd90ac0a234c359b5a4fa0c8a96e94f
      assert pos.shape[0] == bs, (
          f"decode expects one token per request, {pos.shape=} {bs=}"
 diff --git a/test/registered/kernels/ops/attention/test_fp4_indexer.py b/test/registered/kernels/ops/attention/test_fp4_indexer.py
-index edd355f1e2af8502da28ea91500fdb26fd64fa8b..310bb35160491d780f9f39133d4fa8c495612602 100644
+index 42154a7d48..cbcbf39a52 100644
 --- a/test/registered/kernels/ops/attention/test_fp4_indexer.py
 +++ b/test/registered/kernels/ops/attention/test_fp4_indexer.py
 @@ -591,11 +591,12 @@ def test_fp4_paged_logits_replay(batch, ratio, width, masked):
@@ -56,7 +56,7 @@ index edd355f1e2af8502da28ea91500fdb26fd64fa8b..310bb35160491d780f9f39133d4fa8c4
      from sglang.srt.layers.attention.dsv4.v41_indexer.dense_blocks import (
          DenseBlocksBackend,
 diff --git a/test/registered/unit/layers/test_dsv41_candidate_blocks.py b/test/registered/unit/layers/test_dsv41_candidate_blocks.py
-index 39d023876f88fb982d2628c4d39eb72d53146fa1..9ccbed26f0664eb3475d9869a2ac78fdd78a3bac 100644
+index 39d023876f..9ccbed26f0 100644
 --- a/test/registered/unit/layers/test_dsv41_candidate_blocks.py
 +++ b/test/registered/unit/layers/test_dsv41_candidate_blocks.py
 @@ -1,4 +1,5 @@

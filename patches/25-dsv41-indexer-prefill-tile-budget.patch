@@ -1,5 +1,5 @@
 diff --git a/python/sglang/kernels/ops/attention/dsv4/index_logits.py b/python/sglang/kernels/ops/attention/dsv4/index_logits.py
-index 7832d770c5690a4eaf324263ece1237b68dac2da..de23632ca63cfc49c493a4fbdf9cb2e3ba080bd8 100644
+index b24711a14b..a55d6574a3 100644
 --- a/python/sglang/kernels/ops/attention/dsv4/index_logits.py
 +++ b/python/sglang/kernels/ops/attention/dsv4/index_logits.py
 @@ -4,7 +4,7 @@ memory budget), the paged pool, or the published blocks of a sparse table."""
@@ -11,55 +11,53 @@ index 7832d770c5690a4eaf324263ece1237b68dac2da..de23632ca63cfc49c493a4fbdf9cb2e3
  
  import torch
  
-@@ -18,15 +18,23 @@ from .candidate_table import CANDIDATE_BLOCK_SIZE
- 
- 
- def flat_index_logits_rows_per_tile(
--    rows: int, width: int, *, heads: int, budget_bytes: int
-+    rows: int,
-+    width: int,
-+    *,
-+    heads: int,
-+    budget_bytes: int,
+@@ -33,16 +33,21 @@ def flat_index_logits_rows_per_tile(
+     heads: int,
+     budget_bytes: int,
+     item_size: int = _LOGITS_DTYPE_BYTES,
 +    scratch_row_bytes: int = 0,
 +    scratch_tile_bytes: int = 0,
  ) -> int:
--    """Rows per fp32 logits tile within ``budget_bytes``, at the kernel's row
--    alignment."""
-+    """Rows per tile so that a tile's fp32 logits, as DeepGEMM allocates them,
-+    plus its consumer's scratch, ``scratch_row_bytes`` a row and
-+    ``scratch_tile_bytes`` a tile, stay within ``budget_bytes``, at the kernel's
-+    row alignment; never below that alignment."""
+-    """Rows per logits tile within ``budget_bytes`` (sized as fp32, which also
+-    bounds bf16), at the kernel's row alignment."""
++    """Rows per tile so that a tile's logits (sized as fp32, which also bounds
++    bf16), plus its consumer's scratch, ``scratch_row_bytes`` a row and
++    ``scratch_tile_bytes`` a tile, stay within ``budget_bytes``: ``rows`` when all
++    fit, else a multiple of the kernel's row group, at least one row group even
++    when that exceeds the budget."""
      row_alignment = 128 // heads
+     # NOTE: for bf16, the estimated row bytes is 2 times the actual bytes
+     effective_width = width * item_size // 4
      rows_per_chunk = mqa_logits_rows_per_chunk(
          num_rows=ceil_align(rows, row_alignment),
--        row_bytes=mqa_logits_row_bytes(width),
+-        row_bytes=mqa_logits_row_bytes(effective_width),
 -        budget_bytes=budget_bytes,
-+        row_bytes=mqa_logits_row_bytes(width) + scratch_row_bytes,
++        row_bytes=mqa_logits_row_bytes(effective_width) + scratch_row_bytes,
 +        budget_bytes=max(1, budget_bytes - scratch_tile_bytes),
      )
      if rows_per_chunk is None:
          return rows
-@@ -43,19 +51,28 @@ def flat_index_logits_tiles(
+@@ -58,19 +63,29 @@ def flat_index_logits_tiles(
+     lengths: torch.Tensor,
      context_lengths: list[int],
      budget_bytes: int,
-     width_align: int = 4,
 +    scratch_bytes: Callable[[int], Tuple[int, int]] = lambda width: (0, 0),
  ) -> Iterator[tuple[slice, torch.Tensor]]:
--    """``(rows, logits)`` per row tile, each fp32 tile within ``budget_bytes``:
+-    """``(rows, logits)`` per row tile, each tile within ``budget_bytes``:
 -    ``logits[i, j]`` scores query row ``rows.start + i`` against ``kv[starts + j]``,
 -    garbage past the row's ``lengths``; the width is ``max(context_lengths)``
--    aligned to ``width_align``."""
+-    aligned to ``FLAT_LOGITS_WIDTH_ALIGN``."""
 +    """``(rows, logits)`` per row tile: ``logits[i, j]`` scores query row
 +    ``rows.start + i`` against ``kv[starts + j]``, garbage past the row's
-+    ``lengths``; the width is ``max(context_lengths)`` aligned to ``width_align``.
-+    A tile's logits plus the caller's scratch, ``scratch_bytes(width)`` as bytes
-+    a row and bytes a tile, stay within ``budget_bytes``. The caller must drop a
-+    tile before taking the next one, or two tiles are alive at once."""
++    ``lengths``; the width is ``max(context_lengths)`` aligned to
++    ``FLAT_LOGITS_WIDTH_ALIGN``. A tile's logits plus the caller's scratch,
++    ``scratch_bytes(width)`` as bytes a row and bytes a tile, stay within
++    ``budget_bytes``, subject to the one-row-group minimum. The caller must drop
++    a tile before taking the next one, or two tiles are alive at once."""
      from deep_gemm import fp8_fp4_mqa_logits
  
      rows = q[0].shape[0]
-     width = ceil_align(max(context_lengths, default=0), width_align)
+     width = ceil_align(max(context_lengths, default=0), FLAT_LOGITS_WIDTH_ALIGN)
      if rows == 0 or width == 0:
          return
 +    scratch_row_bytes, scratch_tile_bytes = scratch_bytes(width)
@@ -75,10 +73,10 @@ index 7832d770c5690a4eaf324263ece1237b68dac2da..de23632ca63cfc49c493a4fbdf9cb2e3
      for offset in range(0, rows, rows_per_chunk):
          tile = slice(offset, min(offset + rows_per_chunk, rows))
 diff --git a/python/sglang/srt/layers/attention/deepseek_v4_backend.py b/python/sglang/srt/layers/attention/deepseek_v4_backend.py
-index 1fc4ecaaa3129442a6f15e498fb3306858fde785..eba721054b112e0aa960938fa44b901eb3ce7f2e 100644
+index fda802adaa..bb273f8d71 100644
 --- a/python/sglang/srt/layers/attention/deepseek_v4_backend.py
 +++ b/python/sglang/srt/layers/attention/deepseek_v4_backend.py
-@@ -87,6 +87,9 @@ from sglang.srt.layers.attention.dsv4.v41_indexer import (
+@@ -90,6 +90,9 @@ from sglang.srt.layers.attention.dsv4.v41_indexer import (
      make_candidate_indexer,
      make_full_topk_indexer,
  )
@@ -88,7 +86,7 @@ index 1fc4ecaaa3129442a6f15e498fb3306858fde785..eba721054b112e0aa960938fa44b901e
  from sglang.srt.layers.attention.verify_mask import (
      VerifyMask,
      maybe_create_verify_mask,
-@@ -970,6 +973,9 @@ class DSV4Metadata:
+@@ -1026,6 +1029,9 @@ class DSV4Metadata:
      # What the candidate-source layer published for the index-source layers after
      # it, in the implementation's own type; never copied from the host.
      candidate_metadata: Optional[CandidateMetadata] = None
@@ -98,7 +96,7 @@ index 1fc4ecaaa3129442a6f15e498fb3306858fde785..eba721054b112e0aa960938fa44b901e
  
      # Built at the runner's prefill WAR boundary when the fast path is on,
      # otherwise lazily by ``_forward_prefill_sparse``.
-@@ -994,6 +1000,7 @@ class DSV4Metadata:
+@@ -1053,6 +1059,7 @@ class DSV4Metadata:
          )
          self.sparse_prefill_cache = None
          self.prefill_shared_reads_snapshotted = False
@@ -106,7 +104,7 @@ index 1fc4ecaaa3129442a6f15e498fb3306858fde785..eba721054b112e0aa960938fa44b901e
  
      def refresh_for_breakable_cuda_graph_replay_(self, static_metadata: DSV4Metadata):
          self.core_attn_metadata.refresh_for_breakable_cuda_graph_replay_(
-@@ -1026,6 +1033,7 @@ class DSV4Metadata:
+@@ -1085,6 +1092,7 @@ class DSV4Metadata:
              )
          self.sparse_prefill_cache = None
          self.prefill_shared_reads_snapshotted = False
@@ -114,19 +112,18 @@ index 1fc4ecaaa3129442a6f15e498fb3306858fde785..eba721054b112e0aa960938fa44b901e
  
  
  @dataclass
-@@ -1722,6 +1730,11 @@ class DeepseekV4AttnBackend(
-                     continue
-                 rows = tail.real_rows(full_buf)
+@@ -1994,6 +2002,10 @@ class DeepseekV4AttnBackend(
+                 if tail.real_rows_count is not None:
+                     rows = rows[: tail.real_rows_count]
                  tail_buf[: rows.shape[0]].copy_(rows)
 +        if tail_metadata.low_ratio_score_budget_bytes is None:
-+            # One free-memory read per forward: the tail shares the full budget.
 +            tail_metadata.low_ratio_score_budget_bytes = saved[
 +                0
 +            ].low_ratio_score_budget_bytes
          self.forward_metadata = tail_metadata
          if self.token_to_kv_pool.request_window is not None:
              self.token_to_kv_pool.request_window.activate(
-@@ -3276,6 +3289,19 @@ class DeepseekV4AttnBackend(
+@@ -3641,6 +3653,18 @@ class DeepseekV4AttnBackend(
          else:
              rows_per_request = _as_int_list(forward_batch.extend_seq_lens_cpu)
              rows_per_request_device = forward_batch.extend_seq_lens
@@ -136,8 +133,7 @@ index 1fc4ecaaa3129442a6f15e498fb3306858fde785..eba721054b112e0aa960938fa44b901e
 +            meta.low_ratio_score_budget_bytes is None
 +            and self.full_topk_indexer.use_deep_gemm_prefill
 +        ):
-+            # Only the DeepGEMM scorers tile; the candidate backends take the same
-+            # path as the full top-k. Ratio 1 bounds the widest score matrix.
++            # Ratio 1 bounds both low-ratio score widths.
 +            meta.low_ratio_score_budget_bytes = prefill_score_budget_bytes(
 +                num_rows=x.shape[0],
 +                max_seq_len=max(seq_lens_cpu or (), default=0),
@@ -146,7 +142,7 @@ index 1fc4ecaaa3129442a6f15e498fb3306858fde785..eba721054b112e0aa960938fa44b901e
          return PrefillInputs(
              indexer=layer.indexer,
              layer_id=layer.layer_id,
-@@ -3287,7 +3313,7 @@ class DeepseekV4AttnBackend(
+@@ -3652,7 +3676,7 @@ class DeepseekV4AttnBackend(
              req_rows=req,
              req_pool_indices=forward_batch.req_pool_indices,
              kv_page_table=core.page_table,
@@ -155,7 +151,7 @@ index 1fc4ecaaa3129442a6f15e498fb3306858fde785..eba721054b112e0aa960938fa44b901e
              rows_per_request=rows_per_request,
              rows_per_request_device=rows_per_request_device,
              out_raw_indices=core.sparse_raw_indices(layer.compress_ratio),
-@@ -3296,6 +3322,7 @@ class DeepseekV4AttnBackend(
+@@ -3661,6 +3685,7 @@ class DeepseekV4AttnBackend(
                  if self._low_ratio_prefill_reads_page_indices(forward_batch)
                  else None
              ),
@@ -164,33 +160,25 @@ index 1fc4ecaaa3129442a6f15e498fb3306858fde785..eba721054b112e0aa960938fa44b901e
  
      def _low_ratio_prefill_reads_page_indices(self, forward_batch: ForwardBatch):
 diff --git a/python/sglang/srt/layers/attention/dsv4/v41_indexer/dense_blocks.py b/python/sglang/srt/layers/attention/dsv4/v41_indexer/dense_blocks.py
-index 995228341668e5507b9d994d91806a33d523805a..5edf09f35fc6122b04bc436a21eb5edf055b5ec9 100644
+index 1e2394a1f9..70b0f18e76 100644
 --- a/python/sglang/srt/layers/attention/dsv4/v41_indexer/dense_blocks.py
 +++ b/python/sglang/srt/layers/attention/dsv4/v41_indexer/dense_blocks.py
-@@ -3,6 +3,7 @@ its best blocks, a consumer takes its top-k among them."""
- 
- from __future__ import annotations
- 
-+import math
- from typing import TYPE_CHECKING, List, Optional, Tuple
- 
- import msgspec
-@@ -246,7 +247,13 @@ def _publish_prefill_blocks(
+@@ -246,7 +246,13 @@ def _publish_prefill_blocks(
      blocks = torch.full(
          (data.num_rows, width), -1, dtype=torch.int32, device=selected.device
      )
--    for tile, logits in score_tiles(data, kv, width_align=4):
-+    # Block-aligned scores let the block maxima read the tile in place.
+-    for tile, logits in score_tiles(data, kv):
++    # Block-aligned slices of `_publish_tile_blocks` stay within the logits width.
++    assert FLAT_LOGITS_WIDTH_ALIGN % block_size == 0
 +    for tile, logits in score_tiles(
 +        data,
 +        kv,
-+        width_align=math.lcm(4, block_size),
 +        scratch_bytes=lambda w: _publish_scratch_bytes(w, block_size, topk_blocks),
 +    ):
          _publish_tile_blocks(
              data=data,
              tile=tile,
-@@ -277,9 +284,12 @@ def _publish_tile_blocks(
+@@ -277,9 +283,12 @@ def _publish_tile_blocks(
  ) -> None:
      lens = data.compress_lens[tile]
      for rows, lc in _requests_in_tile(data, tile):
@@ -205,19 +193,17 @@ index 995228341668e5507b9d994d91806a33d523805a..5edf09f35fc6122b04bc436a21eb5edf
              -torch.inf,
          )
          ids = select_candidate_block_ids(
-@@ -300,7 +310,10 @@ def _consume_prefill_blocks(
-     block_size: int,
- ) -> torch.Tensor:
+@@ -302,7 +311,8 @@ def _consume_prefill_blocks(
      selected = data.empty_selection(topk)
--    for tile, logits in score_tiles(data, kv, width_align=block_size):
+     # the block-aligned slices of `_consume_tile_blocks` stay within the logits width
+     assert FLAT_LOGITS_WIDTH_ALIGN % block_size == 0
+-    for tile, logits in score_tiles(data, kv):
 +    scratch = (_consume_scratch_bytes(blocks.shape[1], block_size, topk), 0)
-+    for tile, logits in score_tiles(
-+        data, kv, width_align=block_size, scratch_bytes=lambda w: scratch
-+    ):
++    for tile, logits in score_tiles(data, kv, scratch_bytes=lambda w: scratch):
          _consume_tile_blocks(
              data=data,
              tile=tile,
-@@ -340,6 +353,28 @@ def _consume_tile_blocks(
+@@ -342,6 +352,28 @@ def _consume_tile_blocks(
          )
  
  
@@ -247,19 +233,19 @@ index 995228341668e5507b9d994d91806a33d523805a..5edf09f35fc6122b04bc436a21eb5edf
      start = 0
      for num_rows, lc in zip(data.rows_per_request, data.lens_per_request):
 diff --git a/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py b/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py
-index 926ad3082870504c29bccc11571fa4e1df742753..10f131bee499f55b7428b5279b389bdc9170a211 100644
+index 0b97025587..bb422f9a54 100644
 --- a/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py
 +++ b/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py
 @@ -5,7 +5,7 @@ a selection back into pool slots."""
  from __future__ import annotations
  
  import itertools
--from typing import TYPE_CHECKING, Generator, Iterator, List, Optional, Tuple
+-from typing import TYPE_CHECKING, Iterator, List, Optional, Tuple
 +from typing import TYPE_CHECKING, Callable, Generator, Iterator, List, Optional, Tuple
  
  import msgspec
  import torch
-@@ -22,6 +22,18 @@ from sglang.kernels.ops.attention.dsv4.topk import (
+@@ -22,6 +22,15 @@ from sglang.kernels.ops.attention.dsv4.topk import (
      plan_topk_v2,
      topk_transform_paged_v2,
  )
@@ -268,9 +254,6 @@ index 926ad3082870504c29bccc11571fa4e1df742753..10f131bee499f55b7428b5279b389bdc
 +    mqa_logits_needs_budget_check,
 +    mqa_logits_static_budget_bytes,
 +)
-+from sglang.srt.model_executor.runner_backend_utils.breakable_cuda_graph.context import (
-+    is_in_breakable_cuda_graph,
-+)
 +from sglang.srt.model_executor.runner_backend_utils.tc_piecewise_cuda_graph import (
 +    is_in_tc_piecewise_cuda_graph,
 +)
@@ -278,32 +261,26 @@ index 926ad3082870504c29bccc11571fa4e1df742753..10f131bee499f55b7428b5279b389bdc
  from sglang.srt.runtime_context import get_platform
  from sglang.srt.utils.common import async_h2d
  
-@@ -31,11 +43,32 @@ if TYPE_CHECKING:
+@@ -31,11 +40,26 @@ if TYPE_CHECKING:
      from sglang.srt.layers.attention.dsv4.dsv41_sparse import DeepseekV41Indexer
      from sglang.srt.mem_cache.deepseek_v4_memory_pool import DeepSeekV4TokenToKVPool
  
 -# TODO: use a per-forward mqa_logits_budget_bytes() budget that also
 -# leaves room for candidate block ids and block-selection scratch.
-+# Cap on one score tile plus its consumer's scratch; a forward's free-memory
-+# budget (prefill_score_budget_bytes) can only lower it.
  _DEEP_GEMM_SCORE_BUDGET_BYTES = 2 << 30
  
  
 +def prefill_score_budget_bytes(
 +    *, num_rows: int, max_seq_len: int, device: torch.device
 +) -> int:
-+    """A prefill forward's budget for one score tile plus its consumer's scratch:
-+    the shared free-memory MQA-logits budget, capped at the fixed cap. The DeepGEMM
-+    logits are allocated outside every pool sized by mem_fraction_static, so only
-+    this budget bounds them. Forwards too small to tile and graph capture skip the
-+    free-memory query."""
++    """Budget for logits and declared scratch; skip the free-memory query for
++    small or captured forwards."""
 +    cap = _DEEP_GEMM_SCORE_BUDGET_BYTES
 +    if not mqa_logits_needs_budget_check(num_rows=num_rows, num_cols=max_seq_len):
 +        return cap
 +    if (
 +        get_is_capture_mode()
 +        or torch.cuda.is_current_stream_capturing()
-+        or is_in_breakable_cuda_graph()
 +        or is_in_tc_piecewise_cuda_graph()
 +    ):
 +        return min(cap, mqa_logits_static_budget_bytes(device_index=device.index))
@@ -313,7 +290,7 @@ index 926ad3082870504c29bccc11571fa4e1df742753..10f131bee499f55b7428b5279b389bdc
  class DeepGEMMDecodeData(msgspec.Struct, frozen=True):
      q_fp4: torch.Tensor  # [rows, 1, heads, 64] int8, packed fp4
      q_sf: torch.Tensor  # [rows, 1, heads] int32, packed ue8m0
-@@ -55,6 +88,8 @@ class DeepGEMMPrefillData(msgspec.Struct, frozen=True):
+@@ -55,6 +79,8 @@ class DeepGEMMPrefillData(msgspec.Struct, frozen=True):
      q_fp4: torch.Tensor  # [rows, heads, 64] int8, packed fp4
      q_sf: torch.Tensor  # [rows, heads] int32, packed ue8m0
      weights: torch.Tensor  # [rows, heads] fp32 head weights
@@ -322,7 +299,7 @@ index 926ad3082870504c29bccc11571fa4e1df742753..10f131bee499f55b7428b5279b389bdc
  
      @property
      def num_rows(self) -> int:
-@@ -205,6 +240,7 @@ def get_deep_gemm_prefill_data(
+@@ -205,10 +231,19 @@ def get_deep_gemm_prefill_data(
          q_fp4=q_fp4,
          q_sf=q_sf,
          weights=weights,
@@ -330,43 +307,38 @@ index 926ad3082870504c29bccc11571fa4e1df742753..10f131bee499f55b7428b5279b389bdc
      )
  
  
-@@ -213,7 +249,15 @@ def score_tiles(
-     kv: Tuple[torch.Tensor, torch.Tensor],
-     *,
-     width_align: int,
+-def score_tiles(data: DeepGEMMPrefillData, kv: Tuple[torch.Tensor, torch.Tensor]):
++def score_tiles(
++    data: DeepGEMMPrefillData,
++    kv: Tuple[torch.Tensor, torch.Tensor],
++    *,
 +    scratch_bytes: Callable[[int], Tuple[int, int]] = lambda width: (0, 0),
- ) -> Generator[Tuple[slice, torch.Tensor], None, None]:
-+    """Row tiles of the chunk's scores whose logits plus the scratch the caller
-+    allocates while a tile is alive, ``scratch_bytes(width)`` as bytes a row and
-+    bytes a tile, stay within this forward's budget. Drop each tile before
-+    advancing."""
++) -> Generator[Tuple[slice, torch.Tensor], None, None]:
 +    budget = _DEEP_GEMM_SCORE_BUDGET_BYTES
 +    if data.score_budget_bytes is not None:
 +        budget = min(budget, data.score_budget_bytes)
      yield from flat_index_logits_tiles(
          q=(data.q_fp4, data.q_sf),
          kv=kv,
-@@ -221,8 +265,9 @@ def score_tiles(
+@@ -216,7 +251,8 @@ def score_tiles(data: DeepGEMMPrefillData, kv: Tuple[torch.Tensor, torch.Tensor]
          starts=data.request_starts,
          lengths=data.compress_lens,
          context_lengths=data.lens_per_request,
 -        budget_bytes=_DEEP_GEMM_SCORE_BUDGET_BYTES,
 +        budget_bytes=budget,
-         width_align=width_align,
 +        scratch_bytes=scratch_bytes,
      )
  
  
 diff --git a/python/sglang/srt/layers/attention/dsv4/v41_indexer/sparse_table.py b/python/sglang/srt/layers/attention/dsv4/v41_indexer/sparse_table.py
-index 85f4947b1d02831fdf0a65c37f0851d14d00f503..58eb432418fa13bd9664d123b34a38fc8d0aad5f 100644
+index efc7ede22c..7827d7a14b 100644
 --- a/python/sglang/srt/layers/attention/dsv4/v41_indexer/sparse_table.py
 +++ b/python/sglang/srt/layers/attention/dsv4/v41_indexer/sparse_table.py
-@@ -384,6 +384,12 @@ def _row_pair_ids(rows_per_request: List[int], *, device: torch.device) -> torch
+@@ -397,6 +397,11 @@ def _row_pair_ids(rows_per_request: List[int], *, device: torch.device) -> torch
      return (row - ((row - first_row[request]) & 1)).to(torch.int32)
  
  
 +def _block_keys_row_bytes(width: int) -> int:
-+    """Bytes a row of the fp32 block keys of a ``width`` wide score tile."""
 +    width_blocks = (width + CANDIDATE_BLOCK_SIZE - 1) // CANDIDATE_BLOCK_SIZE
 +    return 4 * ((width_blocks + 3) // 4 * 4)
 +
@@ -374,18 +346,18 @@ index 85f4947b1d02831fdf0a65c37f0851d14d00f503..58eb432418fa13bd9664d123b34a38fc
  # TODO(dark): support fusion of publish + topk of publish layer
  def publish_prefill_table(
      *,
-@@ -403,7 +409,9 @@ def publish_prefill_table(
+@@ -416,7 +421,9 @@ def publish_prefill_table(
      blocks = torch.empty(rows, topk_blocks, dtype=torch.int32, device=device)
      zero_offsets = torch.zeros(rows, dtype=torch.int32, device=device)
      # the block keys read the score rows through 32-byte vectors
--    for tile, logits in score_tiles(data, kv, width_align=8):
+-    for tile, logits in score_tiles(data, kv):
 +    for tile, logits in score_tiles(
-+        data, kv, width_align=8, scratch_bytes=lambda w: (_block_keys_row_bytes(w), 0)
++        data, kv, scratch_bytes=lambda w: (_block_keys_row_bytes(w), 0)
 +    ):
          lens = data.compress_lens[tile]
-         topk_transform_ragged_v2(
-             logits,
-@@ -424,6 +432,8 @@ def publish_prefill_table(
+         topk_ragged(logits, lens, out=out_positions[tile], offsets=zero_offsets[tile])
+         # keys past a row's block count stay unset; the top-k reads a row
+@@ -434,6 +441,8 @@ def publish_prefill_table(
              out_offsets=zero_offsets[: logits.shape[0]],
              out_indices=blocks[tile],
          )
@@ -395,22 +367,21 @@ index 85f4947b1d02831fdf0a65c37f0851d14d00f503..58eb432418fa13bd9664d123b34a38fc
          blocks=blocks,
          compress_lens=data.compress_lens,
 diff --git a/python/sglang/srt/layers/attention/dsv4/v41_indexer/types.py b/python/sglang/srt/layers/attention/dsv4/v41_indexer/types.py
-index 7800b366ac27cae4a27c3fa069e8ac150d8e11f9..99138a5cbe368c5dbfdda55ae1e066cb3f457d7f 100644
+index 7800b366ac..9965b4c27d 100644
 --- a/python/sglang/srt/layers/attention/dsv4/v41_indexer/types.py
 +++ b/python/sglang/srt/layers/attention/dsv4/v41_indexer/types.py
-@@ -62,6 +62,10 @@ class PrefillInputs(msgspec.Struct, frozen=True, kw_only=True):
+@@ -62,6 +62,9 @@ class PrefillInputs(msgspec.Struct, frozen=True, kw_only=True):
      out_raw_indices: torch.Tensor
      out_page_indices: Optional[torch.Tensor]
  
-+    # Bytes one DeepGEMM score tile and its scratch may take, read once per
-+    # forward (scoring.prefill_score_budget_bytes); None takes the fixed cap.
++    # None uses the fixed cap.
 +    score_budget_bytes: Optional[int] = None
 +
      def reset_outputs(self) -> None:
          self.out_raw_indices.fill_(-1)
          if self.out_page_indices is not None:
 diff --git a/test/registered/kernels/ops/attention/test_dense_prefill_indexer.py b/test/registered/kernels/ops/attention/test_dense_prefill_indexer.py
-index 77df9c4670e2a66e57a719816868d94987a25091..3d02103a27eff92ae267f341f0cddd0ca1ff8958 100644
+index 77df9c4670..ed69b2622b 100644
 --- a/test/registered/kernels/ops/attention/test_dense_prefill_indexer.py
 +++ b/test/registered/kernels/ops/attention/test_dense_prefill_indexer.py
 @@ -3,12 +3,15 @@ from unittest.mock import patch
@@ -430,47 +401,69 @@ index 77df9c4670e2a66e57a719816868d94987a25091..3d02103a27eff92ae267f341f0cddd0c
  
  
  def make_inputs(request_lengths, ratio=1, zero_queries=False, seed=17):
-@@ -327,7 +330,8 @@ class TestDensePrefillIndexer(CustomTestCase):
+@@ -48,10 +51,8 @@ def make_inputs(request_lengths, ratio=1, zero_queries=False, seed=17):
+     )
+ 
+ 
+-def run_dense(inputs, *, publish_candidates, candidates):
+-    """The plain top-k, or the CP source's own top-k plus its candidate blocks
+-    (`publish_candidates`), or a CP consumer's top-k among `candidates`."""
+-    data = scoring.DeepGEMMPrefillData(
++def prefill_data(inputs):
++    return scoring.DeepGEMMPrefillData(
+         k_slots=torch.arange(inputs["kv"][0].shape[0], device="cuda"),
+         request_starts=inputs["starts"],
+         lens_per_request=[n for _, n in inputs["request_lengths"]],
+@@ -61,6 +62,12 @@ def run_dense(inputs, *, publish_candidates, candidates):
+         q_sf=inputs["q"][1],
+         weights=inputs["weights"],
+     )
++
++
++def run_dense(inputs, *, publish_candidates, candidates):
++    """The plain top-k, or the CP source's own top-k plus its candidate blocks
++    (`publish_candidates`), or a CP consumer's top-k among `candidates`."""
++    data = prefill_data(inputs)
+     if publish_candidates:
+         selected, blocks = dense_blocks._publish_prefill_blocks(
+             data=data,
+@@ -327,7 +334,7 @@ class TestDensePrefillIndexer(CustomTestCase):
                  self.assert_topk(inputs, selected, expected)
  
      def test_score_memory_is_bounded(self):
 -        for context, limit_gib in ((65536, 3), (65535, 5)):
-+        # an unaligned context no longer pads a copy of the scores
 +        for context, limit_gib in ((65536, 3), (65535, 3)):
              with self.subTest(context=context):
                  inputs = make_inputs([(16384, context)])
                  inputs["candidate_topk_blocks"] = 2048
-@@ -368,5 +372,156 @@ class TestDensePrefillIndexer(CustomTestCase):
+@@ -368,5 +375,154 @@ class TestDensePrefillIndexer(CustomTestCase):
                  del inputs, candidates
  
  
-+def prefill_data(inputs):
-+    return scoring.DeepGEMMPrefillData(
-+        k_slots=torch.arange(inputs["kv"][0].shape[0], device="cuda"),
-+        request_starts=inputs["starts"],
-+        lens_per_request=[n for _, n in inputs["request_lengths"]],
-+        rows_per_request=[q for q, _ in inputs["request_lengths"]],
-+        compress_lens=inputs["lengths"],
-+        q_fp4=inputs["q"][0],
-+        q_sf=inputs["q"][1],
-+        weights=inputs["weights"],
-+    )
-+
-+
 +def tiled_logits(inputs, budget):
-+    """The scores ``score_tiles`` yields under ``budget``, stitched back."""
 +    data = prefill_data(inputs)
 +    parts = []
 +    with patch.object(scoring, "_DEEP_GEMM_SCORE_BUDGET_BYTES", budget):
-+        for tile, logits in scoring.score_tiles(data, inputs["kv"], width_align=8):
++        for tile, logits in scoring.score_tiles(data, inputs["kv"]):
 +            parts.append(logits.clone())
 +            del logits
 +    return torch.cat(parts), len(parts)
 +
 +
 +def same_rows(a, b):
-+    """Row-wise equal as sets: the selections are unordered."""
++    """Row-wise equal ignoring order: the selections are unordered."""
 +    return torch.equal(a.sort(dim=-1).values, b.sort(dim=-1).values)
++
++
++def same_selected_scores(inputs, scores, a, b):
++    """Row-wise equal selected scores: selections may break ties differently."""
++
++    def picked(selected):
++        cols = (selected - inputs["starts"][:, None]).clamp_min(0).long()
++        values = scores.gather(1, cols).masked_fill(selected < 0, -torch.inf)
++        return values.sort(dim=-1).values
++
++    return torch.equal(picked(a), picked(b))
 +
 +
 +@unittest.skipUnless(
@@ -478,8 +471,6 @@ index 77df9c4670e2a66e57a719816868d94987a25091..3d02103a27eff92ae267f341f0cddd0c
 +    "requires SM100 or SM120",
 +)
 +class TestPrefillScoreTileBudget(CustomTestCase):
-+    """Long-context tiles under a small budget against one untiled tile."""
-+
 +    request_lengths = [(3, 4093), (2045, 485_123)]
 +
 +    def test_tiles_score_bitwise_like_one_tile(self):
@@ -510,29 +501,34 @@ index 77df9c4670e2a66e57a719816868d94987a25091..3d02103a27eff92ae267f341f0cddd0c
 +                )
 +                full, _ = run_dense(inputs, publish_candidates=False, candidates=None)
 +            results.append((selected, candidates.blocks, consumed, full))
-+        for one, tiled in zip(*results):
-+            self.assertTrue(same_rows(one, tiled))
-+        # the published blocks match the unaligned reference that pads a copy
 +        scores = dense_scores(inputs)
++        consumer_scores = dense_scores(consumer)
++        (selected, blocks, consumed, full), tiled = results
++        self.assertTrue(same_rows(blocks, tiled[1]))
++        self.assertTrue(same_selected_scores(inputs, scores, selected, tiled[0]))
++        self.assertTrue(
++            same_selected_scores(consumer, consumer_scores, consumed, tiled[2])
++        )
++        self.assertTrue(same_selected_scores(inputs, scores, full, tiled[3]))
 +        row = 0
 +        for (queries, context), blocks in zip(
 +            self.request_lengths, request_blocks(inputs, candidates)
 +        ):
-+            ids = select_candidate_block_ids(
++            reference_blocks = select_candidate_block_ids(
 +                logits=scores[row : row + queries, :context],
 +                compress_lens=inputs["lengths"][row : row + queries, None],
 +                topk_blocks=inputs["candidate_topk_blocks"],
 +                block_size=inputs["candidate_block_size"],
 +            )
-+            self.assertTrue(same_rows(blocks[:, : ids.shape[1]], ids))
++            self.assertTrue(
++                same_rows(blocks[:, : reference_blocks.shape[1]], reference_blocks)
++            )
 +            row += queries
 +
 +    def test_tile_scratch_within_declared_bytes(self):
-+        """Measured requested (unrounded) peak bytes of one-row-group tiles, past
-+        the call's outputs, stay within the logits allocation plus the scratch
-+        each path declares to the tiler; at one row group a scratch term left
-+        out of the declaration shows."""
-+        inputs = make_inputs(self.request_lengths)
++        """Requested peak bytes, excluding outputs, fit the declared tile
++        allocation plus a 1 KiB allowance."""
++        inputs = make_inputs([(3, 4093), (9, 485_123)])
 +        inputs["candidate_topk_blocks"] = 2048
 +        kv, block = inputs["kv"], inputs["candidate_block_size"]
 +        topk_blocks = inputs["candidate_topk_blocks"]
@@ -541,7 +537,6 @@ index 77df9c4670e2a66e57a719816868d94987a25091..3d02103a27eff92ae267f341f0cddd0c
 +        group = 128 // inputs["q"][0].shape[1]
 +        width = -(-485_123 // 8) * 8
 +        logits = group * 4 * (-(-width // 256) * 256)
-+        candidates = None
 +
 +        def peak_past(baseline, held):
 +            torch.cuda.synchronize()
@@ -591,29 +586,27 @@ index 77df9c4670e2a66e57a719816868d94987a25091..3d02103a27eff92ae267f341f0cddd0c
 +            baseline = start()
 +            scoring.dense_prefill_topk(data, kv, out=out)
 +            with self.subTest(path="full"):
-+                # its only allocation past the tiles is the zero offsets
-+                self.assertLessEqual(peak_past(baseline, 4 * rows), logits + slack)
++                self.assertLessEqual(peak_past(baseline, 0), logits + slack)
 +
 +
  if __name__ == "__main__":
      unittest.main()
 diff --git a/test/registered/unit/layers/test_dsv41_prefill_score_tiles.py b/test/registered/unit/layers/test_dsv41_prefill_score_tiles.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..393f4c26c35d7469a1423515f7cc27956bb6bb1a
+index 0000000000..4987bdd700
 --- /dev/null
 +++ b/test/registered/unit/layers/test_dsv41_prefill_score_tiles.py
-@@ -0,0 +1,594 @@
-+"""The DeepSeek V4.1 DeepGEMM prefill indexer scores a chunk in row tiles under a
-+byte budget. These CPU checks replace the two device kernels with exact
-+references, then check the tile sizes against the budget and that every
-+selection is the same however the rows are tiled."""
+@@ -0,0 +1,610 @@
++"""CPU checks for prefill tile budgets and selection equivalence."""
 +
++import contextlib
 +import sys
 +import types
 +import unittest
 +import weakref
 +from unittest.mock import patch
 +
++import msgspec
 +import torch
 +
 +import sglang.kernels.ops.attention.dsv4 as dsv4_ops
@@ -622,6 +615,7 @@ index 0000000000000000000000000000000000000000..393f4c26c35d7469a1423515f7cc2795
 +    topk_among_blocks,
 +)
 +from sglang.kernels.ops.attention.dsv4.index_logits import (
++    FLAT_LOGITS_WIDTH_ALIGN,
 +    flat_index_logits_rows_per_tile,
 +)
 +from sglang.srt.layers.attention import deepseek_v4_backend
@@ -635,17 +629,21 @@ index 0000000000000000000000000000000000000000..393f4c26c35d7469a1423515f7cc2795
 +    sparse_table,
 +)
 +from sglang.srt.layers.attention.mqa_logits_utils import mqa_logits_row_bytes
++from sglang.srt.model_executor.runner_backend_utils.breakable_cuda_graph.context import (
++    enable_breakable_cuda_graph,
++)
++from sglang.srt.model_executor.runner_utils import capture_mode
 +from sglang.test.ci.ci_register import register_cpu_ci
 +from sglang.test.test_utils import CustomTestCase
 +
 +register_cpu_ci(est_time=15, suite="base-a-test-cpu")
 +
-+HEADS = 32  # DeepGEMM groups 128 // HEADS = 4 query rows
++HEADS = 32
 +ROW_ALIGN = 128 // HEADS
 +TOPK = 16
 +TOPK_BLOCKS = 4
 +BLOCK = 8
-+GARBAGE = 1e30  # what the fake kernel leaves past each row's window
++GARBAGE = 1e30
 +
 +
 +def ceil_align(x: int, a: int) -> int:
@@ -661,16 +659,17 @@ index 0000000000000000000000000000000000000000..393f4c26c35d7469a1423515f7cc2795
 +
 +class FakeDeepGEMM:
 +    """``fp8_fp4_mqa_logits`` on CPU: DeepGEMM's allocation (rows aligned to the
-+    row group, stride to 256 fp32), the row's window scored, garbage past it.
-+    Records each allocation and checks the previous tile is already freed."""
++    row group, stride to 256 fp32), the row's window scored, garbage past it."""
 +
 +    def __init__(self):
 +        self.allocations = []  # (rows, bytes)
 +        self.max_live_tiles = 0
 +        self._live = []
 +
-+    def fp8_fp4_mqa_logits(self, q, kv, weights, ks, ke, clean_logits, max_k):
-+        assert not clean_logits
++    def fp8_fp4_mqa_logits(
++        self, q, kv, weights, ks, ke, clean_logits, max_k, logits_dtype=torch.float32
++    ):
++        assert not clean_logits and logits_dtype == torch.float32
 +        rows = q[0].shape[0]
 +        stride = ceil_align(ceil_align(max_k, 128), 256)
 +        buffer = torch.full((ceil_align(rows, ROW_ALIGN), stride), GARBAGE)
@@ -734,7 +733,6 @@ index 0000000000000000000000000000000000000000..393f4c26c35d7469a1423515f7cc2795
 +        weights=weights,
 +    )
 +    kv = (k, torch.zeros(columns, dtype=torch.int32))
-+    # The untiled reference: each row's request-relative scores, -inf past its length.
 +    width = max([n for _, n in request_lengths], default=0)
 +    clean = torch.full((rows, width), -torch.inf)
 +    full = exact_scores(q, weights, k)
@@ -752,9 +750,7 @@ index 0000000000000000000000000000000000000000..393f4c26c35d7469a1423515f7cc2795
 +
 +
 +def reference_publish(data, clean):
-+    """The original publish: the candidate blocks of each request's rows over
-+    their unaligned ``[:, :context]`` scores, which select_candidate_block_ids
-+    pads with -inf in a copy, and each row's plain top-k."""
++    """Untiled reference with pad-based block selection."""
 +    rows = data.num_rows
 +    width = min(TOPK_BLOCKS, -(-max(data.lens_per_request, default=0) // BLOCK))
 +    blocks = torch.full((rows, width), -1, dtype=torch.int32)
@@ -817,54 +813,22 @@ index 0000000000000000000000000000000000000000..393f4c26c35d7469a1423515f7cc2795
 +                            scratch_tile_bytes=fixed,
 +                        )
 +                        row_bytes = mqa_logits_row_bytes(width) + scratch
-+                        # DeepGEMM allocates whole row groups
 +                        if ceil_align(rows, ROW_ALIGN) * row_bytes + fixed <= budget:
 +                            self.assertEqual(n, rows)
 +                            continue
 +                        self.assertEqual(n % ROW_ALIGN, 0)
 +                        self.assertGreaterEqual(n, ROW_ALIGN)
-+                        # the largest whole-group tile within the budget ...
 +                        self.assertGreater((n + ROW_ALIGN) * row_bytes + fixed, budget)
 +                        if n > ROW_ALIGN:
 +                            self.assertLess(n, rows)
 +                            self.assertLessEqual(n * row_bytes + fixed, budget)
-+                        # ... or one row group, the floor, when none fits
-+
-+    def test_tile_bytes_do_not_grow_with_context(self):
-+        budget = 256 << 20
-+        for rows in (512, 8192):
-+            sizes = []
-+            for width in (1 << 12, 1 << 15, 1 << 18, 485_123, 1 << 20):
-+                n = min(
-+                    rows,
-+                    flat_index_logits_rows_per_tile(
-+                        rows, width, heads=HEADS, budget_bytes=budget
-+                    ),
-+                )
-+                sizes.append(ceil_align(n, ROW_ALIGN) * mqa_logits_row_bytes(width))
-+            self.assertLessEqual(max(sizes), budget)
-+
-+    def test_scratch_shrinks_the_tile(self):
-+        plain = flat_index_logits_rows_per_tile(
-+            8192, 485_123, heads=HEADS, budget_bytes=2 << 30
-+        )
-+        with_scratch = flat_index_logits_rows_per_tile(
-+            8192,
-+            485_123,
-+            heads=HEADS,
-+            budget_bytes=2 << 30,
-+            scratch_row_bytes=dense_blocks._publish_scratch_bytes(485_128, BLOCK, 2048)[
-+                0
-+            ],
-+        )
-+        self.assertLess(with_scratch, plain)
 +
 +
 +class TestScoreTiles(CustomTestCase):
 +    def test_tiles_cover_rows_once_with_identical_logits(self):
 +        data, kv, clean = make_case(CASES[0], ratio=1)
 +        fake = FakeDeepGEMM()
-+        width = ceil_align(max(data.lens_per_request), 4)
++        width = ceil_align(max(data.lens_per_request), FLAT_LOGITS_WIDTH_ALIGN)
 +        row_bytes = mqa_logits_row_bytes(width)
 +        with patch.dict(sys.modules, {"deep_gemm": fake.module()}):
 +            for groups in (1, 2, 3, 100):
@@ -872,7 +836,7 @@ index 0000000000000000000000000000000000000000..393f4c26c35d7469a1423515f7cc2795
 +                    scoring, "_DEEP_GEMM_SCORE_BUDGET_BYTES", groups * 4 * row_bytes
 +                ):
 +                    covered = []
-+                    for tile, logits in scoring.score_tiles(data, kv, width_align=4):
++                    for tile, logits in scoring.score_tiles(data, kv):
 +                        self.assertEqual(tile.start % ROW_ALIGN, 0)
 +                        covered.extend(range(tile.start, tile.stop))
 +                        n = clean.shape[1]
@@ -889,7 +853,7 @@ index 0000000000000000000000000000000000000000..393f4c26c35d7469a1423515f7cc2795
 +
 +    def test_forward_budget_lowers_but_never_raises_the_cap(self):
 +        data, kv, _ = make_case(CASES[0], ratio=1)
-+        width = ceil_align(max(data.lens_per_request), 4)
++        width = ceil_align(max(data.lens_per_request), FLAT_LOGITS_WIDTH_ALIGN)
 +        group = ROW_ALIGN * mqa_logits_row_bytes(width)
 +        for cap_groups, forward_groups, expected_rows in (
 +            (100, None, data.num_rows),
@@ -898,12 +862,8 @@ index 0000000000000000000000000000000000000000..393f4c26c35d7469a1423515f7cc2795
 +        ):
 +            with self.subTest(cap=cap_groups, forward=forward_groups):
 +                fake = FakeDeepGEMM()
-+                budget_data = scoring.DeepGEMMPrefillData(
-+                    **{
-+                        f: getattr(data, f)
-+                        for f in data.__struct_fields__
-+                        if f != "score_budget_bytes"
-+                    },
++                budget_data = msgspec.structs.replace(
++                    data,
 +                    score_budget_bytes=(
 +                        None if forward_groups is None else forward_groups * group
 +                    ),
@@ -914,15 +874,12 @@ index 0000000000000000000000000000000000000000..393f4c26c35d7469a1423515f7cc2795
 +                        scoring, "_DEEP_GEMM_SCORE_BUDGET_BYTES", cap_groups * group
 +                    ),
 +                ):
-+                    for _ in scoring.score_tiles(budget_data, kv, width_align=4):
++                    for _ in scoring.score_tiles(budget_data, kv):
 +                        pass
 +                self.assertEqual(fake.allocations[0][0], expected_rows)
 +
 +
 +class TestSelectionIgnoresTiling(CustomTestCase):
-+    """Tiling moves only row boundaries: every selection equals the untiled
-+    reference, at every budget down to one row group per tile."""
-+
 +    def run_all(self, data, kv):
 +        selected, blocks = dense_blocks._publish_prefill_blocks(
 +            data=data, kv=kv, topk=TOPK, topk_blocks=TOPK_BLOCKS, block_size=BLOCK
@@ -945,7 +902,9 @@ index 0000000000000000000000000000000000000000..393f4c26c35d7469a1423515f7cc2795
 +                    ref_selected - data.request_starts[:, None],
 +                    -1,
 +                )
-+                width = ceil_align(max(data.lens_per_request, default=0), 8)
++                width = ceil_align(
++                    max(data.lens_per_request, default=0), FLAT_LOGITS_WIDTH_ALIGN
++                )
 +                group = ROW_ALIGN * mqa_logits_row_bytes(width)
 +                for budget in (1, group, 2 * group, 3 * group, 1 << 40):
 +                    with self.subTest(case=case, ratio=ratio, budget=budget):
@@ -966,13 +925,12 @@ index 0000000000000000000000000000000000000000..393f4c26c35d7469a1423515f7cc2795
 +                        self.assertTrue(torch.equal(blocks, ref_blocks))
 +                        self.assertTrue(torch.equal(consumed, ref_consumed))
 +                        self.assertTrue(torch.equal(local, ref_local))
-+                        # a tile is freed before the next one is scored
 +                        if fake.allocations:
 +                            self.assertEqual(fake.max_live_tiles, 1)
 +
 +    def test_tiles_with_scratch_stay_within_the_budget(self):
 +        data, kv, _ = make_case(CASES[0], ratio=1)
-+        width = ceil_align(max(data.lens_per_request), 8)
++        width = ceil_align(max(data.lens_per_request), FLAT_LOGITS_WIDTH_ALIGN)
 +        scratch, fixed = dense_blocks._publish_scratch_bytes(width, BLOCK, TOPK_BLOCKS)
 +        budget = 3 * ROW_ALIGN * (mqa_logits_row_bytes(width) + scratch) + fixed
 +        fake = FakeDeepGEMM()
@@ -987,7 +945,6 @@ index 0000000000000000000000000000000000000000..393f4c26c35d7469a1423515f7cc2795
 +                data=data, kv=kv, topk=TOPK, topk_blocks=TOPK_BLOCKS, block_size=BLOCK
 +            )
 +        self.assertGreater(len(fake.allocations), 1)
-+        # the budget fits exactly three row groups with the tile's scratch
 +        self.assertEqual(fake.allocations[0][0], 3 * ROW_ALIGN)
 +        for rows, nbytes in fake.allocations:
 +            self.assertLessEqual(nbytes + rows * scratch + fixed, budget)
@@ -996,20 +953,21 @@ index 0000000000000000000000000000000000000000..393f4c26c35d7469a1423515f7cc2795
 +class TestSparseTableTileLifetime(CustomTestCase):
 +    def test_publish_frees_each_tile_and_its_keys(self):
 +        data, kv, _ = make_case(CASES[0], ratio=1)
-+        width = ceil_align(max(data.lens_per_request), 8)
++        width = ceil_align(max(data.lens_per_request), FLAT_LOGITS_WIDTH_ALIGN)
 +        fake = FakeDeepGEMM()
 +        keys_alive = []
++        key_bytes = []
 +        logits_fn = fake.fp8_fp4_mqa_logits
 +
-+        def checked_logits(*args):
-+            # the previous tile's block keys are freed before the next tile
++        def checked_logits(*args, **kwargs):
 +            self.assertTrue(all(r() is None for r in keys_alive))
-+            return logits_fn(*args)
++            return logits_fn(*args, **kwargs)
 +
 +        fake.fp8_fp4_mqa_logits = checked_logits
 +
 +        def fake_amax8(logits, lens, *, out):
 +            keys_alive.append(weakref.ref(out))
++            key_bytes.append(out.untyped_storage().nbytes())
 +            return out.zero_()
 +
 +        budget = (
@@ -1022,6 +980,9 @@ index 0000000000000000000000000000000000000000..393f4c26c35d7469a1423515f7cc2795
 +            patch.object(sparse_table, "amax8_varlen", fake_amax8),
 +            patch.object(
 +                sparse_table, "topk_transform_ragged_v2", fake_topk_transform_ragged
++            ),
++            patch.object(
++                dsv4_ops, "topk_transform_ragged_v2", fake_topk_transform_ragged
 +            ),
 +            patch.object(
 +                sparse_table,
@@ -1042,10 +1003,21 @@ index 0000000000000000000000000000000000000000..393f4c26c35d7469a1423515f7cc2795
 +            )
 +        self.assertGreater(len(fake.allocations), 1)
 +        self.assertEqual(fake.max_live_tiles, 1)
-+        for rows, nbytes in fake.allocations:
-+            self.assertLessEqual(
-+                nbytes + rows * sparse_table._block_keys_row_bytes(width), budget
-+            )
++        self.assertEqual(len(key_bytes), len(fake.allocations))
++        for (_, nbytes), keys in zip(fake.allocations, key_bytes):
++            self.assertLessEqual(nbytes + keys, budget)
++
++
++CAPTURE_STATES = {
++    "model_capture": lambda: patch.object(capture_mode, "is_capture_mode", True),
++    "breakable": enable_breakable_cuda_graph,
++    "stream": lambda: patch.object(
++        torch.cuda, "is_current_stream_capturing", lambda: True
++    ),
++    "tc_piecewise": lambda: patch.object(
++        scoring, "is_in_tc_piecewise_cuda_graph", lambda: True
++    ),
++}
 +
 +
 +class TestPrefillScoreBudget(CustomTestCase):
@@ -1056,25 +1028,37 @@ index 0000000000000000000000000000000000000000..393f4c26c35d7469a1423515f7cc2795
 +        *,
 +        rows=8192,
 +        seq_len=485_000,
-+        capturing=False,
++        capturing=None,
 +        free=1 << 30,
 +        static=3 << 30,
 +    ):
 +        def no_query(**_):
 +            raise AssertionError("the free-memory budget was queried")
 +
-+        with (
-+            patch.object(scoring, "get_is_capture_mode", lambda: capturing),
-+            patch.object(scoring, "is_in_breakable_cuda_graph", lambda: False),
-+            patch.object(scoring, "is_in_tc_piecewise_cuda_graph", lambda: False),
-+            patch.object(torch.cuda, "is_current_stream_capturing", lambda: False),
-+            patch.object(
-+                scoring,
-+                "mqa_logits_budget_bytes",
-+                no_query if capturing else (lambda **_: free),
-+            ),
-+            patch.object(scoring, "mqa_logits_static_budget_bytes", lambda **_: static),
-+        ):
++        with contextlib.ExitStack() as stack:
++            stack.enter_context(
++                patch.object(torch.cuda, "is_current_stream_capturing", lambda: False)
++            )
++            if capturing:
++                stack.enter_context(CAPTURE_STATES[capturing]())
++            stack.enter_context(
++                patch.object(
++                    scoring,
++                    "mqa_logits_budget_bytes",
++                    (
++                        no_query
++                        if capturing
++                        else lambda *, device_index, allow_sync: (
++                            free if allow_sync else static
++                        )
++                    ),
++                )
++            )
++            stack.enter_context(
++                patch.object(
++                    scoring, "mqa_logits_static_budget_bytes", lambda **_: static
++                )
++            )
 +            return scoring.prefill_score_budget_bytes(
 +                num_rows=rows, max_seq_len=seq_len, device=self.device
 +            )
@@ -1084,8 +1068,10 @@ index 0000000000000000000000000000000000000000..393f4c26c35d7469a1423515f7cc2795
 +        self.assertEqual(self.budget(free=8 << 30), 2 << 30)
 +
 +    def test_capture_uses_the_static_budget_capped(self):
-+        self.assertEqual(self.budget(capturing=True), 2 << 30)
-+        self.assertEqual(self.budget(capturing=True, static=1 << 30), 1 << 30)
++        for name in CAPTURE_STATES:
++            with self.subTest(capturing=name):
++                self.assertEqual(self.budget(capturing=name), 2 << 30)
++                self.assertEqual(self.budget(capturing=name, static=1 << 30), 1 << 30)
 +
 +    def test_small_forward_skips_the_query(self):
 +        with patch.object(
@@ -1116,9 +1102,6 @@ index 0000000000000000000000000000000000000000..393f4c26c35d7469a1423515f7cc2795
 +
 +
 +class TestBackendReadsTheBudgetOncePerForward(CustomTestCase):
-+    """The eager prefill indexer layers of one forward share a single
-+    free-memory read, which the DeepGEMM scorers alone use."""
-+
 +    def make_inputs(self, backend, rows=8192):
 +        layer = types.SimpleNamespace(
 +            indexer=None, layer_id=0, compress_ratio=1, freqs_cis=None
@@ -1156,16 +1139,22 @@ index 0000000000000000000000000000000000000000..393f4c26c35d7469a1423515f7cc2795
 +            self.assertEqual(reads[0]["max_seq_len"], 485_000)
 +            self.assertEqual(first.score_budget_bytes, 123 << 20)
 +            self.assertEqual(second.score_budget_bytes, 123 << 20)
-+            # the late-layer tail takes the forward's budget without a new read
 +            tail = types.SimpleNamespace(
 +                cp_metadata=None,
 +                extend_seq_lens_cpu=[128],
 +                extend_seq_lens=torch.tensor([128]),
++                real_rows_count=None,
 +            )
 +            backend.tail_forward_metadata = fake_metadata(late_layer_tail=tail)
 +            backend.token_to_kv_pool = types.SimpleNamespace(request_window=None)
 +            saved = DeepseekV4AttnBackend.enter_late_layer_tail(
-+                backend, types.SimpleNamespace(attn_cp_metadata=None)
++                backend,
++                types.SimpleNamespace(
++                    attn_cp_metadata=None,
++                    global_num_token_non_padded_cpu=None,
++                    global_num_token_non_padded=None,
++                    num_token_non_padded=None,
++                ),
 +            )
 +            self.assertIs(saved[0].core_attn_metadata.page_table, first.kv_page_table)
 +            self.assertEqual(
@@ -1173,7 +1162,6 @@ index 0000000000000000000000000000000000000000..393f4c26c35d7469a1423515f7cc2795
 +            )
 +            self.make_inputs(backend, rows=128)
 +            self.assertEqual(len(reads), 1)
-+            # a new forward's metadata reads again
 +            backend.forward_metadata = fake_metadata()
 +            self.make_inputs(backend)
 +            self.assertEqual(len(reads), 2)
@@ -1187,12 +1175,34 @@ index 0000000000000000000000000000000000000000..393f4c26c35d7469a1423515f7cc2795
 +        ):
 +            self.assertIsNone(self.make_inputs(backend).score_budget_bytes)
 +
++    def test_budget_reaches_the_prefill_data(self):
++        backend = self.make_backend(deep_gemm=True)
++        with patch.object(
++            deepseek_v4_backend, "prefill_score_budget_bytes", lambda **_: 123 << 20
++        ):
++            inputs = self.make_inputs(backend, rows=4)
++        inputs = msgspec.structs.replace(
++            inputs,
++            positions=torch.arange(4, 8),
++            seq_lens_cpu=[8],
++            rows_per_request=[4],
++            rows_per_request_device=torch.tensor([4]),
++        )
++        q = (torch.zeros(4, HEADS, 64), torch.zeros(4, HEADS), torch.zeros(4, HEADS))
++        with patch.object(scoring, "_index_q_and_weights", lambda **_: q):
++            data = scoring.get_deep_gemm_prefill_data(
++                inputs, req_to_token=torch.arange(8)[None]
++            )
++        self.assertEqual(data.score_budget_bytes, 123 << 20)
++
 +    def test_graph_replay_copies_clear_the_budget(self):
-+        metadata = fake_metadata()
-+        metadata.low_ratio_score_budget_bytes = 1 << 20
-+        metadata.core_attn_metadata.copy_ = lambda other: None
-+        metadata.copy_(fake_metadata())
-+        self.assertIsNone(metadata.low_ratio_score_budget_bytes)
++        for method in ("copy_", "refresh_for_breakable_cuda_graph_replay_"):
++            with self.subTest(method=method):
++                metadata = fake_metadata()
++                metadata.low_ratio_score_budget_bytes = 1 << 20
++                setattr(metadata.core_attn_metadata, method, lambda other: None)
++                getattr(metadata, method)(fake_metadata())
++                self.assertIsNone(metadata.low_ratio_score_budget_bytes)
 +
 +
 +if __name__ == "__main__":

@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/managers/overlap_utils.py b/python/sglang/srt/managers/overlap_utils.py
-index e43920cd412c5ff65b9b033bb6fb074b02e89c42..d6ee26b228307fa98bbf91d337f437326ac3a461 100644
+index 41d97577dd..fc6f840153 100644
 --- a/python/sglang/srt/managers/overlap_utils.py
 +++ b/python/sglang/srt/managers/overlap_utils.py
-@@ -199,6 +199,12 @@ class ConfidenceRelay(msgspec.Struct):
+@@ -206,6 +206,12 @@ class ConfidenceRelay(msgspec.Struct):
      def scatter(self, indices: torch.Tensor, confidence: torch.Tensor) -> None:
          if not self.initialized:
              self._lazy_init(confidence)
@@ -15,7 +15,7 @@ index e43920cd412c5ff65b9b033bb6fb074b02e89c42..d6ee26b228307fa98bbf91d337f43732
          self.confidence_buf[indices] = confidence.to(self.confidence_buf.dtype)
  
      def issue_ring_copy(self, *, stream, publish_ready) -> None:
-@@ -235,8 +241,9 @@ class ConfidenceRelay(msgspec.Struct):
+@@ -242,8 +248,9 @@ class ConfidenceRelay(msgspec.Struct):
          if self.ring_pos < CONFIDENCE_RELAY_RING_LAG:
              return None
          slot = (self.ring_pos - CONFIDENCE_RELAY_RING_LAG) % CONFIDENCE_RELAY_RING_DEPTH
@@ -29,7 +29,7 @@ index e43920cd412c5ff65b9b033bb6fb074b02e89c42..d6ee26b228307fa98bbf91d337f43732
          return ResolvedConfidence(
 diff --git a/test/registered/spec/dspark/test_dspark_confidence_relay.py b/test/registered/spec/dspark/test_dspark_confidence_relay.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..df7a76cc828b9b0627ea2e808df4c36ed25a55da
+index 0000000000..df7a76cc82
 --- /dev/null
 +++ b/test/registered/spec/dspark/test_dspark_confidence_relay.py
 @@ -0,0 +1,113 @@

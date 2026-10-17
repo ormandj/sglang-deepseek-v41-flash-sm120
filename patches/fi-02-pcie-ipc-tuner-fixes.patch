@@ -1,0 +1,497 @@
+diff --git a/flashinfer/comm/pcie_ipc_policy.py b/flashinfer/comm/pcie_ipc_policy.py
+index 41b5e46ec..d3b35728b 100644
+--- a/flashinfer/comm/pcie_ipc_policy.py
++++ b/flashinfer/comm/pcie_ipc_policy.py
+@@ -191,7 +191,8 @@ def _is_launchable(
+         # pcie_ipc_ce_ring.cuh says why, and how far that has been established.
+         if world_size == 2:
+             return False
+-        if not 0 < config.blocks <= CE_MAX_PIECES:
++        # The launcher checks blocks <= max_blocks for every variant.
++        if not 0 < config.blocks <= min(CE_MAX_PIECES, max_blocks):
+             return False
+         # The ring is bound by the fabric rather than by the SM, so the add
+         # kernel's geometry is not worth a search dimension. The SM variants
+diff --git a/flashinfer/comm/pcie_ipc_tuning.py b/flashinfer/comm/pcie_ipc_tuning.py
+index 0a6de862f..d2c462a35 100644
+--- a/flashinfer/comm/pcie_ipc_tuning.py
++++ b/flashinfer/comm/pcie_ipc_tuning.py
+@@ -41,7 +41,7 @@ tuned answer cannot be used.
+ import os
+ import warnings
+ from functools import lru_cache
+-from typing import Dict, List, Optional, Sequence, Tuple
++from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+ 
+ import torch
+ import torch.distributed as dist
+@@ -410,6 +410,16 @@ TUNE_SURVIVORS = 48
+ TUNE_RANK_ROUNDS = 3
+ 
+ 
++def _round_order(n: int, round_index: int) -> Iterable[int]:
++    """Candidate indices for one ranking round; odd rounds run backward.
++
++    In one fixed order the first copy-engine candidate always followed the last
++    SM candidate, so every sample carried that switch and the minimum kept it.
++    Depends only on its arguments, so every rank launches in the same order.
++    """
++    return reversed(range(n)) if round_index % 2 else range(n)
++
++
+ def reduce_timings(times: "torch.Tensor", group) -> "torch.Tensor":
+     """Make every rank rank the candidates identically.
+ 
+@@ -612,9 +622,9 @@ class PcieIpcAllReduceRunner(TunableRunner):
+         Cardinality is the hazard. Every rank must issue exactly these launches
+         in exactly this order; an early return between the first launch and the
+         verdict reduction leaves peers spinning inside a kernel this rank never
+-        issued, with no timeout. Hence: barrier first, every buffer allocated
+-        before the loop, and a loop body that does not allocate, synchronise
+-        with the host, or branch.
++        issued, with no timeout. Hence: a barrier before the first collective
++        launch, every persistent buffer allocated before it, and nothing between
++        it and the reductions that branches on anything rank-local.
+         """
+         inp = inputs[0]
+         ws = self._ws
+@@ -663,7 +673,10 @@ class PcieIpcAllReduceRunner(TunableRunner):
+         # loads its module, which shows up as an order-of-magnitude outlier and
+         # would demote whichever candidate happened to be that variant's first.
+         # Per variant, not per candidate: block and thread counts do not pull in
+-        # a new module.
++        # a new module. These are collective launches already, so the barrier
++        # goes in front of them: a rank that failed before this point leaves its
++        # peers waiting in NCCL, which can be aborted, rather than in a kernel.
++        dist.barrier(group=ws.group)
+         seen_variants = set()
+         for config in configs:
+             if config.variant not in seen_variants:
+@@ -672,7 +685,8 @@ class PcieIpcAllReduceRunner(TunableRunner):
+ 
+         dist.barrier(group=ws.group)
+         for r in range(TUNE_RANK_ROUNDS):
+-            for i, config in enumerate(configs):
++            for i in _round_order(len(configs), r):
++                config = configs[i]
+                 # A kernel that leaves part of the payload unwritten would
+                 # otherwise show the previous candidate's correct result.
+                 out.fill_(float("nan"))
+diff --git a/scripts/task_test_single_node_comm_kernels.sh b/scripts/task_test_single_node_comm_kernels.sh
+index fbdad0398..2b140aec1 100644
+--- a/scripts/task_test_single_node_comm_kernels.sh
++++ b/scripts/task_test_single_node_comm_kernels.sh
+@@ -44,6 +44,8 @@ if [ "$pcie_ipc_gpus" -lt 2 ]; then
+ else
+   echo "pcie ipc collectives: $pcie_ipc_gpus GPUs visible (8 needed for full coverage)"
+   pytest -s tests/comm/test_pcie_ipc_all_reduce.py
++  pytest -s tests/comm/test_pcie_ipc_ce_ring.py
++  pytest -s tests/comm/test_pcie_ipc_compatibility.py
+   if [ -n "${FLASHINFER_TEST_PCIE_IPC_ORDERED_4PLUS4:-}" ]; then
+     echo "Requiring ordered 4+4 AllGather/ReduceScatter coverage for this lane"
+   fi
+diff --git a/tests/comm/test_pcie_ipc_all_gather.py b/tests/comm/test_pcie_ipc_all_gather.py
+index 41dc17b74..9261bb4de 100644
+--- a/tests/comm/test_pcie_ipc_all_gather.py
++++ b/tests/comm/test_pcie_ipc_all_gather.py
+@@ -30,6 +30,7 @@ from tests.comm.test_pcie_ipc_all_reduce import (
+     multi_process_parallel,
+ )
+ 
++pytestmark = pytest.mark.node_exclusive
+ 
+ _DTYPES = (torch.bfloat16, torch.float16, torch.float32)
+ 
+diff --git a/tests/comm/test_pcie_ipc_all_reduce.py b/tests/comm/test_pcie_ipc_all_reduce.py
+index cec0ededa..d6d975bb6 100644
+--- a/tests/comm/test_pcie_ipc_all_reduce.py
++++ b/tests/comm/test_pcie_ipc_all_reduce.py
+@@ -29,6 +29,8 @@ import flashinfer.comm as comm
+ from flashinfer.comm.pcie_ipc_policy import IpcLaunchConfig, IpcVariant
+ from flashinfer.comm.pcie_ipc_topology import PCIE_IPC_PROFILES
+ 
++pytestmark = pytest.mark.node_exclusive
++
+ # (world_size, hidden, batch, blocks, threads, variant)
+ #
+ # Between them these cases select every kernel the header can dispatch to.
+@@ -1067,6 +1069,76 @@ def test_pcie_ipc_tune_gate_excludes_wrong_candidates(
+     )
+ 
+ 
++def _small_max_blocks_tune_worker(
++    world_size: int, rank: int, port: int, tmpdir: str, max_blocks: int
++) -> None:
++    """A workspace with fewer blocks than the copy-engine depths still tunes."""
++    ws = None
++    group = None
++    try:
++        _init_process_group(world_size, rank, port)
++        group = dist.group.WORLD
++        device = torch.device(f"cuda:{rank}")
++        ws = comm.PcieIpcAllReduceWorkspace(
++            group=group,
++            max_numel=_TUNE_HIDDEN * 2,
++            dtype=torch.bfloat16,
++            max_blocks=max_blocks,
++            profile="rootcplx",
++            tune_batches=(1, 2),
++        )
++        launched = []
++        original = ws._launch
++
++        def recording(inp, out, config, *args, **kwargs):
++            launched.append(config)
++            return original(inp, out, config, *args, **kwargs)
++
++        ws._launch = recording
++        try:
++            ws.tune([_TUNE_HIDDEN], cache=_tune_cache_path(tmpdir), warmup=2, repeat=5)
++        finally:
++            ws._launch = original
++        # Not vacuous: copy-engine candidates are still searched.
++        copy_engine = (IpcVariant.COPY_ENGINE_RING, IpcVariant.COPY_ENGINE_ISLAND)
++        assert any(c.variant in copy_engine for c in launched), set(launched)
++        assert all(c.blocks <= max_blocks for c in launched), {
++            c for c in launched if c.blocks > max_blocks
++        }
++        for batch in (1, 2):
++            inp = _tune_input(batch, device)
++            config = ws.tuned_launch_config(inp)
++            assert config is not None, batch
++            ref = inp.clone()
++            dist.all_reduce(ref, group=group)
++            wrong = torch.tensor(
++                [int((ws.all_reduce(inp) != ref).sum().item())], device=device
++            )
++            dist.all_reduce(wrong, op=dist.ReduceOp.MAX, group=group)
++            assert int(wrong.item()) == 0, (batch, config)
++        dist.barrier(group=group)
++    finally:
++        if ws is not None:
++            ws.destroy()
++        if group is not None:
++            dist.destroy_process_group(group)
++
++
++# (8, 1) drops ring and island depths 2 and 4; (4, 3) drops depth 4 but keeps 2.
++@pytest.mark.parametrize("world_size,max_blocks", [(4, 3), (8, 1)])
++def test_pcie_ipc_tune_respects_a_small_max_blocks(
++    world_size: int, max_blocks: int, tmp_path
++) -> None:
++    if world_size > torch.cuda.device_count():
++        pytest.skip("not enough GPUs")
++    multi_process_parallel(
++        world_size,
++        _small_max_blocks_tune_worker,
++        (str(tmp_path), max_blocks),
++        timeout_s=600,
++    )
++
++
+ def _untuned_warning_worker(world_size: int, rank: int, port: int, tmpdir: str) -> None:
+     """The untuned warning fires once, and only when the machine is untuned.
+ 
+diff --git a/tests/comm/test_pcie_ipc_ce_ring.py b/tests/comm/test_pcie_ipc_ce_ring.py
+index 71e46a9cc..d51d2992b 100644
+--- a/tests/comm/test_pcie_ipc_ce_ring.py
++++ b/tests/comm/test_pcie_ipc_ce_ring.py
+@@ -22,6 +22,8 @@ from tests.comm.test_pcie_ipc_all_reduce import (
+     multi_process_parallel,
+ )
+ 
++pytestmark = pytest.mark.node_exclusive
++
+ _HIDDEN = 6144
+ _BATCH = 64
+ 
+diff --git a/tests/comm/test_pcie_ipc_compatibility.py b/tests/comm/test_pcie_ipc_compatibility.py
+index 436694a59..6f4bdd781 100644
+--- a/tests/comm/test_pcie_ipc_compatibility.py
++++ b/tests/comm/test_pcie_ipc_compatibility.py
+@@ -24,6 +24,8 @@ from tests.comm.test_pcie_ipc_all_reduce import (
+     multi_process_parallel,
+ )
+ 
++pytestmark = pytest.mark.node_exclusive
++
+ # At TP8 the large payload gives every shard two 512-KiB pieces. The smaller
+ # shape also exercises the production clamp from a requested P2 to actual P1.
+ _NUMELS = (128 * 1024, 4 * 1024 * 1024)
+diff --git a/tests/comm/test_pcie_ipc_cross_island_race.py b/tests/comm/test_pcie_ipc_cross_island_race.py
+index e43c3edaf..8f2324aff 100644
+--- a/tests/comm/test_pcie_ipc_cross_island_race.py
++++ b/tests/comm/test_pcie_ipc_cross_island_race.py
+@@ -45,10 +45,13 @@ from tests.comm.test_pcie_ipc_all_reduce import (
+     multi_process_parallel,
+ )
+ 
+-pytestmark = pytest.mark.skipif(
+-    os.environ.get("FLASHINFER_TEST_PCIE_IPC_RACE") != "1",
+-    reason="opt-in: needs 8 GPUs and builds two extra JIT modules",
+-)
++pytestmark = [
++    pytest.mark.node_exclusive,
++    pytest.mark.skipif(
++        os.environ.get("FLASHINFER_TEST_PCIE_IPC_RACE") != "1",
++        reason="opt-in: needs 8 GPUs and builds two extra JIT modules",
++    ),
++]
+ 
+ _HIDDEN = 6144
+ # 100 us reproduced at batch 16 (one collective is ~63 us there); 200 us leaves
+diff --git a/tests/comm/test_pcie_ipc_policy.py b/tests/comm/test_pcie_ipc_policy.py
+index 994bb8d1c..fa3427ce3 100644
+--- a/tests/comm/test_pcie_ipc_policy.py
++++ b/tests/comm/test_pcie_ipc_policy.py
+@@ -41,6 +41,8 @@ import pytest
+ 
+ from flashinfer.comm import pcie_ipc_tuning as tuning
+ from flashinfer.comm.pcie_ipc_policy import (
++    CE_MAX_PIECES,
++    CE_THREADS,
+     MAX_BLOCKS,
+     IpcLaunchConfig,
+     IpcVariant,
+@@ -261,6 +263,84 @@ def test_a_small_max_blocks_is_never_exceeded(max_blocks: int) -> None:
+         assert admitted, f"ws={world_size} max_blocks={max_blocks} checks nothing"
+ 
+ 
++# The variants whose `blocks` is a ring depth rather than a grid size.
++_CE_VARIANTS = (
++    IpcVariant.COPY_ENGINE_RING,
++    IpcVariant.COPY_ENGINE_ISLAND,
++    IpcVariant.COPY_ENGINE_RING_MEMOP,
++)
++
++
++def _ce_variants(world_size):
++    # The island schedule is a 4+4 decomposition; see _is_launchable.
++    return [
++        v
++        for v in _CE_VARIANTS
++        if v is not IpcVariant.COPY_ENGINE_ISLAND or world_size == 8
++    ]
++
++
++@pytest.mark.parametrize("max_blocks", (1, 2, 3))
++def test_a_small_max_blocks_bounds_the_copy_engine_depth_too(max_blocks: int) -> None:
++    """Copy-engine depths past ``max_blocks`` are neither admitted nor offered.
++
++    The launcher checks ``blocks <= max_blocks`` for every variant, and the seed
++    never picks a copy-engine variant, so the test above cannot see this.
++    """
++    for world_size in (4, 8):
++        for variant in _ce_variants(world_size):
++            for depth in range(max_blocks + 1, CE_MAX_PIECES + 1):
++                config = IpcLaunchConfig(depth, CE_THREADS, variant)
++                assert not _is_launchable(world_size, config, max_blocks), config
++
++        offered = 0
++        for numel in (None, *_NUMELS):
++            for memop_supported in (False, True):
++                tactics = tuning.candidate_tactics(
++                    world_size,
++                    max_blocks,
++                    numel=numel,
++                    elem_size=_ELEM_SIZE,
++                    memop_supported=memop_supported,
++                )
++                for tactic in tactics:
++                    config = tuning.tactic_to_config(tactic)
++                    if config.variant in _CE_VARIANTS:
++                        offered += 1
++                        assert config.blocks <= max_blocks, (world_size, numel, config)
++        # Not vacuous: depth 1 fits every budget.
++        assert offered, f"ws={world_size} max_blocks={max_blocks} checks nothing"
++
++
++@pytest.mark.parametrize("max_blocks", (1, 2, 3, CE_MAX_PIECES, MAX_BLOCKS))
++def test_a_copy_engine_depth_within_max_blocks_is_still_offered(
++    max_blocks: int,
++) -> None:
++    """The budget removes only the depths the launcher refuses."""
++    bound = min(CE_MAX_PIECES, max_blocks)
++    ring = {b for b in tuning.TUNE_BLOCKS if b <= bound}
++    for world_size in (4, 8):
++        for variant in _ce_variants(world_size):
++            # Memop runs at depth 1 only; deeper falls back to the plain ring.
++            if variant is IpcVariant.COPY_ENGINE_RING_MEMOP:
++                continue
++            for depth in range(1, bound + 1):
++                config = IpcLaunchConfig(depth, CE_THREADS, variant)
++                assert _is_launchable(world_size, config, max_blocks), config
++
++        expected = {
++            IpcVariant.COPY_ENGINE_RING: ring,
++            # A candidate-list rule, whatever the budget.
++            IpcVariant.COPY_ENGINE_RING_MEMOP: {1},
++        }
++        if world_size == 8:
++            expected[IpcVariant.COPY_ENGINE_ISLAND] = ring
++        tactics = tuning.candidate_tactics(world_size, max_blocks, memop_supported=True)
++        for variant, depths in expected.items():
++            offered = {b for v, b, _ in tactics if v == int(variant)}
++            assert offered == depths, (world_size, variant.name, offered)
++
++
+ def test_every_dispatchable_variant_is_reachable_from_the_tuner() -> None:
+     """A variant the dispatch can launch but nothing can select is invisible.
+ 
+diff --git a/tests/comm/test_pcie_ipc_reduce_scatter.py b/tests/comm/test_pcie_ipc_reduce_scatter.py
+index 6dfbbf089..f6132a96f 100644
+--- a/tests/comm/test_pcie_ipc_reduce_scatter.py
++++ b/tests/comm/test_pcie_ipc_reduce_scatter.py
+@@ -30,6 +30,7 @@ from tests.comm.test_pcie_ipc_all_reduce import (
+     multi_process_parallel,
+ )
+ 
++pytestmark = pytest.mark.node_exclusive
+ 
+ _DTYPES = (torch.bfloat16, torch.float16, torch.float32)
+ _TOLERANCE = {
+diff --git a/tests/comm/test_pcie_ipc_tuning.py b/tests/comm/test_pcie_ipc_tuning.py
+index 95eb98423..fab5dc0cc 100644
+--- a/tests/comm/test_pcie_ipc_tuning.py
++++ b/tests/comm/test_pcie_ipc_tuning.py
+@@ -21,8 +21,10 @@ reduced with the wrong operator. The multi-GPU tests can only observe the
+ consequences, and one of the consequences is a hang.
+ """
+ 
++import ast
+ import inspect
+ import json
++import textwrap
+ from types import SimpleNamespace
+ 
+ import pytest
+@@ -226,6 +228,34 @@ def test_survivor_count_is_a_constant_not_a_threshold() -> None:
+     assert "return [TABLE_TACTIC] + kept" in src
+ 
+ 
++def _calls_in_source_order(fn) -> list[str]:
++    """The callee of every call in ``fn``, in source order."""
++    tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
++    calls = sorted(
++        (node for node in ast.walk(tree) if isinstance(node, ast.Call)),
++        key=lambda node: (node.lineno, node.col_offset),
++    )
++    return [ast.unparse(node.func) for node in calls]
++
++
++def test_the_barrier_precedes_the_first_collective_launch() -> None:
++    """A barrier sits between the allocations and the first collective launch.
++
++    The warm-up spins with no timeout, so a rank that fails before it must leave
++    its peers in NCCL, not in the kernel.
++    """
++    calls = _calls_in_source_order(tuning.PcieIpcAllReduceRunner.get_valid_tactics)
++    first_launch = calls.index("ws._launch")
++    barriers = [i for i, c in enumerate(calls[:first_launch]) if c == "dist.barrier"]
++    assert barriers, f"a collective launch is issued before any barrier: {calls}"
++    allocations = [
++        i
++        for i, c in enumerate(calls[:first_launch])
++        if c in ("inp.clone", "self._output_for", "torch.zeros", "torch.cuda.Event")
++    ]
++    assert allocations and max(allocations) < barriers[-1], calls
++
++
+ def test_timings_are_reduced_with_max(monkeypatch) -> None:
+     """MAX, and reduced at all -- a rank-local ranking is the deadlock above."""
+     seen = {}
+@@ -243,6 +273,85 @@ def test_timings_are_reduced_with_max(monkeypatch) -> None:
+     assert seen["op"] == _FakeDist.ReduceOp.MAX
+ 
+ 
++# The copy-engine plane; every other variant runs on the SM.
++_CE_VARIANTS = (
++    IpcVariant.COPY_ENGINE_RING,
++    IpcVariant.COPY_ENGINE_ISLAND,
++    IpcVariant.COPY_ENGINE_RING_MEMOP,
++)
++
++
++def _on_ce_plane(config) -> bool:
++    return config.variant in _CE_VARIANTS
++
++
++def _stranded(configs, order):
++    """Candidates that every ranking round times right after a plane switch.
++
++    Models get_valid_tactics: one warm-up launch per variant, then the rounds.
++    """
++    warmed = []
++    for config in configs:
++        if all(config.variant != w.variant for w in warmed):
++            warmed.append(config)
++    previous = warmed[-1]
++    escaped = set()
++    for r in range(tuning.TUNE_RANK_ROUNDS):
++        for i in order(len(configs), r):
++            if _on_ce_plane(previous) == _on_ce_plane(configs[i]):
++                escaped.add(i)
++            previous = configs[i]
++    return [c for i, c in enumerate(configs) if i not in escaped]
++
++
++@pytest.mark.parametrize("n", [1, 2, 3, 121])
++def test_each_ranking_round_times_every_candidate_once(n: int) -> None:
++    """Every round times each candidate once, and round 0 runs in list order."""
++    for r in range(tuning.TUNE_RANK_ROUNDS):
++        assert sorted(tuning._round_order(n, r)) == list(range(n)), (n, r)
++    assert list(tuning._round_order(n, 0)) == list(range(n))
++
++
++@pytest.mark.parametrize("world_size", [4, 8])
++@pytest.mark.parametrize("profile", [PROFILE_ROOTCPLX, PROFILE_SWITCHPAIR])
++@pytest.mark.parametrize("memop_supported", [False, True])
++@pytest.mark.parametrize("numel", [64 * 1024, 1024 * 6144, 8192 * 6144])
++def test_no_candidate_is_timed_behind_a_plane_switch_in_every_round(
++    world_size: int, profile: str, memop_supported: bool, numel: int
++) -> None:
++    """Every candidate gets at least one round free of a plane switch."""
++    tactics = tuning.candidate_tactics(
++        world_size, numel=numel, profile=profile, memop_supported=memop_supported
++    )
++    seed = get_pcie_ipc_launch_config(world_size, numel, 2)
++    configs = [seed] + [tuning.tactic_to_config(t) for t in tactics]
++
++    assert _stranded(configs, tuning._round_order) == []
++    # Not vacuous: a fixed order strands the first copy-engine candidate.
++    first_ce = next(c for c in configs if _on_ce_plane(c))
++    assert first_ce in _stranded(configs, lambda n, r: range(n))
++
++
++def test_the_ranking_rounds_take_their_order_from_round_order() -> None:
++    """The order property above is only worth anything if the loop uses it."""
++    src = inspect.getsource(tuning.PcieIpcAllReduceRunner.get_valid_tactics)
++    loops = [
++        node
++        for node in ast.walk(ast.parse(textwrap.dedent(src)))
++        if isinstance(node, ast.For)
++        and isinstance(node.iter, ast.Call)
++        and ast.unparse(node.iter.func) == "_round_order"
++    ]
++    assert len(loops) == 1, "the ranking rounds must iterate _round_order"
++    assert ast.unparse(loops[0].target) == "i", ast.unparse(loops[0].target)
++    calls = {
++        ast.unparse(node.func)
++        for node in ast.walk(loops[0])
++        if isinstance(node, ast.Call)
++    }
++    assert {"ws._launch", "starts[r][i].record", "ends[r][i].record"} <= calls, calls
++
++
+ def test_the_prefill_screen_keeps_every_measured_prefill_winner() -> None:
+     """A screened-out winner is one the tuner can never choose again.
+ 
+@@ -360,6 +469,8 @@ def test_resolve_falls_back_to_the_seed() -> None:
+     assert resolve(seed, (0, 128, 128), 8, 32) is seed
+     # Stale: a variant this world size does not dispatch.
+     assert resolve(seed, (int(IpcVariant.FLAT_STAGED), 1, 128), 4, MAX_BLOCKS) is seed
++    # Stale: a copy-engine depth past the workspace's max_blocks.
++    assert resolve(seed, (int(IpcVariant.COPY_ENGINE_RING), 2, 256), 8, 1) is seed
+     # Usable.
+     assert resolve(seed, (int(IpcVariant.STAGED_RING), 2, 256), 8, MAX_BLOCKS) == (
+         IpcLaunchConfig(2, 256, IpcVariant.STAGED_RING)

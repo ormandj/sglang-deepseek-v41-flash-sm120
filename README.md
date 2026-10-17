@@ -55,46 +55,40 @@ SGLang series, applied in order to the pinned SGLang commit:
 
 | # | Patch | Origin | Change |
 |---|---|---|---|
-| 01 | `01-instanttensor-loader.patch` | [sgl-project/sglang#40453](https://github.com/sgl-project/sglang/pull/40453) | InstantTensor loader (`--load-format instanttensor`) |
-| 02 | `02-instanttensor-host-resident.patch` | [sgl-project/sglang#42919](https://github.com/sgl-project/sglang/pull/42919) | Host-resident weights (Engram tables) stay off the InstantTensor GPU stream |
-| 03 | `03-engram-positioned-reads.patch` | [sgl-project/sglang#42920](https://github.com/sgl-project/sglang/pull/42920), on 02 | Parallel positioned reads fill each rank's host Engram shard |
-| 04 | `04-decoder-swa-window.patch` | [sgl-project/sglang#41303](https://github.com/sgl-project/sglang/pull/41303), rebased | Complete SWA window on prefix hits and short final chunks under decoder bounded replay |
-| 05 | `05-hicache-swa-request-window-gate.patch` | [sgl-project/sglang#42716](https://github.com/sgl-project/sglang/pull/42716) | HiCache host hits under encoder SWA replay with DSpark |
-| 06 | `06-bounded-replay-prompt-logprobs.patch` | [sgl-project/sglang#42719](https://github.com/sgl-project/sglang/pull/42719) | Reject prompt logprobs at admission under decoder bounded replay |
-| 07 | `07-sm12x-candidate-indexer.patch` | [sgl-project/sglang#42371](https://github.com/sgl-project/sglang/pull/42371) | V4.1 candidate indexer on SM12x through the paged decode path |
-| 08 | `08-ragged-capture-layout-per-tier.patch` | [sgl-project/sglang#42709](https://github.com/sgl-project/sglang/pull/42709) | One capture layout per ragged-verify token tier across CUDA graphs |
-| 09 | `09-dsv41-ragged-verify-engram.patch` | [sgl-project/sglang#42718](https://github.com/sgl-project/sglang/pull/42718) | Packed compact-verify tokens mapped to their requests (replaces #40567) |
-| 10 | `10-dspark-forced-budget-verify-all.patch` | [sgl-project/sglang#42711](https://github.com/sgl-project/sglang/pull/42711) | Correct SPS cost tables when profiling without a table |
-| 11 | `11-dspark-folded-fp32-corrected-logits.patch` | [sgl-project/sglang#42710](https://github.com/sgl-project/sglang/pull/42710) | Folded-sampling corrected draft logits stay FP32 (lossless acceptance) |
-| 12 | `12-flash-mla-sm120-split-buffers.patch` | [sgl-project/sglang#42714](https://github.com/sgl-project/sglang/pull/42714) | SM120 FlashMLA page-split buffers allocated once per size (captured graphs never write freed memory) |
-| 13 | `13-dspark-confidence-relay-sync.patch` | [sgl-project/sglang#42717](https://github.com/sgl-project/sglang/pull/42717) | Every TP rank resolves the same relayed DSpark confidence |
-| 14 | `14-forced-uniform-capture-token-key.patch` | [sgl-project/sglang#42713](https://github.com/sgl-project/sglang/pull/42713), rebased, on 08 | Forced-uniform compact captures keyed by token count, with a full-width layout |
-| 15 | `15-dspark-sts-accept-labels.patch` | [sgl-project/sglang#42712](https://github.com/sgl-project/sglang/pull/42712) | STS calibration labels from the actual acceptance, unverified positions masked |
-| 16 | `16-dsv4-fp4-indexer-exp2-free.patch` | [sgl-project/sglang#42861](https://github.com/sgl-project/sglang/pull/42861) | FP4 index keys decoded without `exp2` (bit-identical) |
-| 17 | `17-sm120-mxfp8-skinny.patch` | [sgl-project/sglang#42865](https://github.com/sgl-project/sglang/pull/42865) | Split-K MXFP8 GEMM for tuned decode shapes at up to 16 rows |
-| 18 | `18-mhc-mix-vec-reduce.patch` | [sgl-project/sglang#42864](https://github.com/sgl-project/sglang/pull/42864) | Vectorized mHC reduce; 160 K slices at SM120 decode |
-| 19 | `19-mhc-prefill-stats-overlap.patch` | [sgl-project/sglang#42985](https://github.com/sgl-project/sglang/pull/42985) | Wide prefill overlaps the mHC mix stats with the TP all-reduce again (#42245 removed it; measured prefill regression) |
-| 20 | `20-pcie-ipc-gather.patch` | [sgl-project/sglang#42863](https://github.com/sgl-project/sglang/pull/42863) | TP4 logits and DSpark vocab gathers on FlashInfer PCIe-IPC |
-| 21 | `21-dsv41-request-window-copy.patch` | [sgl-project/sglang#42715](https://github.com/sgl-project/sglang/pull/42715) | Encoder-replay request-window token copies as one kernel per layer copy |
-| 22 | `22-dsv41-request-window-history-check.patch` | [sgl-project/sglang#42921](https://github.com/sgl-project/sglang/pull/42921), on 21 | Request-window history checked once per layout with an async device assert (no prefill host sync) |
-| 23 | `23-bf16-skinny-lm-head.patch` | [sgl-project/sglang#42867](https://github.com/sgl-project/sglang/pull/42867) | Opt-in weight-streaming BF16 LM head GEMM at <= 16 rows (`SGLANG_ENABLE_BF16_SKINNY_LM_HEAD`) |
-| 24 | `24-serving-coverage-warmup.patch` | [sgl-project/sglang#37541](https://github.com/sgl-project/sglang/pull/37541) | `--warmups serving_coverage`: real requests through every serving path, including decodes at every power-of-two batch size up to the running-request limit |
-| 25 | `25-dspark-sps-autotune.patch` | not yet upstream | `--speculative-dspark-sps-autotune off\|auto\|force`: fit the DSpark SPS cost table at startup from real decode steps per batch size and verify tier plus a per-verify-token context term, cached per configuration |
-| 26 | `26-ragged-sub-width-tiers.patch` | [sgl-project/sglang#43011](https://github.com/sgl-project/sglang/pull/43011), rebased (closed upstream) | Opt-in ragged-verify tiers below one request's width (`SGLANG_RAGGED_VERIFY_SUB_WIDTH_TIERS`) |
-| 27 | `27-dspark-verify-pad-last-row.patch` | not yet upstream | No top-p renormalization on compact-verify padding rows |
-| 28 | `28-compact-verify-committed-seq-lens.patch` | not yet upstream | Compact verify passes committed CPU lengths to self-adding backends |
-| 29 | `29-dsv41-candidate-scorer.patch` | not yet upstream | Paged decode consumer layers score only their candidate blocks |
-| 30 | `30-dsv41-wo-a-fp8-weight.patch` | [sgl-project/sglang#43008](https://github.com/sgl-project/sglang/pull/43008), rebased | SM120 decode/verify WO-A reads an exact FP8 weight copy (`SGLANG_DSV41_WO_A_FP8_COPY`, default on) |
-| 31 | `31-encoder-swa-replay-multimodal.patch` | not yet upstream | Encoder SWA bounded replay accepts image requests (replay carries the request's multimodal inputs) |
-| 32 | `32-dsv41-indexer-prefill-tile-budget.patch` | not yet upstream | Prefill indexer score tiles sized from free memory, scratch counted, no padded copy (OOM fix) |
-| 33 | `33-dspark-smoothed-budget-sizing.patch` | not yet upstream | Host verify-budget sizing from a per-request running average of lagged survival (opt-in); request-pool generations unique across a clear |
-| 34 | `34-dsv41-encoding-tool-result-turns.patch` | [sgl-project/sglang#44751](https://github.com/sgl-project/sglang/pull/44751), backported | V4.1 prompt encoding as in DeepSeek-V4.1-Flash-1017: messages holding only tool results keep the current turn's reasoning, list-form tool and user content is accepted, and images follow the sorted tool results |
+| 01 | `01-instanttensor-host-resident.patch` | [sgl-project/sglang#42919](https://github.com/sgl-project/sglang/pull/42919) | Host-resident weights (Engram tables) stay off the InstantTensor GPU stream |
+| 02 | `02-engram-positioned-reads.patch` | [sgl-project/sglang#42920](https://github.com/sgl-project/sglang/pull/42920), on 01 | Parallel positioned reads fill each rank's host Engram shard |
+| 03 | `03-sm12x-candidate-indexer.patch` | [sgl-project/sglang#42371](https://github.com/sgl-project/sglang/pull/42371) | V4.1 candidate indexer on SM12x through the paged decode path |
+| 04 | `04-dsv41-ragged-verify-engram.patch` | [sgl-project/sglang#42718](https://github.com/sgl-project/sglang/pull/42718) | Packed compact-verify tokens mapped to their requests (replaces #40567) |
+| 05 | `05-dspark-forced-budget-verify-all.patch` | [sgl-project/sglang#42711](https://github.com/sgl-project/sglang/pull/42711) | Correct SPS cost tables when profiling without a table |
+| 06 | `06-flash-mla-sm120-split-buffers.patch` | [sgl-project/sglang#42714](https://github.com/sgl-project/sglang/pull/42714) | SM120 FlashMLA page-split buffers allocated once per size (captured graphs never write freed memory) |
+| 07 | `07-dspark-confidence-relay-sync.patch` | [sgl-project/sglang#42717](https://github.com/sgl-project/sglang/pull/42717) | Every TP rank resolves the same relayed DSpark confidence |
+| 08 | `08-forced-uniform-capture-token-key.patch` | [sgl-project/sglang#42713](https://github.com/sgl-project/sglang/pull/42713) | Forced-uniform compact captures keyed by token count, with a full-width layout |
+| 09 | `09-dspark-sts-accept-labels.patch` | [sgl-project/sglang#42712](https://github.com/sgl-project/sglang/pull/42712) | STS calibration labels from the actual acceptance, unverified positions masked |
+| 10 | `10-dsv4-fp4-indexer-exp2-free.patch` | [sgl-project/sglang#42861](https://github.com/sgl-project/sglang/pull/42861) | FP4 index keys decoded without `exp2` (bit-identical) |
+| 11 | `11-sm120-mxfp8-skinny.patch` | [sgl-project/sglang#42865](https://github.com/sgl-project/sglang/pull/42865) | Split-K MXFP8 GEMM for tuned decode shapes at up to 16 rows |
+| 12 | `12-mhc-mix-vec-reduce.patch` | [sgl-project/sglang#42864](https://github.com/sgl-project/sglang/pull/42864), ported | Vectorized mHC reduce; 160 K slices at SM120 decode |
+| 13 | `13-mhc-prefill-stats-overlap.patch` | [sgl-project/sglang#42985](https://github.com/sgl-project/sglang/pull/42985), ported | Wide prefill overlaps the mHC mix stats with the TP all-reduce again (#42245 removed it; measured prefill regression) |
+| 14 | `14-pcie-ipc-gather.patch` | [sgl-project/sglang#42863](https://github.com/sgl-project/sglang/pull/42863) | TP4 logits and DSpark vocab gathers on FlashInfer PCIe-IPC |
+| 15 | `15-dsv41-request-window-history-check.patch` | [sgl-project/sglang#42921](https://github.com/sgl-project/sglang/pull/42921), rebased | Request-window history checked once per layout with an async device assert (no prefill host sync) |
+| 16 | `16-bf16-skinny-lm-head.patch` | [sgl-project/sglang#42867](https://github.com/sgl-project/sglang/pull/42867) | Opt-in weight-streaming BF16 LM head GEMM at <= 16 rows (`SGLANG_ENABLE_BF16_SKINNY_LM_HEAD`) |
+| 17 | `17-serving-coverage-warmup.patch` | [sgl-project/sglang#37541](https://github.com/sgl-project/sglang/pull/37541) | `--warmups serving_coverage`: real requests through every serving path, including decodes at every power-of-two batch size up to the running-request limit |
+| 18 | `18-dspark-sps-autotune.patch` | not yet upstream | `--speculative-dspark-sps-autotune off\|auto\|force`: fit the DSpark SPS cost table at startup from real decode steps per batch size and verify tier plus a per-verify-token context term, cached per configuration |
+| 19 | `19-ragged-sub-width-tiers.patch` | [sgl-project/sglang#43011](https://github.com/sgl-project/sglang/pull/43011), rebased (closed upstream) | Opt-in ragged-verify tiers below one request's width (`SGLANG_RAGGED_VERIFY_SUB_WIDTH_TIERS`) |
+| 20 | `20-dspark-verify-pad-last-row.patch` | [sgl-project/sglang#43374](https://github.com/sgl-project/sglang/pull/43374) | No top-p renormalization on compact-verify padding rows |
+| 21 | `21-compact-verify-committed-seq-lens.patch` | [sgl-project/sglang#43225](https://github.com/sgl-project/sglang/pull/43225) | Compact verify passes committed CPU lengths to self-adding backends |
+| 22 | `22-dsv41-candidate-scorer.patch` | [sgl-project/sglang#43401](https://github.com/sgl-project/sglang/pull/43401) | Paged decode consumer layers score only their candidate blocks |
+| 23 | `23-dsv41-wo-a-fp8-weight.patch` | [sgl-project/sglang#43008](https://github.com/sgl-project/sglang/pull/43008) | SM120 decode/verify WO-A reads an exact FP8 weight copy (`SGLANG_DSV41_WO_A_FP8_COPY`, default on) |
+| 24 | `24-encoder-swa-replay-multimodal.patch` | [sgl-project/sglang#43241](https://github.com/sgl-project/sglang/pull/43241) | Encoder SWA bounded replay accepts image requests (replay carries the request's multimodal inputs) |
+| 25 | `25-dsv41-indexer-prefill-tile-budget.patch` | [sgl-project/sglang#43376](https://github.com/sgl-project/sglang/pull/43376) | Prefill indexer score tiles sized from free memory, scratch counted, no padded copy (OOM fix) |
+| 26 | `26-dspark-smoothed-budget-sizing.patch` | not yet upstream | Host verify-budget sizing from a per-request running average of lagged survival (opt-in) |
+| 27 | `27-dspark-read-accept-no-alias.patch` | [sgl-project/sglang#42812](https://github.com/sgl-project/sglang/pull/42812) | DSpark folded accept results are copied before the next verify replay, so TP ranks commit the same tokens under overlap scheduling with HiCache |
 
 FlashInfer series, applied to the pinned FlashInfer commit:
 
 | # | Patch | Origin | Change |
 |---|---|---|---|
 | fi-01 | `fi-01-sm120-mxfp8-default-tactic.patch` | [flashinfer-ai/flashinfer#6162](https://github.com/flashinfer-ai/flashinfer/pull/6162) | SM120 MXFP8 GEMM calls without a tuned tactic use the swap-AB 128x32 tile |
+| fi-02 | `fi-02-pcie-ipc-tuner-fixes.patch` | [flashinfer-ai/flashinfer#6401](https://github.com/flashinfer-ai/flashinfer/pull/6401) | PCIe-IPC all-reduce tuner: barrier before the collective warm-up, copy-engine ring depth within `max_blocks`, alternating candidate order while ranking |
 
 Triton series, applied to the pinned Triton commit:
 

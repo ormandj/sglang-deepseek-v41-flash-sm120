@@ -1,0 +1,510 @@
+diff --git a/python/sglang/kernels/ops/speculative/__init__.py b/python/sglang/kernels/ops/speculative/__init__.py
+index 8fa7b5c2f2..b17ade6ee7 100644
+--- a/python/sglang/kernels/ops/speculative/__init__.py
++++ b/python/sglang/kernels/ops/speculative/__init__.py
+@@ -26,6 +26,7 @@ _TRITON_KERNELS = [
+     ("topk1", "draft_topk1_postprocess"),
+     ("ragged_verify_kernels", "pad_verify_lens_to_bucket"),
+     ("ragged_verify_kernels", "build_qo_indptr"),
++    ("ragged_verify_kernels", "fill_verify_padding_rows"),
+     ("lilicorr", "lilicorr_topk_lse"),
+     ("lilicorr", "lilicorr_sample_path"),
+     ("reject_sampling", "chain_speculative_sampling_triton"),
+diff --git a/python/sglang/kernels/ops/speculative/dspark/dspark_accept.py b/python/sglang/kernels/ops/speculative/dspark/dspark_accept.py
+index 47dc383aa6..2f3c73f2d7 100644
+--- a/python/sglang/kernels/ops/speculative/dspark/dspark_accept.py
++++ b/python/sglang/kernels/ops/speculative/dspark/dspark_accept.py
+@@ -49,6 +49,7 @@ class AcceptSampling:
+         verify_num_draft_tokens: int,
+         cutoff_verify_lens: Optional[torch.Tensor] = None,
+         block_verification: bool = False,
++        padding_verify_lens: Optional[torch.Tensor] = None,
+     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+         return accept_sampling(
+             candidates=candidates,
+@@ -60,6 +61,7 @@ class AcceptSampling:
+             verify_num_draft_tokens=verify_num_draft_tokens,
+             cutoff_verify_lens=cutoff_verify_lens,
+             block_verification=block_verification,
++            padding_verify_lens=padding_verify_lens,
+         )
+ 
+     @classmethod
+@@ -75,6 +77,7 @@ class AcceptSampling:
+         verify_num_draft_tokens: int,
+         cutoff_verify_lens: Optional[torch.Tensor] = None,
+         block_verification: bool = False,
++        padding_verify_lens: Optional[torch.Tensor] = None,
+     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+         return accept_sampling_triton(
+             candidates=candidates,
+@@ -86,6 +89,7 @@ class AcceptSampling:
+             verify_num_draft_tokens=verify_num_draft_tokens,
+             cutoff_verify_lens=cutoff_verify_lens,
+             block_verification=block_verification,
++            padding_verify_lens=padding_verify_lens,
+         )
+ 
+ 
+@@ -100,6 +104,7 @@ def _accept_sampling_core(
+     verify_num_draft_tokens: int,
+     cutoff_verify_lens: Optional[torch.Tensor],
+     block_verification: bool,
++    padding_verify_lens: Optional[torch.Tensor] = None,
+ ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+     bs = candidates.shape[0]
+     device = candidates.device
+@@ -117,6 +122,7 @@ def _accept_sampling_core(
+             bs=bs,
+             max_top_k=draft_input.max_top_k,
+             uniform_top_k_value=draft_input.uniform_top_k_value,
++            padding_verify_lens=padding_verify_lens,
+         )
+     (
+         retrieve_index,
+@@ -178,6 +184,7 @@ def accept_sampling(
+     verify_num_draft_tokens: int,
+     cutoff_verify_lens: Optional[torch.Tensor] = None,
+     block_verification: bool = False,
++    padding_verify_lens: Optional[torch.Tensor] = None,
+ ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+     bs = candidates.shape[0]
+     device = candidates.device
+@@ -191,6 +198,7 @@ def accept_sampling(
+         verify_num_draft_tokens=verify_num_draft_tokens,
+         cutoff_verify_lens=cutoff_verify_lens,
+         block_verification=block_verification,
++        padding_verify_lens=padding_verify_lens,
+     )
+     row_ids = torch.arange(bs, dtype=torch.long, device=device)
+     accept_pos = accept_index[row_ids, correct_len.to(torch.long)].to(torch.long)
+@@ -248,6 +256,7 @@ def accept_sampling_triton(
+     verify_num_draft_tokens: int,
+     cutoff_verify_lens: Optional[torch.Tensor] = None,
+     block_verification: bool = False,
++    padding_verify_lens: Optional[torch.Tensor] = None,
+ ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+     correct_len, cap_trim_lens, accept_index, predicts = _accept_sampling_core(
+         candidates=candidates,
+@@ -259,6 +268,7 @@ def accept_sampling_triton(
+         verify_num_draft_tokens=verify_num_draft_tokens,
+         cutoff_verify_lens=cutoff_verify_lens,
+         block_verification=block_verification,
++        padding_verify_lens=padding_verify_lens,
+     )
+     bonus = gather_two_level_bonus_triton(
+         accept_index=accept_index, predicts=predicts, correct_len=correct_len
+diff --git a/python/sglang/kernels/ops/speculative/ragged_verify_kernels.py b/python/sglang/kernels/ops/speculative/ragged_verify_kernels.py
+index 68f8ad8986..42a07c5a47 100644
+--- a/python/sglang/kernels/ops/speculative/ragged_verify_kernels.py
++++ b/python/sglang/kernels/ops/speculative/ragged_verify_kernels.py
+@@ -197,3 +197,48 @@ def build_qo_indptr_triton(*, verify_lens: torch.Tensor) -> QoIndptrResult:
+         BLOCK=BLOCK,
+     )
+     return QoIndptrResult(qo_indptr=qo_indptr, extend_start_loc=extend_start_loc)
++
++
++@triton.jit
++def _fill_verify_padding_rows_kernel(
++    probs_ptr,
++    verify_lens_ptr,
++    uniform_ptr,
++    width,
++    vocab,
++    RESTORE: tl.constexpr,
++    BLOCK: tl.constexpr,
++):
++    row = tl.program_id(0).to(tl.int64)
++    req = row // width
++    verify_len = tl.load(verify_lens_ptr + req).to(tl.int64)
++    if row - req * width >= verify_len:
++        offs = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
++        mask = offs < vocab
++        if RESTORE:
++            vals = tl.zeros([BLOCK], dtype=tl.float32) + tl.load(uniform_ptr + row)
++        else:
++            src = req * width + tl.maximum(verify_len - 1, 0)
++            vals = tl.load(probs_ptr + src * vocab + offs, mask=mask)
++        tl.store(probs_ptr + row * vocab + offs, vals, mask=mask)
++
++
++def fill_verify_padding_rows(
++    probs: torch.Tensor,
++    verify_lens: torch.Tensor,
++    uniform: torch.Tensor,
++    width: int,
++    restore: bool,
++) -> None:
++    """Requires contiguous ``[bs * width, vocab]`` probs and per-row ``uniform``."""
++    vocab = probs.shape[1]
++    block = 2048
++    _fill_verify_padding_rows_kernel[(probs.shape[0], triton.cdiv(vocab, block))](
++        probs,
++        verify_lens,
++        uniform,
++        width,
++        vocab,
++        RESTORE=restore,
++        BLOCK=block,
++    )
+diff --git a/python/sglang/srt/speculative/dflash_utils.py b/python/sglang/srt/speculative/dflash_utils.py
+index 4eab4f3df8..63ea76f504 100644
+--- a/python/sglang/srt/speculative/dflash_utils.py
++++ b/python/sglang/srt/speculative/dflash_utils.py
+@@ -11,6 +11,9 @@ import torch.nn.functional as F
+ import triton
+ import triton.language as tl
+ 
++from sglang.kernels.ops.speculative.ragged_verify_kernels import (
++    fill_verify_padding_rows,
++)
+ from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
+ from sglang.srt.layers.sampler import (
+     apply_custom_logit_processor,
+@@ -80,6 +83,10 @@ else:
+     top_p_renorm_prob = None
+     tree_speculative_sampling_target_only = None
+ 
++# FlashInfer's top-p renorm keeps every probability >= its threshold, so it
++# leaves a uniform row unchanged (up to the renormalization rounding).
++_TOP_P_RENORM_KEEPS_TIES = is_cuda()
++
+ 
+ def is_dflash_sampling_verify_available() -> bool:
+     return _DFLASH_SAMPLING_VERIFY_AVAILABLE
+@@ -1156,7 +1163,11 @@ def build_speculative_verify_target_probs(
+     max_top_k: Optional[int] = None,
+     uniform_top_k_value: Optional[int] = None,
+     use_sparse_topk: bool = True,
++    padding_verify_lens: Optional[torch.Tensor] = None,
+ ) -> torch.Tensor:
++    """``padding_verify_lens``: optional [bs] lengths; the caller guarantees
++    that rows at or past ``padding_verify_lens[i]`` of request i are exactly
++    uniform after softmax (zero-logit padding with no logit adjustments)."""
+     device = next_token_logits.device
+     need_top_k = bool(getattr(sampling_info, "need_top_k_sampling", True))
+     need_top_p = bool(getattr(sampling_info, "need_top_p_sampling", False))
+@@ -1210,10 +1221,26 @@ def build_speculative_verify_target_probs(
+                 torch.repeat_interleave(sampling_info.top_ks, draft_token_num, dim=0),
+             )
+         if need_top_p:
+-            target_probs = _dflash_top_p_renorm_prob(
+-                target_probs,
+-                torch.repeat_interleave(sampling_info.top_ps, draft_token_num, dim=0),
++            top_ps = torch.repeat_interleave(
++                sampling_info.top_ps, draft_token_num, dim=0
+             )
++            if (
++                padding_verify_lens is not None
++                and not need_top_k
++                and _TOP_P_RENORM_KEEPS_TIES
++            ):
++                # Avoid uniform input to AIR top-p.
++                lens = padding_verify_lens.to(device=device)
++                uniform = target_probs[:, 0].contiguous()
++                fill_verify_padding_rows(
++                    target_probs, lens, uniform, draft_token_num, restore=False
++                )
++                target_probs = _dflash_top_p_renorm_prob(target_probs, top_ps)
++                fill_verify_padding_rows(
++                    target_probs, lens, uniform, draft_token_num, restore=True
++                )
++            else:
++                target_probs = _dflash_top_p_renorm_prob(target_probs, top_ps)
+     return target_probs.view(bs, draft_token_num, -1).contiguous()
+ 
+ 
+diff --git a/python/sglang/srt/speculative/dspark_components/dspark_verify.py b/python/sglang/srt/speculative/dspark_components/dspark_verify.py
+index da060e2bc7..339f3e1941 100644
+--- a/python/sglang/srt/speculative/dspark_components/dspark_verify.py
++++ b/python/sglang/srt/speculative/dspark_components/dspark_verify.py
+@@ -156,6 +156,7 @@ class TargetVerifyExecutor:
+         prefix_lens: torch.Tensor,
+         draft_tokens: torch.Tensor,
+         simulate_bonus_sampling_info=None,
++        compact_padding: bool = False,
+     ) -> AcceptOuts:
+         """Produce the per-request accept outcome after target verify.
+ 
+@@ -182,6 +183,7 @@ class TargetVerifyExecutor:
+             cutoff_layout=layout,
+             fused_argmax=self._target_is_dsv41,
+             block_verification=self._block_verification,
++            compact_padding=compact_padding,
+         )
+         simulated_correct_len = self._simulated_correct_len
+         if self.bonus_only:
+@@ -963,6 +965,17 @@ def sample_simulated_bonus(
+     return bonus.to(greedy_bonus.dtype).view_as(greedy_bonus)
+ 
+ 
++def _may_have_padding_rows(
++    layout: Optional[RaggedVerifyLayout], verify_num_draft_tokens: int
++) -> bool:
++    # Host-side lengths avoid a sync; without them, assume padding.
++    if layout is None:
++        return False
++    if layout.verify_lens_cpu is None:
++        return True
++    return min(layout.verify_lens_cpu) < verify_num_draft_tokens
++
++
+ def accept_draft_tokens(
+     *,
+     candidates: torch.Tensor,
+@@ -975,6 +988,7 @@ def accept_draft_tokens(
+     cutoff_layout: Optional[RaggedVerifyLayout] = None,
+     fused_argmax: bool = False,
+     block_verification: bool = False,
++    compact_padding: bool = False,
+ ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+     greedy_mask = draft_block.greedy_mask
+     cutoff_verify_lens = None if cutoff_layout is None else cutoff_layout.verify_lens
+@@ -1004,6 +1018,13 @@ def accept_draft_tokens(
+             rows_per_request=gamma_rows,
+         ).view(bs, gamma_rows, vocab)
+         expect(_VERIFY_DRAFT_PROBS, draft_probs)
++    padding_verify_lens = (
++        cutoff_verify_lens
++        if compact_padding
++        and verify_logits_adjustments_are_noop(sampling_info)
++        and _may_have_padding_rows(cutoff_layout, verify_num_draft_tokens)
++        else None
++    )
+     if not sampling_info.is_any_greedy:
+         return AcceptSampling.execute(
+             candidates=candidates,
+@@ -1015,6 +1036,7 @@ def accept_draft_tokens(
+             verify_num_draft_tokens=verify_num_draft_tokens,
+             cutoff_verify_lens=cutoff_verify_lens,
+             block_verification=block_verification,
++            padding_verify_lens=padding_verify_lens,
+         )
+     greedy_len, greedy_bonus, greedy_trim = AcceptGreedy.execute(
+         candidates=candidates,
+@@ -1033,6 +1055,7 @@ def accept_draft_tokens(
+         verify_num_draft_tokens=verify_num_draft_tokens,
+         cutoff_verify_lens=cutoff_verify_lens,
+         block_verification=block_verification,
++        padding_verify_lens=padding_verify_lens,
+     )
+     selected = SelectMixedAccept.execute(
+         greedy_mask=greedy_mask,
+diff --git a/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py b/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
+index 3402c2bdad..be78447311 100644
+--- a/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
++++ b/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
+@@ -1093,6 +1093,7 @@ class DSparkWorkerV2(BaseSpecWorker):
+             prefix_lens=prefix_lens,
+             draft_tokens=draft_tokens,
+             simulate_bonus_sampling_info=simulate_bonus_sampling_info,
++            compact_padding=run_compact and not batch.has_grammar,
+         )
+         self.model_runner.ngram_embedding_manager.update_after_verify(
+             verify_ids_2d=verify_ids_2d,
+diff --git a/test/registered/spec/dspark/test_dspark_compact_top_p.py b/test/registered/spec/dspark/test_dspark_compact_top_p.py
+new file mode 100644
+index 0000000000..2a4b1fcde9
+--- /dev/null
++++ b/test/registered/spec/dspark/test_dspark_compact_top_p.py
+@@ -0,0 +1,200 @@
++import unittest
++from types import SimpleNamespace
++
++import torch
++
++from sglang.srt.speculative.dflash_utils import build_speculative_verify_target_probs
++from sglang.srt.speculative.dspark_components.dspark_draft import DraftBlockResult
++from sglang.srt.speculative.dspark_components.dspark_verify import (
++    accept_draft_tokens,
++)
++from sglang.srt.speculative.ragged_verify import RaggedVerifyLayout
++from sglang.test.ci.ci_register import register_cuda_ci
++from sglang.test.test_utils import CustomTestCase
++
++register_cuda_ci(est_time=15, stage="base-b", runner_config="1-gpu-small")
++
++DEVICE = "cuda"
++_VOCAB, _STRIDE = 32000, 6
++_VERIFY_LENS = [6, 3, 1, 4]
++_BS = len(_VERIFY_LENS)
++# Top-p keeps heads 0 and 1 and drops head 2 for every request's temperature/top-p.
++_HEAD_PROBS = [0.6, 0.37, 0.03]
++# Head index drafted on each verified row: reject on row 2 (req 0), reject on
++# the last verified row (req 1), accept every verified row (reqs 2 and 3).
++_DRAFT_HEADS = [[0, 0, 2, 0, 0], [0, 0, 2, 0, 0], [0] * 5, [0] * 5]
++
++
++def _sampling_info(**overrides):
++    info = SimpleNamespace(
++        temperatures=torch.tensor([[1.0], [0.7], [1.0], [1.3]], device=DEVICE),
++        top_ps=torch.tensor([0.95, 0.9, 0.85, 0.8], device=DEVICE),
++        top_ks=torch.full((_BS,), _VOCAB, dtype=torch.int32, device=DEVICE),
++        need_top_k_sampling=False,
++        need_top_p_sampling=True,
++        is_all_greedy=False,
++        is_any_greedy=False,
++        has_custom_logit_processor=False,
++        acc_linear_penalties=None,
++        penalizer_orchestrator=None,
++        grammar_mask=None,
++        logit_bias=None,
++    )
++    for name, value in overrides.items():
++        setattr(info, name, value)
++    return info
++
++
++def _compact_batch(vocab=_VOCAB, verify_lens=_VERIFY_LENS):
++    gen = torch.Generator(device=DEVICE).manual_seed(0)
++    logits = torch.randn(_BS, _STRIDE, vocab, generator=gen, device=DEVICE)
++    perm = torch.randperm(vocab, generator=gen, device=DEVICE)
++    heads = perm[: _BS * _STRIDE * 3].view(_BS, _STRIDE, 3)
++    head_logits = 25.0 + torch.tensor(_HEAD_PROBS, device=DEVICE).log()
++    logits.scatter_(2, heads, head_logits.expand(_BS, _STRIDE, 3))
++    real = (
++        torch.arange(_STRIDE, device=DEVICE)[None, :]
++        < torch.tensor(verify_lens, device=DEVICE)[:, None]
++    )
++    logits = torch.where(real[..., None], logits, torch.zeros_like(logits))
++    head_drafts = heads[:, :-1].gather(
++        2, torch.tensor(_DRAFT_HEADS, device=DEVICE)[..., None]
++    )
++    pad_drafts = perm[-_BS * (_STRIDE - 1) :].view(_BS, _STRIDE - 1)
++    drafts = torch.where(real[:, :-1], head_drafts.squeeze(-1), pad_drafts)
++    candidates = torch.cat(
++        [torch.zeros(_BS, 1, dtype=torch.long, device=DEVICE), drafts], dim=1
++    )
++    # Uniform draft probs: verified drafts accept iff top-p keeps them, and
++    # drafts on uniform padding rows accept.
++    draft_block = DraftBlockResult(
++        draft_tokens=drafts,
++        corrected_logits=torch.zeros(_BS, _STRIDE - 1, vocab, device=DEVICE),
++        greedy_mask=torch.zeros(_BS, dtype=torch.bool, device=DEVICE),
++        temperatures=torch.ones(_BS, dtype=torch.float32, device=DEVICE),
++    )
++    layout = RaggedVerifyLayout.from_verify_lens_device(
++        verify_lens=torch.tensor(verify_lens, device=DEVICE),
++        graph_num_tokens=sum(verify_lens),
++    )
++    return logits.view(_BS * _STRIDE, vocab), candidates, heads, draft_block, layout
++
++
++def _accept(batch, *, compact_padding, sampling_info, seed):
++    logits, candidates, _, draft_block, layout = batch
++    torch.manual_seed(seed)
++    return accept_draft_tokens(
++        candidates=candidates,
++        target_logits=logits,
++        draft_block=draft_block,
++        sampling_info=sampling_info,
++        draft_input=SimpleNamespace(max_top_k=None, uniform_top_k_value=None),
++        gamma=_STRIDE - 1,
++        verify_num_draft_tokens=_STRIDE,
++        cutoff_layout=layout,
++        compact_padding=compact_padding,
++    )
++
++
++class TestCompactVerifyTopP(CustomTestCase):
++    def test_target_probs_match_full_renorm(self):
++        for vocab in (_VOCAB, 129280):
++            with self.subTest(vocab=vocab):
++                logits, _, heads, _, layout = _compact_batch(vocab)
++                kwargs = dict(
++                    next_token_logits=logits,
++                    sampling_info=_sampling_info(),
++                    draft_token_num=_STRIDE,
++                    bs=_BS,
++                )
++                ref = build_speculative_verify_target_probs(**kwargs)
++                got = build_speculative_verify_target_probs(
++                    **kwargs, padding_verify_lens=layout.verify_lens
++                )
++                real = (
++                    torch.arange(_STRIDE, device=DEVICE)[None, :]
++                    < layout.verify_lens[:, None].long()
++                )
++                torch.testing.assert_close(got[real], ref[real], rtol=0, atol=0)
++                torch.testing.assert_close(got[~real], ref[~real], rtol=1e-5, atol=0)
++                head_probs = got.gather(2, heads)[real]
++                self.assertTrue(bool((head_probs[:, :2] > 0).all()))
++                self.assertTrue(bool((head_probs[:, 2] == 0).all()))
++
++    def test_full_width_layout_matches_probs_and_peak_memory(self):
++        logits, _, _, _, layout = _compact_batch(129280, [_STRIDE] * _BS)
++        kwargs = dict(
++            next_token_logits=logits,
++            sampling_info=_sampling_info(),
++            draft_token_num=_STRIDE,
++            bs=_BS,
++        )
++
++        def build(**extra):
++            build_speculative_verify_target_probs(**kwargs, **extra)
++            torch.cuda.synchronize()
++            torch.cuda.reset_peak_memory_stats()
++            start = torch.cuda.memory_allocated()
++            probs = build_speculative_verify_target_probs(**kwargs, **extra)
++            torch.cuda.synchronize()
++            return probs, torch.cuda.max_memory_allocated() - start
++
++        ref, ref_peak = build()
++        got, got_peak = build(padding_verify_lens=layout.verify_lens)
++        self.assertTrue(torch.equal(got, ref))
++        self.assertLessEqual(got_peak, ref_peak + (1 << 20))
++
++    def test_accept_depths_and_cap_trim_match_full_renorm(self):
++        batch = _compact_batch()
++        heads = batch[2]
++        for seed in range(4):
++            ref = _accept(
++                batch, compact_padding=False, sampling_info=_sampling_info(), seed=seed
++            )
++            got = _accept(
++                batch, compact_padding=True, sampling_info=_sampling_info(), seed=seed
++            )
++            for name, g, r in zip(("correct_len", "bonus", "cap_trim"), got, ref):
++                self.assertTrue(torch.equal(g, r), f"{name} seed={seed}: {g} vs {r}")
++            correct_len, bonus, cap_trim = got
++            self.assertEqual(correct_len.tolist(), [2, 2, 0, 3])
++            self.assertEqual(cap_trim.tolist(), [0, 0, 5, 2])
++            for i in (0, 1):
++                self.assertIn(int(bonus[i]), heads[i, 2, :2].tolist())
++            self.assertEqual(int(bonus[2]), int(heads[2, 0, 0]))
++            self.assertEqual(int(bonus[3]), int(heads[3, 3, 0]))
++
++    def test_logit_bias_keeps_full_renorm(self):
++        logits, candidates, heads, draft_block, layout = _compact_batch()
++        pad = (
++            torch.arange(_STRIDE - 1, device=DEVICE)[None, :]
++            >= torch.tensor(_VERIFY_LENS, device=DEVICE)[:, None]
++        )
++        used = set(heads.flatten().tolist()) | set(candidates.flatten().tolist())
++        boosted = min(set(range(_VOCAB)) - used)
++        # Top-p keeps only the boosted token on padding rows. The padding drafts
++        # are near-impossible under the draft, so only top-p rejects them.
++        bias = torch.zeros(_BS, _VOCAB, device=DEVICE)
++        bias[:, boosted] = 16.0
++        logits = (logits.view(_BS, _STRIDE, _VOCAB) + bias[:, None]).view_as(logits)
++        draft_block = DraftBlockResult(
++            draft_tokens=draft_block.draft_tokens,
++            corrected_logits=draft_block.corrected_logits.scatter(
++                2, candidates[:, 1:, None], (pad * -30.0)[..., None]
++            ),
++            greedy_mask=draft_block.greedy_mask,
++            temperatures=draft_block.temperatures,
++        )
++        info = _sampling_info(
++            temperatures=torch.ones(_BS, 1, device=DEVICE), logit_bias=bias
++        )
++        batch = (logits, candidates, heads, draft_block, layout)
++        ref = _accept(batch, compact_padding=False, sampling_info=info, seed=0)
++        got = _accept(batch, compact_padding=True, sampling_info=info, seed=0)
++        for g, r in zip(got, ref):
++            self.assertTrue(torch.equal(g, r), f"{g} vs {r}")
++        self.assertEqual(ref[2].tolist(), [0, 0, 1, 1])
++
++
++if __name__ == "__main__":
++    unittest.main()

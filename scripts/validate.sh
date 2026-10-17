@@ -19,10 +19,11 @@ jq -e --arg dg "$(jq -r '.sources.deepgemm.commit[:8]' "$lock")" '. as {sources:
   ((.flashinfer_patches // []) as $fi |
     if ($fi | length) > 0 then (.sources.flashinfer.effective_tree | sha40) and
       all($fi | to_entries[]; .key as $i | .value |
-        .kind == "branch" and (.branch | startswith("up/")) and (.head | sha40) and
-        (.base | sha40) and (.sha256 | sha64) and
+        ((.kind == "branch" and (.branch | startswith("up/")) and
+          (.upstream_pr == "TBD" or (.upstream_pr | test("^https://github.com/flashinfer-ai/flashinfer/pull/[0-9]+$")))) or
+         (.kind == "pr" and .upstream_pr == ("https://github.com/flashinfer-ai/flashinfer/pull/" + (.pr | tostring)))) and
+        (.head | sha40) and (.base | sha40) and (.sha256 | sha64) and
         (.applied == "clean" or .applied == "three-way") and
-        (.upstream_pr == "TBD" or (.upstream_pr | test("^https://github.com/flashinfer-ai/flashinfer/pull/[0-9]+$"))) and
         (.path == ("patches/fi-" + (($i + 1) | tostring | if length < 2 then "0" + . else . end) + "-" + .id + ".patch")))
     else (.sources.flashinfer | has("effective_tree") | not) end) and
   ((.triton_patches // []) as $tr |

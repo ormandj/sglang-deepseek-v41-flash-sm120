@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/model_loader/loader.py b/python/sglang/srt/model_loader/loader.py
-index 4cf3e28d14793dec7dd08e701990168ace797c5f..2493b0702e22d24a486a43bbcf403e3091c9e749 100644
+index a7130ec8d5..019792e13f 100644
 --- a/python/sglang/srt/model_loader/loader.py
 +++ b/python/sglang/srt/model_loader/loader.py
 @@ -12,6 +12,7 @@ import fnmatch
@@ -10,7 +10,7 @@ index 4cf3e28d14793dec7dd08e701990168ace797c5f..2493b0702e22d24a486a43bbcf403e30
  import json
  import logging
  import math
-@@ -358,6 +359,41 @@ class BaseModelLoader(ABC):
+@@ -357,6 +358,41 @@ class BaseModelLoader(ABC):
          raise NotImplementedError
  
  
@@ -52,7 +52,7 @@ index 4cf3e28d14793dec7dd08e701990168ace797c5f..2493b0702e22d24a486a43bbcf403e30
  def _validate_default_loader_extra_config(
      *, extra_config: dict, load_format: LoadFormat
  ) -> None:
-@@ -418,6 +454,12 @@ class DefaultModelLoader(BaseModelLoader):
+@@ -417,6 +453,12 @@ class DefaultModelLoader(BaseModelLoader):
          model_config: Optional[ModelConfig] = None
          """The model configuration (for checking architecture, etc)."""
  
@@ -65,7 +65,7 @@ index 4cf3e28d14793dec7dd08e701990168ace797c5f..2493b0702e22d24a486a43bbcf403e30
          @classmethod
          def init_new(cls, model_config: ModelConfig, model):
              return cls(
-@@ -429,6 +471,9 @@ class DefaultModelLoader(BaseModelLoader):
+@@ -428,6 +470,9 @@ class DefaultModelLoader(BaseModelLoader):
                      model, "allow_patterns_overrides", None
                  ),
                  model_config=model_config,
@@ -75,7 +75,7 @@ index 4cf3e28d14793dec7dd08e701990168ace797c5f..2493b0702e22d24a486a43bbcf403e30
              )
  
      @dataclasses.dataclass(frozen=True)
-@@ -640,11 +685,35 @@ class DefaultModelLoader(BaseModelLoader):
+@@ -639,11 +684,35 @@ class DefaultModelLoader(BaseModelLoader):
                  hf_weights_files,
              )
          elif self.load_config.load_format == LoadFormat.INSTANTTENSOR:
@@ -116,12 +116,12 @@ index 4cf3e28d14793dec7dd08e701990168ace797c5f..2493b0702e22d24a486a43bbcf403e30
              weight_loader_disable_mmap = get_model().weight_loader_disable_mmap
              configured_prefetch = get_model().weight_loader_prefetch_checkpoints
 diff --git a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/deepseek_v4.py
-index c0e467e5d5ca6d2edcc57eacc60ae352db002897..d96dbedb510ec8e095d1cdbbb50bb28acc06ff2c 100644
+index e69a4e833a..b3f80c147a 100644
 --- a/python/sglang/srt/models/deepseek_v4.py
 +++ b/python/sglang/srt/models/deepseek_v4.py
-@@ -4413,6 +4413,13 @@ class DeepseekV4Model(nn.Module):
- class DeepseekV4ForCausalLM(nn.Module):
-     supports_cuda_vmm_feature_transport = True
+@@ -4295,6 +4295,13 @@ class DeepseekV4ForCausalLM(nn.Module):
+         # written against different names, so only Quark checkpoints get it.
+         return _QUARK_CKPT_TO_SGLANG_MAPPER if _is_quark_checkpoint(config) else None
  
 +    @property
 +    def host_resident_weight_patterns(self) -> Optional[Tuple[str, ...]]:
@@ -134,10 +134,10 @@ index c0e467e5d5ca6d2edcc57eacc60ae352db002897..d96dbedb510ec8e095d1cdbbb50bb28a
          self,
          config: DeepSeekV4Config,
 diff --git a/python/sglang/srt/models/deepseek_v4_dspark.py b/python/sglang/srt/models/deepseek_v4_dspark.py
-index 1c6c29dc805d39085db1192074a5e6496e27aa87..f1eccd615d32eb0abe41e6ac44628076a270bb28 100644
+index b1c0248806..8ba4d3fb4a 100644
 --- a/python/sglang/srt/models/deepseek_v4_dspark.py
 +++ b/python/sglang/srt/models/deepseek_v4_dspark.py
-@@ -794,6 +794,8 @@ class DeepseekV4ForCausalLMDSpark(nn.Module):
+@@ -685,6 +685,8 @@ class DeepseekV4ForCausalLMDSpark(nn.Module):
      precompile_kernels_after_loading = (
          DeepseekV4ForCausalLM.precompile_kernels_after_loading
      )
@@ -147,7 +147,7 @@ index 1c6c29dc805d39085db1192074a5e6496e27aa87..f1eccd615d32eb0abe41e6ac44628076
      @classmethod
      def shared_experts_fusion_disable_reason(
 diff --git a/test/registered/unit/model_loader/test_instanttensor_loader.py b/test/registered/unit/model_loader/test_instanttensor_loader.py
-index 240c4cac521df92e9b6bbe320b3fc3581b5891b5..98bafba570c5b1daabcf32a060a05a36f6c4e9d8 100644
+index 240c4cac52..98bafba570 100644
 --- a/test/registered/unit/model_loader/test_instanttensor_loader.py
 +++ b/test/registered/unit/model_loader/test_instanttensor_loader.py
 @@ -1,4 +1,5 @@

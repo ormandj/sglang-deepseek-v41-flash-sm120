@@ -1,8 +1,8 @@
 diff --git a/python/sglang/kernels/ops/gemm/__init__.py b/python/sglang/kernels/ops/gemm/__init__.py
-index b7c826d8aacf6ae737bf5c789fa9dac607d1cfe7..77e7e84b4e43a0df8291e9e42510f923a62db33b 100644
+index 47b4a0e4ad..1f7e96b73f 100644
 --- a/python/sglang/kernels/ops/gemm/__init__.py
 +++ b/python/sglang/kernels/ops/gemm/__init__.py
-@@ -507,6 +507,21 @@ register_kernel(
+@@ -574,6 +574,21 @@ register_kernel(
          ),
      )
  )
@@ -26,7 +26,7 @@ index b7c826d8aacf6ae737bf5c789fa9dac607d1cfe7..77e7e84b4e43a0df8291e9e42510f923
          op="gemm.gptq_marlin_gemm",
 diff --git a/python/sglang/kernels/ops/gemm/sm120_mxfp8_skinny_gemm.py b/python/sglang/kernels/ops/gemm/sm120_mxfp8_skinny_gemm.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..9889db9fc1a1984722cbf4bea4f61feb6b3e08ca
+index 0000000000..9889db9fc1
 --- /dev/null
 +++ b/python/sglang/kernels/ops/gemm/sm120_mxfp8_skinny_gemm.py
 @@ -0,0 +1,219 @@
@@ -250,10 +250,10 @@ index 0000000000000000000000000000000000000000..9889db9fc1a1984722cbf4bea4f61feb
 +    )
 +    return out
 diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
-index db80063997a32d295e7486ab57c1ff3939a9c5eb..46d30c9fbc34e41b4319753d95064090f8262011 100644
+index 80e0077766..6727780fe2 100644
 --- a/python/sglang/srt/environ.py
 +++ b/python/sglang/srt/environ.py
-@@ -1060,6 +1060,11 @@ class Envs:
+@@ -1106,6 +1106,11 @@ class Envs:
      # kernels/ops/gemm/configs/ (currently L40S), so it is a no-op on
      # any other GPU / untuned shape even when enabled.
      SGLANG_ENABLE_FP8_GEMM_CONFIG_TUNE = EnvBool(True)
@@ -266,7 +266,7 @@ index db80063997a32d295e7486ab57c1ff3939a9c5eb..46d30c9fbc34e41b4319753d95064090
      # ===================================================================
      # Humming quantization
 diff --git a/python/sglang/srt/layers/quantization/fp8.py b/python/sglang/srt/layers/quantization/fp8.py
-index 3d62fd5e1eb2801ec3dc024cfe5d4cd510edbf6d..bdf48f9d1289db8012eee57a6f4e7eeb345ac527 100644
+index 9d0c3e0116..bde53a8f51 100644
 --- a/python/sglang/srt/layers/quantization/fp8.py
 +++ b/python/sglang/srt/layers/quantization/fp8.py
 @@ -5,7 +5,7 @@
@@ -278,7 +278,7 @@ index 3d62fd5e1eb2801ec3dc024cfe5d4cd510edbf6d..bdf48f9d1289db8012eee57a6f4e7eeb
  
  import torch
  import torch.nn.functional as F
-@@ -104,6 +104,7 @@ from sglang.srt.utils import (
+@@ -107,6 +107,7 @@ from sglang.srt.utils import (
      is_hip,
      is_musa,
      is_npu,
@@ -286,7 +286,7 @@ index 3d62fd5e1eb2801ec3dc024cfe5d4cd510edbf6d..bdf48f9d1289db8012eee57a6f4e7eeb
      is_xpu,
      log_info_on_rank0,
      mxfp8_block_convert_required,
-@@ -477,6 +478,25 @@ class Fp8Config(QuantizationConfig):
+@@ -482,6 +483,25 @@ class Fp8Config(QuantizationConfig):
              )
  
  
@@ -312,7 +312,7 @@ index 3d62fd5e1eb2801ec3dc024cfe5d4cd510edbf6d..bdf48f9d1289db8012eee57a6f4e7eeb
  class Fp8LinearMethod(LinearMethodBase):
      """Linear method for FP8.
  
-@@ -932,6 +952,91 @@ class Fp8LinearMethod(LinearMethodBase):
+@@ -979,6 +999,91 @@ class Fp8LinearMethod(LinearMethodBase):
          # the swizzled copy is stored separately.
          self._process_mxfp8_linear_weight_scale(layer, scale_u8=scale_u8)
          layer.block_fp8_mxfp8_ready = True
@@ -404,7 +404,7 @@ index 3d62fd5e1eb2801ec3dc024cfe5d4cd510edbf6d..bdf48f9d1289db8012eee57a6f4e7eeb
  
      def _process_mxfp8_linear_weight_scale(
          self, layer: Module, scale_u8: Optional[torch.Tensor] = None
-@@ -1225,6 +1330,10 @@ class Fp8LinearMethod(LinearMethodBase):
+@@ -1281,6 +1386,10 @@ class Fp8LinearMethod(LinearMethodBase):
          elif self.block_fp8_as_mxfp8 and isinstance(x, tuple):
              # A legacy (q, scale) block-fp8 pair keeps the block kernel.
              mxfp8_view = False
@@ -417,10 +417,10 @@ index 3d62fd5e1eb2801ec3dc024cfe5d4cd510edbf6d..bdf48f9d1289db8012eee57a6f4e7eeb
              extra_kwargs = {}
 diff --git a/test/registered/kernels/ops/gemm/test_sm120_mxfp8_skinny_gemm.py b/test/registered/kernels/ops/gemm/test_sm120_mxfp8_skinny_gemm.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..be9e7b5f6ff2fa1c47890bbe546cb9146a38a946
+index 0000000000..273fd9b408
 --- /dev/null
 +++ b/test/registered/kernels/ops/gemm/test_sm120_mxfp8_skinny_gemm.py
-@@ -0,0 +1,368 @@
+@@ -0,0 +1,367 @@
 +"""SM120 small-M MXFP8 GEMM: FP64 reference, bit-identity with FlashInfer's
 +activation quantization, determinism, batch invariance, CUDA-graph replay,
 +split-K counter validation, and dispatch through Fp8LinearMethod.apply."""
@@ -650,8 +650,7 @@ index 0000000000000000000000000000000000000000..be9e7b5f6ff2fa1c47890bbe546cb914
 +            params_dtype=torch.bfloat16,
 +            quant_config=quant_config,
 +            prefix="model.layers.0.mlp.up_proj",
-+            tp_rank=0,
-+            tp_size=1,
++            parallel_group="replicated",
 +            skip_block_quant_check=True,
 +        ).cuda()
 +        w, s = _weight(n, k)

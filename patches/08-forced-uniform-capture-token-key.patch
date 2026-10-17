@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
-index 92c5608ef9a5463fabb49f8c9fbbbe03e7fff190..471f77c746b7476dbb07e5ada3bb739867975b0f 100644
+index 321379c5a4..39400e8565 100644
 --- a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
 +++ b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
-@@ -651,8 +651,9 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+@@ -666,8 +666,9 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
      def _capture_ragged_verify_layout(self, num_tokens: int):
          if not self.ragged_verify_mode:
              return None
@@ -11,11 +11,11 @@ index 92c5608ef9a5463fabb49f8c9fbbbe03e7fff190..471f77c746b7476dbb07e5ada3bb7398
 +        # Forced-uniform capture still carries a layout, of full-width rows
 +        # (_ragged_capture_slots): a capture without one would record uniform
 +        # attention geometry that a packed replay cannot refresh.
-         # A tier can be captured several times (graph variants, PD-mux streams),
-         # and replay stages live lengths into this one layout, so every capture
-         # must use it.
+         layout = self._captured_ragged_layouts.get(num_tokens)
+         if layout is not None:
+             return layout
 diff --git a/test/registered/spec/dspark/test_ragged_verify.py b/test/registered/spec/dspark/test_ragged_verify.py
-index c2ea087813138f7cd22c970d2133f90ff51e7ca4..8f1c02fc4dc31eb4c11e6ba58d50e45b08dcaa44 100644
+index c2ea087813..8f1c02fc4d 100644
 --- a/test/registered/spec/dspark/test_ragged_verify.py
 +++ b/test/registered/spec/dspark/test_ragged_verify.py
 @@ -1,4 +1,6 @@

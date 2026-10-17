@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
-index 1c0ba6d68f5e4b2fae11d59aff5f90bb95b9b271..99194a5254a8575ae447269d6f7bbec0d47ae1b7 100644
+index f912e2dd01..d7238175d9 100644
 --- a/python/sglang/srt/environ.py
 +++ b/python/sglang/srt/environ.py
-@@ -1439,6 +1439,9 @@ class Envs:
+@@ -1483,6 +1483,9 @@ class Envs:
      SGLANG_LILICORR_REQUIRE_SAMPLING = EnvBool(False)
      SGLANG_RAGGED_VERIFY_MODE = EnvStr("static")
      SGLANG_TEST_RAGGED_VERIFY_FORCE_UNIFORM_CAPTURE = EnvBool(False)
@@ -13,10 +13,10 @@ index 1c0ba6d68f5e4b2fae11d59aff5f90bb95b9b271..99194a5254a8575ae447269d6f7bbec0
      # Saves the per-step draft forward, but the draft KV goes stale: an upshift
      # back to steps>0 starts from a cold draft state (low accept until it recovers).
 diff --git a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
-index 471f77c746b7476dbb07e5ada3bb739867975b0f..245845c00e18f2539d2a192cf6f2bffc99b5dcc5 100644
+index 39400e8565..7d53352c43 100644
 --- a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
 +++ b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
-@@ -109,6 +109,7 @@ from sglang.srt.speculative.ragged_verify import resolve_ragged_verify_layout
+@@ -110,6 +110,7 @@ from sglang.srt.speculative.ragged_verify import resolve_ragged_verify_layout
  from sglang.srt.utils import (
      empty_context,
      get_available_gpu_memory,
@@ -24,7 +24,7 @@ index 471f77c746b7476dbb07e5ada3bb739867975b0f..245845c00e18f2539d2a192cf6f2bffc
      require_attn_tp_gather,
      require_mlp_tp_gather,
  )
-@@ -224,6 +225,10 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+@@ -227,6 +228,10 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
      dllm_input_preparation = None
      dllm_attention = None
  
@@ -35,7 +35,7 @@ index 471f77c746b7476dbb07e5ada3bb739867975b0f..245845c00e18f2539d2a192cf6f2bffc
      def __init__(
          self,
          model_runner: ModelRunner,
-@@ -563,10 +568,37 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+@@ -567,10 +572,37 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
              self.model_runner.shared_read_done_event = read_done
  
      def _build_ragged_verify_token_buckets(self) -> list[int]:
@@ -74,33 +74,27 @@ index 471f77c746b7476dbb07e5ada3bb739867975b0f..245845c00e18f2539d2a192cf6f2bffc
      def _autotune_buffers(self):
          """Reuse these static decode buffers (sized to max_bs) for the warmup
          flashinfer-autotune dummy forward instead of allocating a throwaway set
-@@ -836,17 +868,20 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
-             trace_dir = graph_capture_profile_dir()
-             os.makedirs(trace_dir, exist_ok=True)
- 
--            # Track which BS is currently being captured for trace file naming
--            self._profile_bs_list = list(reversed(self.capture_bs))
-+            # Track which shape is currently being captured for trace file naming
-+            self._profile_labels = [
-+                f"bs_{bs}" if tokens is None else f"tokens_{tokens}"
-+                for bs, tokens in self._capture_shapes()
-+            ]
-             self._profile_bs_idx = 0
- 
-             def on_trace_ready(prof):
--                bs = self._profile_bs_list[self._profile_bs_idx]
-+                label = self._profile_labels[self._profile_bs_idx]
-                 trace_file = os.path.join(
--                    trace_dir, f"{runner_name}_bs_{bs}_rank{rank}.json.gz"
-+                    trace_dir, f"{runner_name}_{label}_rank{rank}.json.gz"
-                 )
-                 prof.export_chrome_trace(trace_file)
--                logger.info(f"Saved trace for bs={bs} to {trace_file}")
-+                logger.info(f"Saved trace for {label} to {trace_file}")
-                 self._profile_bs_idx += 1
- 
-             profile_context = profile(
-@@ -1135,18 +1170,15 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+@@ -843,15 +875,17 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+         stream_idx: Optional[int],
+         variant_label: Optional[str],
+         attention_variant: Optional[str],
++        tokens: Optional[int] = None,
+     ) -> None:
+         """Name the trace for one capture. bs alone is not unique: the capture
+         loop multiplies it by the lora and attention variants (DSA captures
+         dense + sparse per bs). Absent variants are omitted so single-variant
+-        runners keep the historical `bs_<n>` stem.
++        runners keep the historical `bs_<n>` stem; a sub-width ragged-verify
++        capture is named by its token count.
+         """
+         if getattr(self, "_profiler", None) is None:
+             return
+-        parts = [f"bs_{bs}"]
++        parts = [f"bs_{bs}" if tokens is None else f"tokens_{tokens}"]
+         if attention_variant is not None:
+             parts.append(attention_variant)
+         if variant_label is not None:
+@@ -1187,18 +1221,15 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
              empty_cache=False,
          )
          # Reverse so cuda graphs share memory better.
@@ -122,7 +116,7 @@ index 471f77c746b7476dbb07e5ada3bb739867975b0f..245845c00e18f2539d2a192cf6f2bffc
              attention_variants = (
                  variants.capture_labels if variants is not None else (None,)
              )
-@@ -1156,8 +1188,9 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+@@ -1208,8 +1239,9 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
                      self.model_runner.gpu_id,
                      empty_cache=False,
                  )
@@ -133,8 +127,17 @@ index 471f77c746b7476dbb07e5ada3bb739867975b0f..245845c00e18f2539d2a192cf6f2bffc
                  )
  
              for variant_label, _variant_has_lora in lora_variants:
-@@ -1166,16 +1199,23 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+@@ -1217,20 +1249,31 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+                 for attention_variant in attention_variants:
                      _set_capture_attention_variant(attention_variant)
+                     self._set_profile_trace_tag(
+-                        bs, stream_idx, variant_label, attention_variant
++                        bs,
++                        stream_idx,
++                        variant_label,
++                        attention_variant,
++                        tokens=sub_width_tokens,
+                     )
                      with torch_compile_decoration.patch_model(
                          self.model_runner.model,
 -                        bs in self.compile_bs,
@@ -159,7 +162,7 @@ index 471f77c746b7476dbb07e5ada3bb739867975b0f..245845c00e18f2539d2a192cf6f2bffc
                          )
          _set_capture_attention_variant(None)
  
-@@ -1186,8 +1226,13 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+@@ -1241,8 +1284,13 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
          stream_idx: Optional[int] = None,
          variant_label: Optional[str] = None,
          attention_variant: Optional[str] = None,
@@ -175,10 +178,10 @@ index 471f77c746b7476dbb07e5ada3bb739867975b0f..245845c00e18f2539d2a192cf6f2bffc
  
          # Sanity-check: --debug-cuda-graph requires breakable backend.
 diff --git a/test/registered/unit/model_executor/runner/test_decode_cuda_graph_runner.py b/test/registered/unit/model_executor/runner/test_decode_cuda_graph_runner.py
-index 82ffff508c7cf270a640e39defecdc2bfdccc143..e64743c690d1a52ddec04ccc5aebd4e18b011b85 100644
+index 161e0ebc43..9092b8700f 100644
 --- a/test/registered/unit/model_executor/runner/test_decode_cuda_graph_runner.py
 +++ b/test/registered/unit/model_executor/runner/test_decode_cuda_graph_runner.py
-@@ -22,6 +22,7 @@ lightweight stand-in (with the real precedence helper bound) so no model or
+@@ -23,6 +23,7 @@ lightweight stand-in (with the real precedence helper bound) so no model or
  server is constructed.
  """
  
@@ -186,7 +189,7 @@ index 82ffff508c7cf270a640e39defecdc2bfdccc143..e64743c690d1a52ddec04ccc5aebd4e1
  import os
  import tempfile
  import unittest
-@@ -45,10 +46,11 @@ _BATCH_CAPTURE = "SGLANG_GRAPH_BATCH_CAPTURE"
+@@ -46,7 +47,7 @@ _BATCH_CAPTURE = "SGLANG_GRAPH_BATCH_CAPTURE"
  def _make_fake_self(capture_bs):
      """Stand-in ``self`` with the real precedence helper bound so the env-var
      gating in ``_init_profile_context_and_memory_record`` applies."""
@@ -195,31 +198,15 @@ index 82ffff508c7cf270a640e39defecdc2bfdccc143..e64743c690d1a52ddec04ccc5aebd4e1
      fake_self._graph_batch_capture_active = (
          DecodeCudaGraphRunner._graph_batch_capture_active.__get__(fake_self)
      )
+@@ -58,6 +59,7 @@ def _make_fake_self(capture_bs):
+     fake_self._profile_runner_name = DecodeCudaGraphRunner._profile_runner_name.__get__(
+         fake_self
+     )
 +    fake_self._capture_shapes = DecodeCudaGraphRunner._capture_shapes.__get__(fake_self)
      return fake_self
  
  
-@@ -89,7 +91,9 @@ class TestInitProfileBatchMode(CustomTestCase):
-         with tempfile.TemporaryDirectory() as tmp:
-             fake_self, *_ = self._invoke(capture_bs=[1, 2, 4, 8], profiler_dir=tmp)
-             # Capture iterates large -> small, so the bs list is reversed.
--            self.assertEqual(fake_self._profile_bs_list, [8, 4, 2, 1])
-+            self.assertEqual(
-+                fake_self._profile_labels, ["bs_8", "bs_4", "bs_2", "bs_1"]
-+            )
-             self.assertEqual(fake_self._profile_bs_idx, 0)
- 
- 
-@@ -122,7 +126,7 @@ class TestInitProfileOriginalMode(CustomTestCase):
-             self.assertIsNone(kwargs.get("on_trace_ready"))
-             mock_schedule.assert_not_called()
-             self.assertFalse(os.path.isdir(os.path.join(tmp, "graph_capture_profile")))
--            self.assertFalse(hasattr(fake_self, "_profile_bs_list"))
-+            self.assertFalse(hasattr(fake_self, "_profile_labels"))
- 
-     def test_no_flags(self):
-         self._invoke_original(env={})
-@@ -285,5 +289,142 @@ class TestRaggedVerifyLayoutPerTier(CustomTestCase):
+@@ -405,5 +407,145 @@ class TestRaggedVerifyLayoutPerTier(CustomTestCase):
                  torch.testing.assert_close(layout.verify_lens, expected.verify_lens)
  
  
@@ -345,8 +332,11 @@ index 82ffff508c7cf270a640e39defecdc2bfdccc143..e64743c690d1a52ddec04ccc5aebd4e1
 +                os.environ.pop(_CAPTURE_TRACE, None)
 +                runner._init_profile_context_and_memory_record()
 +            on_trace_ready = mock_profile.call_args.kwargs["on_trace_ready"]
++            # The capture loop tags each shape before capturing it.
++            runner._profiler = mock.Mock()
 +            names = []
-+            for _ in runner._capture_shapes():
++            for bs, tokens in runner._capture_shapes():
++                runner._set_profile_trace_tag(bs, None, None, None, tokens=tokens)
 +                prof = mock.Mock()
 +                prof.export_chrome_trace.side_effect = lambda p: names.append(
 +                    os.path.basename(p)

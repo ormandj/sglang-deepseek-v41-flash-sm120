@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/mem_cache/dsv41_request_window.py b/python/sglang/srt/mem_cache/dsv41_request_window.py
-index 9eb3e6fdd00783daee90d37f088ac31caf75c616..5aa10eb90cd236b42ec05e7078ff5687a99ce26f 100644
+index 5180aec572..1f4d02a819 100644
 --- a/python/sglang/srt/mem_cache/dsv41_request_window.py
 +++ b/python/sglang/srt/mem_cache/dsv41_request_window.py
-@@ -161,6 +161,7 @@ class RequestWindow:
+@@ -168,6 +168,7 @@ class RequestWindow:
              self._ensure_workspace(workspace_rows)
          self.layout = None
          self.prepared = None
@@ -10,7 +10,7 @@ index 9eb3e6fdd00783daee90d37f088ac31caf75c616..5aa10eb90cd236b42ec05e7078ff5687
  
      def _ensure_workspace(self, rows: int) -> None:
          if self.workspace is not None and self.workspace.size >= rows:
-@@ -175,12 +176,14 @@ class RequestWindow:
+@@ -182,12 +183,14 @@ class RequestWindow:
          )
          self.tags[:, loc.flatten()] = -1
          self.prepared = None
@@ -25,7 +25,7 @@ index 9eb3e6fdd00783daee90d37f088ac31caf75c616..5aa10eb90cd236b42ec05e7078ff5687
          if self.workspace is None:
              self._ensure_workspace(layout.size)
          elif self.workspace.size < layout.size:
-@@ -198,6 +201,7 @@ class RequestWindow:
+@@ -205,6 +208,7 @@ class RequestWindow:
              buf.zero_()
          self.tags[:, loc] = layout.history_pos
          self.prepared = None
@@ -33,12 +33,11 @@ index 9eb3e6fdd00783daee90d37f088ac31caf75c616..5aa10eb90cd236b42ec05e7078ff5687
  
      def _history_src(self, layout):
          return torch.where(
-@@ -215,15 +219,21 @@ class RequestWindow:
-             layout = self.layout
+@@ -223,14 +227,21 @@ class RequestWindow:
              if layout is None:
                  raise RuntimeError("request-window metadata was not activated")
+             src = self._history_src(layout)
 -            if not in_capture:
--                src = self._history_src(layout)
 -                valid = layout.history_valid
 -                if not torch.equal(
 -                    self.tags[layer, src][valid], layout.history_pos[valid]
@@ -54,36 +53,66 @@ index 9eb3e6fdd00783daee90d37f088ac31caf75c616..5aa10eb90cd236b42ec05e7078ff5687
 +                # before its own. The assert runs on the GPU without a host sync; a
 +                # failure surfaces at the next synchronizing call and leaves the
 +                # CUDA context unusable.
-+                tags = self.tags[:, self._history_src(layout)]
++                tags = self.tags[:, src]
 +                ok = (tags == layout.history_pos) | ~layout.history_valid
 +                torch._assert_async(
 +                    ok.all(),
 +                    "SWA history is missing: replay or window ownership is invalid",
 +                )
 +                self.history_checked = True
-             gather_window_history(
+             copy_packed_tokens(
                  self.state.kv_buffer[layer],
                  self.workspace.kv_buffer[0],
-diff --git a/test/registered/kernels/ops/attention/dsv4/test_request_window_copy.py b/test/registered/kernels/ops/attention/dsv4/test_request_window_copy.py
-index 2abd88e47866e8aff09482916faaf0dec991df75..4be636c28da7879a32133e25f631436485adf5f7 100644
---- a/test/registered/kernels/ops/attention/dsv4/test_request_window_copy.py
-+++ b/test/registered/kernels/ops/attention/dsv4/test_request_window_copy.py
-@@ -8,8 +8,11 @@ reference built from plain tensor indexing. The sink row, which several masked
- tokens may write in any order, is excluded.
- """
- 
+diff --git a/test/registered/kernels/ops/attention/dsv4/test_request_window_history_check.py b/test/registered/kernels/ops/attention/dsv4/test_request_window_history_check.py
+new file mode 100644
+index 0000000000..eae3b9924e
+--- /dev/null
++++ b/test/registered/kernels/ops/attention/dsv4/test_request_window_history_check.py
+@@ -0,0 +1,145 @@
++"""The request window's SWA history check: once per layout, for every layer, on the
++device without a host sync."""
++
 +import subprocess
 +import sys
- import unittest
- from types import SimpleNamespace
++import unittest
++from types import SimpleNamespace
 +from unittest import mock
- 
- import torch
- 
-@@ -209,5 +212,104 @@ class TestRequestWindowCopy(CustomTestCase):
-                 self._check(window, 0, expected)
- 
- 
++
++import torch
++
++from sglang.kernels.ops.attention.dsv4.kv_layout import KVLayout
++from sglang.srt.mem_cache.dsv41_request_window import RequestWindow, window_layout
++from sglang.test.ci.ci_register import register_cuda_ci
++from sglang.test.test_utils import CustomTestCase
++
++register_cuda_ci(est_time=20, stage="base-b", runner_config="1-gpu-small")
++
++WINDOW = 8
++CAPACITY = 16
++NUM_SLOTS = 4
++LAYERS = 2
++
++
++def _pool_factory(layout, page_size):
++    def make(size, layers):
++        pages = -(-size // page_size)
++        g = torch.Generator(device="cuda").manual_seed(size * 31 + layers)
++        bufs = [
++            torch.randint(
++                0,
++                256,
++                (pages, layout.page_bytes(page_size)),
++                dtype=torch.uint8,
++                device="cuda",
++                generator=g,
++            )
++            for _ in range(layers)
++        ]
++        return SimpleNamespace(kv_buffer=bufs, kv_layout=layout, size=pages * page_size)
++
++    return make
++
++
 +def window_with_history():
 +    window = RequestWindow(
 +        _pool_factory(KVLayout.V4, 16),
@@ -183,5 +212,5 @@ index 2abd88e47866e8aff09482916faaf0dec991df75..4be636c28da7879a32133e25f6314364
 +        self.assertIn("device-side assert", result.stderr)
 +
 +
- if __name__ == "__main__":
-     unittest.main()
++if __name__ == "__main__":
++    unittest.main()

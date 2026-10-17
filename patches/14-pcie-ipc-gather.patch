@@ -1,8 +1,8 @@
 diff --git a/docs/docs/references/environment_variables.mdx b/docs/docs/references/environment_variables.mdx
-index ac93326d32644945b6ad8394e8a0c5ca70f7d189..03cdde65f28952f30bc5ba641f81e1187f1e8399 100644
+index 33c57fd0b2..f2c045d564 100644
 --- a/docs/docs/references/environment_variables.mdx
 +++ b/docs/docs/references/environment_variables.mdx
-@@ -1707,7 +1707,7 @@ SGLang supports various environment variables that can be used to configure its
+@@ -1717,7 +1717,7 @@ SGLang supports various environment variables that can be used to configure its
      </tr>
      <tr>
        <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><code>SGLANG_ENABLE_PCIE_IPC_ALLREDUCE</code></td>
@@ -12,7 +12,7 @@ index ac93326d32644945b6ad8394e8a0c5ca70f7d189..03cdde65f28952f30bc5ba641f81e118
      </tr>
      <tr>
 diff --git a/python/sglang/srt/distributed/device_communicators/pcie_ipc_ar.py b/python/sglang/srt/distributed/device_communicators/pcie_ipc_ar.py
-index 6a8b36db69265c0edae10aa8c6e871079c9f79f7..663ab59b0c2aa2ffdf308f035582c949f1d242d3 100644
+index 6a8b36db69..663ab59b0c 100644
 --- a/python/sglang/srt/distributed/device_communicators/pcie_ipc_ar.py
 +++ b/python/sglang/srt/distributed/device_communicators/pcie_ipc_ar.py
 @@ -204,6 +204,7 @@ class PcieIpcCommunicator:
@@ -40,7 +40,7 @@ index 6a8b36db69265c0edae10aa8c6e871079c9f79f7..663ab59b0c2aa2ffdf308f035582c949
              self._workspace.destroy()
              self._workspace = None
 diff --git a/python/sglang/srt/distributed/device_communicators/triton_symm_mem_ag.py b/python/sglang/srt/distributed/device_communicators/triton_symm_mem_ag.py
-index f60b65ed7e7d9b3b313787a4d04a3eb789696bb0..3f978b2f1f00c0cf40c2901143d5439995266bb5 100644
+index f60b65ed7e..3f978b2f1f 100644
 --- a/python/sglang/srt/distributed/device_communicators/triton_symm_mem_ag.py
 +++ b/python/sglang/srt/distributed/device_communicators/triton_symm_mem_ag.py
 @@ -16,6 +16,11 @@ import torch.distributed._symmetric_memory as symm_mem
@@ -125,7 +125,7 @@ index f60b65ed7e7d9b3b313787a4d04a3eb789696bb0..3f978b2f1f00c0cf40c2901143d54399
 +            fallback=NcclVocabGather(tp_group),
 +        )
 diff --git a/python/sglang/srt/distributed/device_communicators/vocab_gather.py b/python/sglang/srt/distributed/device_communicators/vocab_gather.py
-index 4ea0dbcf04fd2ad2fe9a9f4359e2ff7e3a5ac029..99ff255b23063f525096624c06825df4ba18a8be 100644
+index 4ea0dbcf04..99ff255b23 100644
 --- a/python/sglang/srt/distributed/device_communicators/vocab_gather.py
 +++ b/python/sglang/srt/distributed/device_communicators/vocab_gather.py
 @@ -51,6 +51,19 @@ class NcclVocabGather(VocabGather):
@@ -427,10 +427,10 @@ index 4ea0dbcf04fd2ad2fe9a9f4359e2ff7e3a5ac029..99ff255b23063f525096624c06825df4
          fallback=nccl,
      )
 diff --git a/python/sglang/srt/distributed/parallel_state.py b/python/sglang/srt/distributed/parallel_state.py
-index f5441452aef8a408ae652f3091a276bf3e63b4e2..6500bb1c890e7a394526acfe8a10f0cfc6787b5d 100644
+index 4524b21c3d..da11d29c43 100644
 --- a/python/sglang/srt/distributed/parallel_state.py
 +++ b/python/sglang/srt/distributed/parallel_state.py
-@@ -492,11 +492,15 @@ class GroupCoordinator:
+@@ -497,11 +497,15 @@ class GroupCoordinator:
              eligible_group,
          )
  
@@ -449,7 +449,7 @@ index f5441452aef8a408ae652f3091a276bf3e63b4e2..6500bb1c890e7a394526acfe8a10f0cf
                  # The IPC handshake needs the CUDA (NCCL) group, not the CPU one.
                  # Autotuning is the other way round: it rendezvouses on the host.
 diff --git a/python/sglang/srt/layers/logits_processor.py b/python/sglang/srt/layers/logits_processor.py
-index f35efc4575d18b86a4db10b7f01e115d408898be..b9a49fc8bebeb71078201beda60958e53029b935 100644
+index f35efc4575..b9a49fc8be 100644
 --- a/python/sglang/srt/layers/logits_processor.py
 +++ b/python/sglang/srt/layers/logits_processor.py
 @@ -492,6 +492,7 @@ class LogitsProcessor(nn.Module):
@@ -461,20 +461,20 @@ index f35efc4575d18b86a4db10b7f01e115d408898be..b9a49fc8bebeb71078201beda60958e5
  
          chunking_group = None
 diff --git a/python/sglang/srt/models/deepseek_v4_dspark.py b/python/sglang/srt/models/deepseek_v4_dspark.py
-index f1eccd615d32eb0abe41e6ac44628076a270bb28..e4ae525259a7b8b64539bcbb92104035327fa4a0 100644
+index 8ba4d3fb4a..0e0f99d2a2 100644
 --- a/python/sglang/srt/models/deepseek_v4_dspark.py
 +++ b/python/sglang/srt/models/deepseek_v4_dspark.py
-@@ -462,6 +462,7 @@ class DSparkV4MarkovHead(nn.Module):
+@@ -473,6 +473,7 @@ class DSparkV4MarkovHead(BaseDSparkMarkovHead):
              local_width=per_partition,
              prefer_nvlink=self._is_dsv41
              and envs.SGLANG_DSPARK_NVLINK_VOCAB_GATHER.get(),
 +            prefer_pcie_ipc=self._is_dsv41,
          )
          if shard_group.rank == 0:
-             cls_name = type(self._vocab_gather).__name__
+             cls_name = type(vocab_gather).__name__
 diff --git a/test/registered/kernels/ops/communication/test_pcie_ipc_vocab_gather.py b/test/registered/kernels/ops/communication/test_pcie_ipc_vocab_gather.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..6a4dd09d0cf2388611a6d66741e02811a7de4b10
+index 0000000000..6a4dd09d0c
 --- /dev/null
 +++ b/test/registered/kernels/ops/communication/test_pcie_ipc_vocab_gather.py
 @@ -0,0 +1,195 @@
@@ -675,7 +675,7 @@ index 0000000000000000000000000000000000000000..6a4dd09d0cf2388611a6d66741e02811
 +    multigpu_pytest_main(__name__, __file__, num_gpus=(2, 4))
 diff --git a/test/registered/unit/distributed/test_pcie_ipc_gather_selection.py b/test/registered/unit/distributed/test_pcie_ipc_gather_selection.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..8ef551d716776de8fc6521869b081d30b44108f6
+index 0000000000..8ef551d716
 --- /dev/null
 +++ b/test/registered/unit/distributed/test_pcie_ipc_gather_selection.py
 @@ -0,0 +1,551 @@

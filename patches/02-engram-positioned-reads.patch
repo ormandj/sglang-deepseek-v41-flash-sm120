@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/layers/engram.py b/python/sglang/srt/layers/engram.py
-index 68c12993362399be78961f5ae2262d957ce98e2c..585fc5c61f29c02cc8d19f00c8985e52758c2073 100644
+index 024a4b9fb2..0b56ff3d30 100644
 --- a/python/sglang/srt/layers/engram.py
 +++ b/python/sglang/srt/layers/engram.py
-@@ -780,11 +780,20 @@ class EngramEmbedding(nn.Module):
+@@ -850,11 +850,20 @@ class EngramEmbedding(nn.Module):
          return self._host_table_ptrs
  
      def _load_rows(self, param: nn.Parameter, loaded_weight: torch.Tensor):
@@ -27,7 +27,7 @@ index 68c12993362399be78961f5ae2262d957ce98e2c..585fc5c61f29c02cc8d19f00c8985e52
              self.host_table.dirty = True
  
 diff --git a/python/sglang/srt/model_loader/loader.py b/python/sglang/srt/model_loader/loader.py
-index 2493b0702e22d24a486a43bbcf403e3091c9e749..67bfddbd5ea11eb6b22bfb44f40ba5c7d97753f6 100644
+index 019792e13f..27fefcc805 100644
 --- a/python/sglang/srt/model_loader/loader.py
 +++ b/python/sglang/srt/model_loader/loader.py
 @@ -119,6 +119,7 @@ from sglang.srt.model_loader.weight_utils import (
@@ -38,7 +38,7 @@ index 2493b0702e22d24a486a43bbcf403e3091c9e749..67bfddbd5ea11eb6b22bfb44f40ba5c7
      initialize_capture_safe_weights,
      initialize_dummy_weights,
      instanttensor_weights_iterator,
-@@ -457,8 +458,9 @@ class DefaultModelLoader(BaseModelLoader):
+@@ -456,8 +457,9 @@ class DefaultModelLoader(BaseModelLoader):
          host_resident_weight_patterns: Optional[Tuple[str, ...]] = None
          """Substrings of checkpoint tensor names the model keeps in host memory.
  
@@ -50,7 +50,7 @@ index 2493b0702e22d24a486a43bbcf403e3091c9e749..67bfddbd5ea11eb6b22bfb44f40ba5c7
  
          @classmethod
          def init_new(cls, model_config: ModelConfig, model):
-@@ -700,13 +702,11 @@ class DefaultModelLoader(BaseModelLoader):
+@@ -699,13 +701,11 @@ class DefaultModelLoader(BaseModelLoader):
              if host_files:
                  logger.info(
                      "Loading %d checkpoint file(s) with host-resident weights "
@@ -68,7 +68,7 @@ index 2493b0702e22d24a486a43bbcf403e3091c9e749..67bfddbd5ea11eb6b22bfb44f40ba5c7
                  weights_iterator = itertools.chain(
                      weights_iterator,
 diff --git a/python/sglang/srt/model_loader/weight_utils.py b/python/sglang/srt/model_loader/weight_utils.py
-index 66cda9522a51af5eee40697a58c8d45acbea3a88..bff52dfeda6db4fb8c2a6b73da8a668e115f9f6f 100644
+index a77aecb388..d096d1567c 100644
 --- a/python/sglang/srt/model_loader/weight_utils.py
 +++ b/python/sglang/srt/model_loader/weight_utils.py
 @@ -12,6 +12,7 @@ import hashlib
@@ -79,7 +79,7 @@ index 66cda9522a51af5eee40697a58c8d45acbea3a88..bff52dfeda6db4fb8c2a6b73da8a668e
  import os
  import re
  import struct
-@@ -1180,6 +1181,100 @@ def get_pp_stage_load_group() -> LoadGroup:
+@@ -1192,6 +1193,100 @@ def get_pp_stage_load_group() -> LoadGroup:
      return parallel.tp_group if parallel.pp_size > 1 else _DEFAULT_LOAD_GROUP
  
  
@@ -182,13 +182,14 @@ index 66cda9522a51af5eee40697a58c8d45acbea3a88..bff52dfeda6db4fb8c2a6b73da8a668e
      extra_config: Optional[dict] = None,
 diff --git a/test/registered/unit/model_loader/test_host_resident_rows.py b/test/registered/unit/model_loader/test_host_resident_rows.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..bc2418b91362d3ca1959eb51dbdda5c643469aee
+index 0000000000..bcdd74419d
 --- /dev/null
 +++ b/test/registered/unit/model_loader/test_host_resident_rows.py
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,220 @@
 +"""Positioned row reads of host-resident safetensors weights."""
 +
 +import errno
++import itertools
 +import os
 +import random
 +import shutil
@@ -213,6 +214,12 @@ index 0000000000000000000000000000000000000000..bc2418b91362d3ca1959eb51dbdda5c6
 +register_cpu_ci(est_time=5, suite="base-a-test-cpu")
 +
 +NUM_ROWS, DIM = 37, 64  # 37 rows split unevenly over 2, 3 and 4 ranks.
++# Hash-column segments of the table (prefix sums): 12 columns shard on column
++# boundaries over 1-4 ranks; 5 columns fall back to the equal-row split.
++COLUMN_BOUNDS = {
++    "columns": (0, 2, 5, 7, 11, 13, 17, 19, 23, 29, 31, 34, 37),
++    "rows": (0, 7, 14, 22, 29, 37),
++}
 +WEIGHT = "layers.1.engram.embed.weight"
 +SCALE = "layers.1.engram.embed.scale"
 +FP32_TABLE = "layers.1.engram.embed.fp32"
@@ -340,7 +347,7 @@ index 0000000000000000000000000000000000000000..bc2418b91362d3ca1959eb51dbdda5c6
 +        with self.assertRaises(EOFError):
 +            source.read_rows_into(torch.empty_like(dst), 1)
 +
-+    def _load_engram(self, tp_size, tp_rank, layout, weights):
++    def _load_engram(self, tp_size, tp_rank, layout, weights, split="columns"):
 +        """Load WEIGHT and SCALE into one rank's EngramEmbedding."""
 +        parallel = SimpleNamespace(tp_size=tp_size, tp_rank=tp_rank, tp_group=None)
 +        with (
@@ -349,7 +356,9 @@ index 0000000000000000000000000000000000000000..bc2418b91362d3ca1959eb51dbdda5c6
 +            envs.SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE.override(layout is not None),
 +            envs.SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT.override(layout or "shared"),
 +        ):
-+            embed = engram.EngramEmbedding(NUM_ROWS, DIM, layer_id=1)
++            embed = engram.EngramEmbedding(
++                NUM_ROWS, DIM, layer_id=1, column_bounds=COLUMN_BOUNDS[split]
++            )
 +        for param, name in ((embed.weight, WEIGHT), (embed.scale, SCALE)):
 +            param.weight_loader(param, weights[name])
 +        return embed
@@ -357,27 +366,30 @@ index 0000000000000000000000000000000000000000..bc2418b91362d3ca1959eb51dbdda5c6
 +    def test_engram_shards_match_mmap_path(self):
 +        # Device rows, and both host-table layouts with weight and scale
 +        # carved out of one host buffer.
-+        for layout in (None, "per_rank", "shared"):
-+            for tp_size in (1, 2, 3, 4):
-+                for tp_rank in range(tp_size):
-+                    msg = f"{layout=} {tp_size=} {tp_rank=}"
-+                    via_mmap = self._load_engram(tp_size, tp_rank, layout, self.mmap)
-+                    via_rows = self._load_engram(tp_size, tp_rank, layout, self.items)
-+                    rows = slice(via_rows.row_start, via_rows.row_start + via_rows.rows)
-+                    for name in ("weight", "scale"):
-+                        actual = getattr(via_rows, name).data
-+                        self.assertBytesEqual(actual, getattr(via_mmap, name).data, msg)
-+                        own = actual[rows] if layout == "shared" else actual
-+                        expected = self.tensors[WEIGHT if name == "weight" else SCALE]
-+                        self.assertBytesEqual(own, expected[rows], msg)
-+                        if layout == "shared":
-+                            # Other ranks' rows are left untouched.
-+                            others = torch.ones(NUM_ROWS, dtype=torch.bool)
-+                            others[rows] = False
-+                            untouched = actual[others].view(torch.uint8) == SENTINEL
-+                            self.assertTrue(untouched.all(), msg)
-+                    if layout is not None:
-+                        self.assertTrue(via_rows.host_table.dirty, msg)
++        for layout, split, tp_size in itertools.product(
++            (None, "per_rank", "shared"), COLUMN_BOUNDS, (1, 2, 3, 4)
++        ):
++            for tp_rank in range(tp_size):
++                msg = f"{layout=} {split=} {tp_size=} {tp_rank=}"
++                via_mmap = self._load_engram(tp_size, tp_rank, layout, self.mmap, split)
++                via_rows = self._load_engram(
++                    tp_size, tp_rank, layout, self.items, split
++                )
++                rows = slice(via_rows.row_start, via_rows.row_start + via_rows.rows)
++                for name in ("weight", "scale"):
++                    actual = getattr(via_rows, name).data
++                    self.assertBytesEqual(actual, getattr(via_mmap, name).data, msg)
++                    own = actual[rows] if layout == "shared" else actual
++                    expected = self.tensors[WEIGHT if name == "weight" else SCALE]
++                    self.assertBytesEqual(own, expected[rows], msg)
++                    if layout == "shared":
++                        # Other ranks' rows are left untouched.
++                        others = torch.ones(NUM_ROWS, dtype=torch.bool)
++                        others[rows] = False
++                        untouched = actual[others].view(torch.uint8) == SENTINEL
++                        self.assertTrue(untouched.all(), msg)
++                if layout is not None:
++                    self.assertTrue(via_rows.host_table.dirty, msg)
 +
 +    def test_rejects_mismatched_destinations(self):
 +        source = self.items[WEIGHT]
@@ -395,7 +407,7 @@ index 0000000000000000000000000000000000000000..bc2418b91362d3ca1959eb51dbdda5c6
 +if __name__ == "__main__":
 +    unittest.main()
 diff --git a/test/registered/unit/model_loader/test_instanttensor_loader.py b/test/registered/unit/model_loader/test_instanttensor_loader.py
-index 98bafba570c5b1daabcf32a060a05a36f6c4e9d8..60011dc686f047c63c3d22a0f301eb6feb1b0023 100644
+index 98bafba570..60011dc686 100644
 --- a/test/registered/unit/model_loader/test_instanttensor_loader.py
 +++ b/test/registered/unit/model_loader/test_instanttensor_loader.py
 @@ -385,6 +385,9 @@ class TestInstantTensorHostResidentWeights(CustomTestCase):

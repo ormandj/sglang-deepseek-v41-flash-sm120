@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/managers/scheduler_components/internal_state.py b/python/sglang/srt/managers/scheduler_components/internal_state.py
-index a59985542e1c34387f3a42e6aa9fa6e4f45ecaa5..917e198c5312f1c06ad2859ec90d425053b91887 100644
+index 574f4a7969..3e5c36e21f 100644
 --- a/python/sglang/srt/managers/scheduler_components/internal_state.py
 +++ b/python/sglang/srt/managers/scheduler_components/internal_state.py
-@@ -217,6 +217,24 @@ class SchedulerInternalStateController:
+@@ -218,6 +218,24 @@ class SchedulerInternalStateController:
          self._require_dspark_worker(key, "set_dspark_forced_budget_frac")
          if value is not None and not (0.0 < float(value) <= 1.0):
              raise UpdateRejected(f"{key} must be in (0, 1] or null, got {value}.")
@@ -28,10 +28,10 @@ index a59985542e1c34387f3a42e6aa9fa6e4f45ecaa5..917e198c5312f1c06ad2859ec90d4250
      def _apply_dspark_budget_frac(self, key: str, value: Any) -> None:
          # A worker command, not a server arg: keep it out of the override.
 diff --git a/python/sglang/srt/speculative/dspark_components/dspark_planner.py b/python/sglang/srt/speculative/dspark_components/dspark_planner.py
-index b025f1000962c02fa599a5d6372da42d16478091..4096f867cd8cbe065dfb0b6558cd4617c95d87dc 100644
+index f0793f3fc5..542a102170 100644
 --- a/python/sglang/srt/speculative/dspark_components/dspark_planner.py
 +++ b/python/sglang/srt/speculative/dspark_components/dspark_planner.py
-@@ -418,10 +418,15 @@ class DSparkVerifyPlanner:
+@@ -380,10 +380,15 @@ class DSparkVerifyPlanner:
      ) -> Optional[RaggedVerifyLayout]:
          if self._ragged_verify_mode is RaggedVerifyMode.STATIC:
              return None
@@ -50,7 +50,7 @@ index b025f1000962c02fa599a5d6372da42d16478091..4096f867cd8cbe065dfb0b6558cd4617
              if key not in self._uniform_layout_cache:
                  self._uniform_layout_cache[key] = uniform_ragged_layout(
 diff --git a/test/registered/spec/dspark/test_dspark_scheduler.py b/test/registered/spec/dspark/test_dspark_scheduler.py
-index bc1a030a67f7ded0ec31a0a94b64d4cfe76fdeeb..029d5f04e08cebad73d20c31354cfdec39bf5117 100644
+index bc1a030a67..029d5f04e0 100644
 --- a/test/registered/spec/dspark/test_dspark_scheduler.py
 +++ b/test/registered/spec/dspark/test_dspark_scheduler.py
 @@ -1,14 +1,17 @@

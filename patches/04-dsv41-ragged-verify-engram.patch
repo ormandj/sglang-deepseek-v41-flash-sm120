@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/layers/attention/dsv4/dsv41_sparse.py b/python/sglang/srt/layers/attention/dsv4/dsv41_sparse.py
-index 7a32a5a10711e8ce90f9e7a0f7cde210c875f85b..ac8f264ff9987908489b7f502a9d8890a80abeaa 100644
+index 7a32a5a107..ac8f264ff9 100644
 --- a/python/sglang/srt/layers/attention/dsv4/dsv41_sparse.py
 +++ b/python/sglang/srt/layers/attention/dsv4/dsv41_sparse.py
 @@ -20,6 +20,10 @@ from sglang.kernels.ops.gemm.router_gemv_hip import rocm_gemv_split_k_max_tokens
@@ -28,10 +28,10 @@ index 7a32a5a10711e8ce90f9e7a0f7cde210c875f85b..ac8f264ff9987908489b7f502a9d8890
              req, int(forward_batch.spec_info.draft_token_num), output_size=num_tokens
          )
 diff --git a/python/sglang/srt/layers/engram.py b/python/sglang/srt/layers/engram.py
-index 585fc5c61f29c02cc8d19f00c8985e52758c2073..e8c6328f01b4a90d6de9b5c7ecd9bf3d0a968cda 100644
+index 0b56ff3d30..67c34a7164 100644
 --- a/python/sglang/srt/layers/engram.py
 +++ b/python/sglang/srt/layers/engram.py
-@@ -52,6 +52,10 @@ from sglang.srt.layers.quantization.base_config import QuantizationConfig
+@@ -53,6 +53,10 @@ from sglang.srt.layers.quantization.base_config import QuantizationConfig
  from sglang.srt.managers.schedule_batch import MM_PAD_SHIFT_VALUE
  from sglang.srt.model_executor.forward_batch_info import ForwardBatch
  from sglang.srt.runtime_context import get_model, get_parallel, get_serving
@@ -42,7 +42,7 @@ index 585fc5c61f29c02cc8d19f00c8985e52758c2073..e8c6328f01b4a90d6de9b5c7ecd9bf3d
  from sglang.srt.utils import add_prefix, is_cuda, is_gfx95_supported, is_hip
  from sglang.srt.utils.hf_transformers.tokenizer import get_tokenizer
  
-@@ -309,12 +313,21 @@ class EngramHasher(nn.Module):
+@@ -346,12 +350,21 @@ class EngramHasher(nn.Module):
              kmode = MODE_DECODE
              commit_rows, commit_last = req_slots, None
          elif mode.is_target_verify():
@@ -71,7 +71,7 @@ index 585fc5c61f29c02cc8d19f00c8985e52758c2073..e8c6328f01b4a90d6de9b5c7ecd9bf3d
          else:
              assert mode.is_extend(), (
 diff --git a/python/sglang/srt/speculative/ragged_verify.py b/python/sglang/srt/speculative/ragged_verify.py
-index 92542e55304016493287193acb934530bb7964c5..b43aa83e00166f18878c82554ed6e87944de47a0 100644
+index 92542e5530..b43aa83e00 100644
 --- a/python/sglang/srt/speculative/ragged_verify.py
 +++ b/python/sglang/srt/speculative/ragged_verify.py
 @@ -225,6 +225,19 @@ def resolve_ragged_verify_layout(forward_batch) -> Optional[RaggedVerifyLayout]:
@@ -96,7 +96,7 @@ index 92542e55304016493287193acb934530bb7964c5..b43aa83e00166f18878c82554ed6e879
      cu_seqlens_q: torch.Tensor
 diff --git a/test/registered/kernels/ops/attention/dsv4/test_dsv41_compact_verify.py b/test/registered/kernels/ops/attention/dsv4/test_dsv41_compact_verify.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..57cc1c020d18cc07c0aca616c2d89418ca8e88f6
+index 0000000000..57cc1c020d
 --- /dev/null
 +++ b/test/registered/kernels/ops/attention/dsv4/test_dsv41_compact_verify.py
 @@ -0,0 +1,226 @@
@@ -327,7 +327,7 @@ index 0000000000000000000000000000000000000000..57cc1c020d18cc07c0aca616c2d89418
 +if __name__ == "__main__":
 +    unittest.main()
 diff --git a/test/registered/spec/dspark/test_ragged_verify.py b/test/registered/spec/dspark/test_ragged_verify.py
-index 95a713b0559dbdf8033e3c76bcef0a7fe6da49a0..c2ea087813138f7cd22c970d2133f90ff51e7ca4 100644
+index 95a713b055..c2ea087813 100644
 --- a/test/registered/spec/dspark/test_ragged_verify.py
 +++ b/test/registered/spec/dspark/test_ragged_verify.py
 @@ -5,6 +5,7 @@ import torch

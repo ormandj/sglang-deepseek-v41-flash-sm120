@@ -1,14 +1,15 @@
 diff --git a/csrc/mxfp8_gemm_cutlass_sm120.cu b/csrc/mxfp8_gemm_cutlass_sm120.cu
-index 11145e27143bccceb7debf4210ec477ca4b8db8c..18ec9038087ad874decd23ff7d09fbac42af099a 100644
+index 11145e271..48ed65b53 100644
 --- a/csrc/mxfp8_gemm_cutlass_sm120.cu
 +++ b/csrc/mxfp8_gemm_cutlass_sm120.cu
-@@ -54,6 +54,23 @@ inline const std::vector<CutlassGemmConfig>& GetMxfp8GemmConfigsSm120() {
+@@ -54,6 +54,24 @@ inline const std::vector<CutlassGemmConfig>& GetMxfp8GemmConfigsSm120() {
  
  namespace {
  
 +// Tactic for untuned calls: the swap-AB 128x32 tile, which puts N on the 128-wide MMA
-+// side. At decode-sized M it is several times faster than the non-swapped 128x32 tile,
-+// and on par with it at large M.
++// side instead of leaving most of that side empty at decode-sized M. On the shapes
++// benchmarked (RTX PRO 6000) it was 1.5-7.9x faster than the non-swapped 128x32 tile
++// at M <= 24 and within 3.3% of it at M from 256 to 8192.
 +int64_t defaultMxfp8TacticSm120() {
 +  static const int64_t kDefault = []() {
 +    const auto& configs = detail::GetMxfp8GemmConfigsSm120();
@@ -26,7 +27,7 @@ index 11145e27143bccceb7debf4210ec477ca4b8db8c..18ec9038087ad874decd23ff7d09fbac
  CutlassGemmConfig getMxfp8GemmConfigSm120(int64_t tactic) {
    const auto& globalConfigs = detail::GetMxfp8GemmConfigsSm120();
    TVM_FFI_ICHECK(tactic >= 0 && tactic < static_cast<int64_t>(globalConfigs.size()))
-@@ -178,7 +195,7 @@ void mxfp8_gemm_sm120_impl(TensorView mat1, TensorView mat2, TensorView mat1Scal
+@@ -178,7 +196,7 @@ void mxfp8_gemm_sm120_impl(TensorView mat1, TensorView mat2, TensorView mat1Scal
    }
  
    if (tactic == -1) {
@@ -36,7 +37,7 @@ index 11145e27143bccceb7debf4210ec477ca4b8db8c..18ec9038087ad874decd23ff7d09fbac
    auto config = getMxfp8GemmConfigSm120(tactic);
  
 diff --git a/tests/gemm/test_mm_mxfp8_sm120.py b/tests/gemm/test_mm_mxfp8_sm120.py
-index a2f87b57b341d3da8873eb945201c6eb58d622cd..fcefb985565720d3205ce3b6e64613ad3e29258a 100644
+index a2f87b57b..fcefb9855 100644
 --- a/tests/gemm/test_mm_mxfp8_sm120.py
 +++ b/tests/gemm/test_mm_mxfp8_sm120.py
 @@ -95,6 +95,39 @@ def test_mm_mxfp8_sm120_all_tactics(out_dtype):

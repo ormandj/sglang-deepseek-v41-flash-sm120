@@ -1,5 +1,5 @@
 diff --git a/python/sglang/benchmark/dspark_sts_fit.py b/python/sglang/benchmark/dspark_sts_fit.py
-index ec8f094311a122de1fbd8dd595838b3a00c52e71..ecafc9f5e885883b6e23a9fc89a0727f1b05636f 100644
+index ec8f094311..ecafc9f5e8 100644
 --- a/python/sglang/benchmark/dspark_sts_fit.py
 +++ b/python/sglang/benchmark/dspark_sts_fit.py
 @@ -51,12 +51,16 @@ def fit_sts_temperatures(
@@ -139,10 +139,10 @@ index ec8f094311a122de1fbd8dd595838b3a00c52e71..ecafc9f5e885883b6e23a9fc89a0727f
      parser.add_argument(
          "--out",
 diff --git a/python/sglang/srt/speculative/dspark_components/dspark_observability.py b/python/sglang/srt/speculative/dspark_components/dspark_observability.py
-index 0a1c026f55ca5703f8eb4e06edeb0f167595b31c..bb9754c1d7f20291f7492751ed4ce0babda559a3 100644
+index ce3395ee61..1f964fd512 100644
 --- a/python/sglang/srt/speculative/dspark_components/dspark_observability.py
 +++ b/python/sglang/srt/speculative/dspark_components/dspark_observability.py
-@@ -766,7 +766,14 @@ class DsparkStepObservers:
+@@ -767,7 +767,14 @@ class DsparkStepObservers:
                  "SGLANG_SIMULATE_ACC_LEN (simulated correct_len breaks the "
                  "accept-probability bookkeeping of the estimator)."
              )
@@ -158,35 +158,31 @@ index 0a1c026f55ca5703f8eb4e06edeb0f167595b31c..bb9754c1d7f20291f7492751ed4ce0ba
          self._sts_recorder: Optional[StsDataRecorder] = None
  
      # --- step lifecycle -------------------------------------------------
-@@ -839,11 +846,7 @@ class DsparkStepObservers:
+@@ -841,10 +848,7 @@ class DsparkStepObservers:
      ) -> None:
          planner = self._planner
-         if not proposal_folded:
--            self._maybe_record_sts_collect(
--                verify_ids_2d=verify_ids_2d,
--                target_logits=target_logits,
--                bs=bs,
--            )
-+            self._maybe_record_sts_collect(correct_len=correct_len, layout=layout)
-             self._confidence_probe.maybe_observe(
-                 carries_confidence=planner.carries_confidence,
-                 is_compact_mode=planner.is_compact_mode,
-@@ -926,13 +929,7 @@ class DsparkStepObservers:
-                 )
-             )
- 
--    def _maybe_record_sts_collect(
--        self,
--        *,
+         self._maybe_record_sts_collect(
+-            confidence_raw=confidence_raw,
+-            verify_ids_2d=verify_ids_2d,
+-            target_logits=target_logits,
+-            bs=bs,
++            confidence_raw=confidence_raw, correct_len=correct_len, layout=layout
+         )
+         self._confidence_probe.maybe_observe(
+             carries_confidence=planner.carries_confidence,
+@@ -932,9 +936,8 @@ class DsparkStepObservers:
+         self,
+         *,
+         confidence_raw: Optional[torch.Tensor],
 -        verify_ids_2d: torch.Tensor,
 -        target_logits: Optional[torch.Tensor],
 -        bs: int,
--    ) -> None:
-+    def _maybe_record_sts_collect(self, *, correct_len: torch.Tensor, layout) -> None:
++        correct_len: torch.Tensor,
++        layout,
+     ) -> None:
          if not self._sts_collect_path:
              return
-         if not self._planner.carries_confidence:
-@@ -946,14 +943,10 @@ class DsparkStepObservers:
+@@ -946,14 +949,10 @@ class DsparkStepObservers:
                  gamma=self._gamma,
                  flush_every=_STS_COLLECT_FLUSH_EVERY,
              )
@@ -206,7 +202,7 @@ index 0a1c026f55ca5703f8eb4e06edeb0f167595b31c..bb9754c1d7f20291f7492751ed4ce0ba
 +            verify_lens=None if layout is None else layout.verify_lens,
          )
 diff --git a/python/sglang/srt/speculative/dspark_components/dspark_sts.py b/python/sglang/srt/speculative/dspark_components/dspark_sts.py
-index 01d1a884267a97ffabbc73a8dc7c464fb0cdc58d..db2872c12b47c06952b445451def56fbdbb12b3e 100644
+index 01d1a88426..db2872c12b 100644
 --- a/python/sglang/srt/speculative/dspark_components/dspark_sts.py
 +++ b/python/sglang/srt/speculative/dspark_components/dspark_sts.py
 @@ -1,6 +1,7 @@
@@ -267,7 +263,7 @@ index 01d1a884267a97ffabbc73a8dc7c464fb0cdc58d..db2872c12b47c06952b445451def56fb
 +        self._observed_mask_buffer.clear()
          self._shard_ct += 1
 diff --git a/test/registered/spec/dspark/test_dspark_sts.py b/test/registered/spec/dspark/test_dspark_sts.py
-index b7b890c65bca0e08e1fefd8c21eafc48e4778776..ddb82134ef0c5f31eb2398b8dd2c93615eb43068 100644
+index ff953ca752..4e71377134 100644
 --- a/test/registered/spec/dspark/test_dspark_sts.py
 +++ b/test/registered/spec/dspark/test_dspark_sts.py
 @@ -1,15 +1,22 @@
@@ -286,14 +282,14 @@ index b7b890c65bca0e08e1fefd8c21eafc48e4778776..ddb82134ef0c5f31eb2398b8dd2c9361
 +    fit,
      fit_sts_temperatures,
  )
- from sglang.srt.models.dspark import DSparkConfidenceHead
+ from sglang.srt.models.dspark import DSparkConfidenceHead, VanillaMarkov
 +from sglang.srt.speculative.dspark_components.dspark_observability import (
 +    DsparkStepObservers,
 +)
  from sglang.srt.speculative.dspark_components.dspark_sts import (
      DSparkStsCalibration,
      StsDataRecorder,
-@@ -115,6 +122,41 @@ class TestFitStsTemperatures(CustomTestCase):
+@@ -142,6 +149,41 @@ class TestFitStsTemperatures(CustomTestCase):
          mean_after = sum(result["ece_after"]) / gamma
          self.assertLess(mean_after, 0.25 * mean_before)
  
@@ -335,7 +331,7 @@ index b7b890c65bca0e08e1fefd8c21eafc48e4778776..ddb82134ef0c5f31eb2398b8dd2c9361
  
  class TestStsDataRecorder(CustomTestCase):
      def test_builds_prefix_mask_and_writes_shard(self):
-@@ -136,6 +178,89 @@ class TestStsDataRecorder(CustomTestCase):
+@@ -163,6 +205,89 @@ class TestStsDataRecorder(CustomTestCase):
              shard = torch.load(f"{stem}.0.pt")
          self.assertTrue(torch.equal(shard["prefix_mask"], expected_prefix_mask))
          self.assertTrue(torch.equal(shard["logits"], confidence_raw.to(torch.float32)))
@@ -382,7 +378,6 @@ index b7b890c65bca0e08e1fefd8c21eafc48e4778776..ddb82134ef0c5f31eb2398b8dd2c9361
 +        observers._verify_num_draft_tokens = width
 +        observers._planner = SimpleNamespace(
 +            carries_confidence=True,
-+            last_confidence_raw=confidence_raw,
 +            is_compact_mode=True,
 +        )
 +        observers._confidence_probe = SimpleNamespace(maybe_observe=lambda **_: None)
@@ -400,6 +395,7 @@ index b7b890c65bca0e08e1fefd8c21eafc48e4778776..ddb82134ef0c5f31eb2398b8dd2c9361
 +                target_logits=target_logits.view(bs * width, -1),
 +                layout=SimpleNamespace(verify_lens=torch.tensor([4, 2])),
 +                confidence=None,
++                confidence_raw=confidence_raw,
 +                prefix_lens=None,
 +                draft_tokens=drafts,
 +                draft_block=None,

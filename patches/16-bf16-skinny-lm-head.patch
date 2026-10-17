@@ -1,8 +1,8 @@
 diff --git a/python/sglang/kernels/ops/gemm/__init__.py b/python/sglang/kernels/ops/gemm/__init__.py
-index 77e7e84b4e43a0df8291e9e42510f923a62db33b..77ff403064c165308fd376b51f364ae666865ebf 100644
+index 1f7e96b73f..4b5727b917 100644
 --- a/python/sglang/kernels/ops/gemm/__init__.py
 +++ b/python/sglang/kernels/ops/gemm/__init__.py
-@@ -433,6 +433,19 @@ register_kernel(
+@@ -500,6 +500,19 @@ register_kernel(
          capabilities=frozenset({CapabilityRequirement.CUDA}),
      )
  )
@@ -24,7 +24,7 @@ index 77e7e84b4e43a0df8291e9e42510f923a62db33b..77ff403064c165308fd376b51f364ae6
          op="gemm.hopper_bf16_gemv",
 diff --git a/python/sglang/kernels/ops/gemm/bf16_skinny_gemm.py b/python/sglang/kernels/ops/gemm/bf16_skinny_gemm.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..364a0f30bbea70bf9beb47b5aa1a22665c8496b9
+index 0000000000..364a0f30bb
 --- /dev/null
 +++ b/python/sglang/kernels/ops/gemm/bf16_skinny_gemm.py
 @@ -0,0 +1,107 @@
@@ -136,21 +136,21 @@ index 0000000000000000000000000000000000000000..364a0f30bbea70bf9beb47b5aa1a2266
 +        )
 +    return out
 diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
-index 46d30c9fbc34e41b4319753d95064090f8262011..7ca367a8e98b3919642febc8c9e1e0140a6c92d1 100644
+index 6727780fe2..79990eafb7 100644
 --- a/python/sglang/srt/environ.py
 +++ b/python/sglang/srt/environ.py
-@@ -540,6 +540,9 @@ class Envs:
-     SGLANG_DSPARK_ENABLE_SPS_RECORD = EnvBool(False)
-     SGLANG_DSPARK_FAST_KERNEL = EnvBool(True)
-     SGLANG_DSPARK_FP32_LM_HEAD = EnvBool(False)
+@@ -547,6 +547,9 @@ class Envs:
+     # Argmax every draft row, sampling requests included, accepted as a one-hot
+     # draft: no step logits kept, lower acceptance at high temperatures.
+     SGLANG_DSPARK_USE_GREEDY_DRAFT = EnvBool(False)
 +    # BF16 LM head (target and DSpark draft) at <= 16 rows through a weight-streaming
 +    # Triton kernel instead of cuBLAS; each row's result is independent of the batch.
 +    SGLANG_ENABLE_BF16_SKINNY_LM_HEAD = EnvBool(False)
-     SGLANG_DSPARK_FAST_SAMPLING = EnvBool(True)
-     SGLANG_DSPARK_FOLDED_SAMPLING = EnvInt(DsparkFoldedSampling.AUTO)
      SGLANG_DSPARK_FOLDED_PROPOSAL = EnvBool(True)
+     SGLANG_DSPARK_STACKED_CTX_KV = EnvBool(True)
+     SGLANG_DSPARK_EMBED_IN_GRAPH = EnvBool(True)
 diff --git a/python/sglang/srt/layers/logits_processor.py b/python/sglang/srt/layers/logits_processor.py
-index b9a49fc8bebeb71078201beda60958e53029b935..912dcd741c7102ecebeabac3c444ccb18e502f0b 100644
+index b9a49fc8be..912dcd741c 100644
 --- a/python/sglang/srt/layers/logits_processor.py
 +++ b/python/sglang/srt/layers/logits_processor.py
 @@ -119,6 +119,21 @@ class SamplingMaskOutput:
@@ -187,10 +187,10 @@ index b9a49fc8bebeb71078201beda60958e53029b935..912dcd741c7102ecebeabac3c444ccb1
              # GGUF models
              # TODO: use weight_packed_linear for GGUF models
 diff --git a/python/sglang/srt/models/dspark.py b/python/sglang/srt/models/dspark.py
-index c39d13200d087821bc6dd5f0a7e776914fa7fd61..3ff776ea4ca737a40c38329d48994b487d1582a5 100644
+index 81ceb973ab..6a535abd0d 100644
 --- a/python/sglang/srt/models/dspark.py
 +++ b/python/sglang/srt/models/dspark.py
-@@ -13,7 +13,10 @@ from sglang.kernels.ops.speculative.dspark.dspark_draft_model import (
+@@ -13,7 +13,10 @@ from sglang.kernels.ops.memory.ptr_table import make_ptr_table
  from sglang.srt.distributed.communication_op import tensor_model_parallel_all_gather
  from sglang.srt.environ import envs
  from sglang.srt.layers.linear import ReplicatedLinear
@@ -202,7 +202,7 @@ index c39d13200d087821bc6dd5f0a7e776914fa7fd61..3ff776ea4ca737a40c38329d48994b48
  from sglang.srt.mem_cache.memory_pool import KVWriteLoc
  from sglang.srt.model_loader.weight_utils import default_weight_loader
  from sglang.srt.models.dflash import DFlashDraftModel
-@@ -45,8 +48,7 @@ def project_through_lm_head(hidden: torch.Tensor, lm_head: nn.Module) -> torch.T
+@@ -52,8 +55,7 @@ def project_through_lm_head(hidden: torch.Tensor, lm_head: nn.Module) -> torch.T
      quant_method = lm_head.quant_method
      if should_apply_lm_head_quant_method(lm_head, quant_method):
          return quant_method.apply(lm_head, hidden, None)
@@ -211,10 +211,10 @@ index c39d13200d087821bc6dd5f0a7e776914fa7fd61..3ff776ea4ca737a40c38329d48994b48
 +    return bf16_lm_head_matmul(hidden, lm_head.weight)
  
  
- def run_markov_block(
+ class VocabShard(msgspec.Struct, frozen=True):
 diff --git a/test/registered/kernels/ops/gemm/test_bf16_skinny_gemm.py b/test/registered/kernels/ops/gemm/test_bf16_skinny_gemm.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..7d979e806997221f6400ea6765a2de028405f6a9
+index 0000000000..7d979e8069
 --- /dev/null
 +++ b/test/registered/kernels/ops/gemm/test_bf16_skinny_gemm.py
 @@ -0,0 +1,153 @@
@@ -373,7 +373,7 @@ index 0000000000000000000000000000000000000000..7d979e806997221f6400ea6765a2de02
 +    unittest.main()
 diff --git a/test/registered/unit/layers/test_logits_processor_bf16_lm_head.py b/test/registered/unit/layers/test_logits_processor_bf16_lm_head.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..7a71726392c86e1945c785116b2e1ad77401a581
+index 0000000000..7a71726392
 --- /dev/null
 +++ b/test/registered/unit/layers/test_logits_processor_bf16_lm_head.py
 @@ -0,0 +1,95 @@

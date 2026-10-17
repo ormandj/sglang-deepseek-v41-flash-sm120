@@ -1,9 +1,9 @@
 diff --git a/python/sglang/kernels/ops/layernorm/mhc.py b/python/sglang/kernels/ops/layernorm/mhc.py
-index dae2556e703ba72b9628c956469f41d364069e7c..928259a510eae99387fabeaeaa8363b979a0216c 100644
+index bc7c7035c3..eae5961c8c 100644
 --- a/python/sglang/kernels/ops/layernorm/mhc.py
 +++ b/python/sglang/kernels/ops/layernorm/mhc.py
-@@ -2333,11 +2333,17 @@ def _num_stages_for(m: int, k: int) -> int:
-     return _HC_MIX_NUM_STAGES
+@@ -2326,11 +2326,17 @@ def _block_m_for(m: int) -> int:
+     return _HC_MIX_BLOCK_M
  
  
 -def _num_slices_for(k: int) -> int:
@@ -23,7 +23,7 @@ index dae2556e703ba72b9628c956469f41d364069e7c..928259a510eae99387fabeaeaa8363b9
          if blocks % n == 0:
              return n
      return 1
-@@ -2466,6 +2472,82 @@ def _hc_mix_reduce_sinkhorn_kernel(
+@@ -2459,6 +2465,82 @@ def _hc_mix_reduce_sinkhorn_kernel(
      tl.store(comb_ptr + row * HC * HC + jj * HC + kk, comb)
  
  
@@ -106,7 +106,7 @@ index dae2556e703ba72b9628c956469f41d364069e7c..928259a510eae99387fabeaeaa8363b9
  def hc_mix_stats_sinkhorn(
      x_flat: torch.Tensor,
      hc_fn: torch.Tensor,
-@@ -2475,11 +2557,14 @@ def hc_mix_stats_sinkhorn(
+@@ -2468,11 +2550,14 @@ def hc_mix_stats_sinkhorn(
      sinkhorn_iters: int,
      rms_eps: float,
      hc_eps: float,
@@ -122,7 +122,7 @@ index dae2556e703ba72b9628c956469f41d364069e7c..928259a510eae99387fabeaeaa8363b9
      """
      assert x_flat.dim() == 2 and hc_fn.dim() == 2
      assert x_flat.stride(1) == 1 and hc_fn.stride(1) == 1
-@@ -2494,7 +2579,7 @@ def hc_mix_stats_sinkhorn(
+@@ -2487,7 +2572,7 @@ def hc_mix_stats_sinkhorn(
      if m == 0:
          return pre, post, comb
  
@@ -131,7 +131,7 @@ index dae2556e703ba72b9628c956469f41d364069e7c..928259a510eae99387fabeaeaa8363b9
      mix_pad = max(16, triton.next_power_of_2(mix))
      part_mix = torch.empty((num_slices, m, mix), dtype=torch.float32, device=dev)
      part_sq = torch.empty((num_slices, m), dtype=torch.float32, device=dev)
-@@ -2535,7 +2620,8 @@ def hc_mix_stats_sinkhorn(
+@@ -2528,7 +2613,8 @@ def hc_mix_stats_sinkhorn(
              hc_eps=hc_eps,
          )
          return pre, post, comb
@@ -141,7 +141,7 @@ index dae2556e703ba72b9628c956469f41d364069e7c..928259a510eae99387fabeaeaa8363b9
          part_mix,
          part_sq,
          hc_scale.float().contiguous(),
-@@ -2552,6 +2638,7 @@ def hc_mix_stats_sinkhorn(
+@@ -2545,6 +2631,7 @@ def hc_mix_stats_sinkhorn(
          ITERS=sinkhorn_iters,
          EPS=hc_eps,
          num_warps=1,
@@ -149,7 +149,7 @@ index dae2556e703ba72b9628c956469f41d364069e7c..928259a510eae99387fabeaeaa8363b9
      )
      return pre, post, comb
  
-@@ -2722,7 +2809,8 @@ def hc_mix_stats_sinkhorn_deepgemm(
+@@ -2715,7 +2802,8 @@ def hc_mix_stats_sinkhorn_deepgemm(
      # sq depends only on x_flat, so the second projection recomputes the same
      # values; overwriting it avoids a throwaway (slices, m) scratch, 4 MiB at m=65536.
      tf32_hc_prenorm_gemm(x_flat, low, mix_lo, sq, slices)
@@ -159,7 +159,7 @@ index dae2556e703ba72b9628c956469f41d364069e7c..928259a510eae99387fabeaeaa8363b9
          mix_hi,
          sq,
          hc_scale,
-@@ -2738,8 +2826,8 @@ def hc_mix_stats_sinkhorn_deepgemm(
+@@ -2731,8 +2819,8 @@ def hc_mix_stats_sinkhorn_deepgemm(
          NUM_SLICES=slices,
          ITERS=sinkhorn_iters,
          EPS=hc_eps,
@@ -169,42 +169,49 @@ index dae2556e703ba72b9628c956469f41d364069e7c..928259a510eae99387fabeaeaa8363b9
      )
      return pre, post, comb
  
-diff --git a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/deepseek_v4.py
-index d96dbedb510ec8e095d1cdbbb50bb28acc06ff2c..6e2aac85f5b3fe46acdbd9d2022dadc0dd8a8fa1 100644
---- a/python/sglang/srt/models/deepseek_v4.py
-+++ b/python/sglang/srt/models/deepseek_v4.py
-@@ -3307,6 +3307,10 @@ class DeepseekV4DecoderLayer(nn.Module):
-         stats_stream = None
-         if mhc.use_stats_stream(self.hc_cfg, forward_batch, state.residual):
-             stats_stream = self.hc_stats_stream
-+        decode = (
-+            forward_batch.forward_mode.is_decode_or_idle()
-+            or forward_batch.forward_mode.is_target_verify()
-+        )
+diff --git a/python/sglang/srt/models/deepseek_v4_boundary.py b/python/sglang/srt/models/deepseek_v4_boundary.py
+index 452443a1e8..033e88d8f7 100644
+--- a/python/sglang/srt/models/deepseek_v4_boundary.py
++++ b/python/sglang/srt/models/deepseek_v4_boundary.py
+@@ -57,6 +57,8 @@ class ReadState(msgspec.Struct):
+     stats: object = None
+     stats_stream: object = None
+     call: object = None
++    # Decode and target-verify forwards (the mHC split-K slice count may differ).
++    decode: bool = False
  
-         def run_attn_hc(state: mhc.HcState) -> mhc.HcState:
-             assert self.attn_hc is not None
-@@ -3336,6 +3340,7 @@ class DeepseekV4DecoderLayer(nn.Module):
-                 stats_stream=stats_stream,
-                 next=self.local_boundary,
-                 world_size=world_size,
-+                decode=decode,
+ 
+ class HcUpdate:
+@@ -91,6 +93,7 @@ class HcUpdate:
+                 next=next,
+                 world_size=self.layer.self_attn.attn_tp_size,
+                 precomputed=state.stats,
++                decode=state.decode,
              )
+         return mhc.run_moe_post(
+             hc,
+@@ -100,6 +103,7 @@ class HcUpdate:
+             next=next if state.call.allow_cross_layer_fusion else None,
+             world_size=self.layer.mlp.tp_size,
+             precomputed=state.stats,
++            decode=state.decode,
+         )
  
-         def run_ffn_hc(state: mhc.HcState) -> mhc.HcState:
-@@ -3364,6 +3369,7 @@ class DeepseekV4DecoderLayer(nn.Module):
-                 stats_stream=stats_stream,
-                 next=nxt,
-                 world_size=self.mlp.tp_size,
-+                decode=decode,
+     def update(self, output, state):
+@@ -226,6 +230,8 @@ class HcReadCall(HcRead):
+                 stats=stats,
+                 stats_stream=stream,
+                 call=self.call,
++                decode=self.batch.forward_mode.is_decode_or_idle()
++                or self.batch.forward_mode.is_target_verify(),
              )
- 
-         return run_ffn_hc(run_attn_hc(state))
+         fn, scale, base = self._parameters()
+         x, post, comb, norm_fused = layer.hc_pre(
 diff --git a/python/sglang/srt/models/deepseek_v4_mhc.py b/python/sglang/srt/models/deepseek_v4_mhc.py
-index a0a66dc772753e69720f14a3a6e8adf694a81526..82e609c4e308021920ba97395948eafb21474db2 100644
+index 8cb607926b..965ee296e2 100644
 --- a/python/sglang/srt/models/deepseek_v4_mhc.py
 +++ b/python/sglang/srt/models/deepseek_v4_mhc.py
-@@ -226,21 +226,28 @@ def use_stats_stream(cfg: HcConfig, forward_batch: ForwardBatch, x: torch.Tensor
+@@ -245,21 +245,28 @@ def use_stats_stream(cfg: HcConfig, forward_batch: ForwardBatch, x: torch.Tensor
  
  
  def mix_stats(
@@ -238,7 +245,7 @@ index a0a66dc772753e69720f14a3a6e8adf694a81526..82e609c4e308021920ba97395948eafb
      from sglang.kernels.ops.layernorm.mhc import (
          hc_mix_stats,
          hc_mix_stats_sinkhorn,
-@@ -319,6 +326,9 @@ def _mix_stats_impl(hc: HcSubLayer, x: torch.Tensor) -> HcTriplet:
+@@ -338,6 +345,9 @@ def _mix_stats_impl(hc: HcSubLayer, x: torch.Tensor) -> HcTriplet:
                  cfg.sinkhorn_iters,
                  cfg.rms_eps,
                  cfg.eps,
@@ -248,72 +255,78 @@ index a0a66dc772753e69720f14a3a6e8adf694a81526..82e609c4e308021920ba97395948eafb
              )
          return pre, post, comb
      if x.is_cuda and torch.version.cuda is not None:
-@@ -550,10 +560,11 @@ def _compute_triplet(
-     hc: HcSubLayer,
+@@ -570,12 +580,13 @@ def _compute_triplet(
      residual: torch.Tensor,
      stats_stream: Optional[torch.cuda.Stream],
+     precomputed: Optional[HcTriplet] = None,
 +    decode: bool = False,
  ) -> HcTriplet:
      """Issue the triplet (on the side stream, beside the sublayer) and join before
      the post reads it."""
+     if precomputed is not None:
+         return precomputed
 -    coefficients = mix_stats(hc, residual, stats_stream)
 +    coefficients = mix_stats(hc, residual, stats_stream, decode=decode)
      if stats_stream is not None:
          torch.cuda.current_stream().wait_stream(stats_stream)
      return coefficients
-@@ -607,6 +618,7 @@ def run_attn_post(
-     stats_stream: Optional[torch.cuda.Stream],
+@@ -662,6 +673,7 @@ def run_attn_post(
      next: Optional[HcNextBoundary],
      world_size: int,
+     precomputed: Optional[HcTriplet] = None,
 +    decode: bool = False,
  ) -> HcState:
      """The attention post. An `AttnOutput` rides the collective kernel (which also
      folds ``next``'s norm); the attention may decline the handover even when asked,
-@@ -617,7 +629,7 @@ def run_attn_post(
+@@ -672,7 +684,9 @@ def run_attn_post(
          )
  
          assert next is not None
--        pre, post_mix, comb = _compute_triplet(hc, residual, stats_stream)
-+        pre, post_mix, comb = _compute_triplet(hc, residual, stats_stream, decode)
+-        pre, post_mix, comb = _compute_triplet(hc, residual, stats_stream, precomputed)
++        pre, post_mix, comb = _compute_triplet(
++            hc, residual, stats_stream, precomputed, decode
++        )
          _, updated, normalized = all_reduce_mhc_post_combine_norm(
              out.partial,
              residual,
-@@ -629,7 +641,7 @@ def run_attn_post(
+@@ -684,7 +698,7 @@ def run_attn_post(
              world_size=world_size,
          )
          return HcState(updated, pre, HcNormed(normalized))
--    coefficients = _compute_triplet(hc, residual, stats_stream)
-+    coefficients = _compute_triplet(hc, residual, stats_stream, decode)
+-    coefficients = _compute_triplet(hc, residual, stats_stream, precomputed)
++    coefficients = _compute_triplet(hc, residual, stats_stream, precomputed, decode)
      return _post_fusion(hc, out, residual, coefficients, next)
  
  
-@@ -641,6 +653,7 @@ def run_moe_post(
-     stats_stream: Optional[torch.cuda.Stream],
+@@ -697,6 +711,7 @@ def run_moe_post(
      next: Optional[HcNextBoundary],
      world_size: int,
+     precomputed: Optional[HcTriplet] = None,
 +    decode: bool = False,
  ) -> HcState:
      """The MoE post. A deferred finalize the push plane can carry rides the
      collective kernel (finalize + shared add + all-reduce, quantizing ``next``'s
-@@ -657,7 +670,7 @@ def run_moe_post(
+@@ -713,7 +728,9 @@ def run_moe_post(
          # [T x top_k (padded)] view and overstates the plane load by ~6x.
          and can_fuse_all_reduce(out.routed.expert_weights.shape[0], hc.cfg.hidden)
      ):
--        pre, post_mix, comb = _compute_triplet(hc, residual, stats_stream)
-+        pre, post_mix, comb = _compute_triplet(hc, residual, stats_stream, decode)
+-        pre, post_mix, comb = _compute_triplet(hc, residual, stats_stream, precomputed)
++        pre, post_mix, comb = _compute_triplet(
++            hc, residual, stats_stream, precomputed, decode
++        )
          args = (
              out.routed.gemm2_out,
              out.routed.expanded_idx_to_permuted_idx,
-@@ -711,5 +724,5 @@ def run_moe_post(
+@@ -767,5 +784,5 @@ def run_moe_post(
              and should_add_replicated_moe_output()
          ):
              out += pieces.shared
--    coefficients = _compute_triplet(hc, residual, stats_stream)
-+    coefficients = _compute_triplet(hc, residual, stats_stream, decode)
+-    coefficients = _compute_triplet(hc, residual, stats_stream, precomputed)
++    coefficients = _compute_triplet(hc, residual, stats_stream, precomputed, decode)
      return _post_fusion(hc, out, residual, coefficients, next)
 diff --git a/test/registered/kernels/ops/layernorm/test_hc_mix_stats_sinkhorn.py b/test/registered/kernels/ops/layernorm/test_hc_mix_stats_sinkhorn.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..5b8db3a8611448abd576f7d0c5067757ef28251d
+index 0000000000..5b8db3a861
 --- /dev/null
 +++ b/test/registered/kernels/ops/layernorm/test_hc_mix_stats_sinkhorn.py
 @@ -0,0 +1,165 @@
@@ -484,27 +497,26 @@ index 0000000000000000000000000000000000000000..5b8db3a8611448abd576f7d0c5067757
 +    sys.exit(pytest.main([__file__]))
 diff --git a/test/registered/unit/models/test_deepseek_v4_mhc_decode_split.py b/test/registered/unit/models/test_deepseek_v4_mhc_decode_split.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..9cc986bb356e3dbb8c5d5a8de814c990eb12962e
+index 0000000000..be5c3e1a8f
 --- /dev/null
 +++ b/test/registered/unit/models/test_deepseek_v4_mhc_decode_split.py
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,139 @@
 +"""DeepSeek-V4 mHC: the decoder layer tells hc_mix_stats_sinkhorn whether the forward
 +is decode/verify (where SM120 may split K more finely) or prefill, for both
 +hyper-connections, unless batch-invariant mode needs one split for every batch. Runs
-+the real forward_hc_pre_from_prev, posts and mix_stats on a mocked layer, stopping at
-+the kernel."""
++the real boundary read and update (HcReadCall.read, HcUpdate.post), posts and
++mix_stats on a mocked layer, stopping at the kernel."""
 +
 +import unittest
-+from contextlib import nullcontext
 +from types import SimpleNamespace
 +from unittest import mock
 +
 +import torch
 +
-+import sglang.srt.models.deepseek_v4 as deepseek_v4
 +import sglang.srt.models.deepseek_v4_mhc as deepseek_v4_mhc
 +from sglang.kernels.ops.layernorm import mhc as mhc_kernels
 +from sglang.srt.model_executor.forward_batch_info import ForwardMode
++from sglang.srt.models import deepseek_v4_boundary as hc_boundary
 +from sglang.srt.runtime_context import override_platform
 +from sglang.test.ci.ci_register import register_cpu_ci
 +from sglang.test.test_utils import CustomTestCase
@@ -526,7 +538,9 @@ index 0000000000000000000000000000000000000000..9cc986bb356e3dbb8c5d5a8de814c990
 +    """A stand-in for a bf16 CUDA [rows, hc, hidden] residual."""
 +    flat = mock.Mock(shape=(ROWS, HC * HIDDEN))
 +    flat.is_contiguous.return_value = True
-+    residual = mock.Mock(is_cuda=True, dtype=torch.bfloat16, shape=(ROWS, HC, HIDDEN))
++    residual = mock.Mock(
++        spec=torch.Tensor, is_cuda=True, dtype=torch.bfloat16, shape=(ROWS, HC, HIDDEN)
++    )
 +    residual.flatten.return_value = flat
 +    return residual
 +
@@ -548,10 +562,17 @@ index 0000000000000000000000000000000000000000..9cc986bb356e3dbb8c5d5a8de814c990
 +    layer.hc_cfg = SimpleNamespace(pre_from_prev=False)
 +    layer.attn_hc = _sublayer()
 +    layer.ffn_hc = _sublayer()
-+    layer._can_fuse_attn_mhc = False
-+    layer._can_fuse_ffn_mhc = False
-+    layer.self_attn.maybe_use_decode_attn_tp.return_value = nullcontext()
++    layer.boundary_pre_from_prev = True
++    layer.self_attn.accepts_mxfp8_swizzled_input.return_value = False
 +    return layer
++
++
++def _run_hyper_connection(layer, attention, mode, residual):
++    """One sublayer's boundary read, then its post."""
++    batch = SimpleNamespace(forward_mode=mode)
++    read = hc_boundary.HcRead(layer, attention).bind(batch, hc_boundary.LayerCall())
++    _, state = read.read(deepseek_v4_mhc.HcState(residual), norm=None)
++    hc_boundary.HcUpdate(layer, attention).post(object(), state)
 +
 +
 +class TestMhcDecodeFlag(CustomTestCase):
@@ -569,20 +590,11 @@ index 0000000000000000000000000000000000000000..9cc986bb356e3dbb8c5d5a8de814c990
 +            mock.patch.object(deepseek_v4_mhc, "_is_gfx95_supported", False),
 +            mock.patch.object(mhc_kernels, "hc_mix_stats_sinkhorn", kernel),
 +            mock.patch.object(deepseek_v4_mhc, "combine"),
-+            mock.patch.object(
-+                deepseek_v4_mhc,
-+                "_post_fusion",
-+                return_value=mock.Mock(residual=residual),
-+            ),
++            mock.patch.object(deepseek_v4_mhc, "_post_fusion"),
 +        ):
-+            deepseek_v4.DeepseekV4DecoderLayer.forward_hc_pre_from_prev(
-+                _layer(),
-+                positions=object(),
-+                state=mock.Mock(residual=residual),
-+                input_ids=object(),
-+                forward_batch=SimpleNamespace(forward_mode=mode),
-+                input_ids_global=object(),
-+            )
++            layer = _layer()
++            for attention in (True, False):
++                _run_hyper_connection(layer, attention, mode, residual)
 +        flat = residual.flatten.return_value
 +        self.assertEqual(kernel.call_count, 2)
 +        for call in kernel.call_args_list:

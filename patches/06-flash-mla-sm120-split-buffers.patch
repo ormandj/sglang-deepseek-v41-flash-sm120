@@ -1,5 +1,5 @@
 diff --git a/python/sglang/kernels/ops/attention/flash_mla_sm120.py b/python/sglang/kernels/ops/attention/flash_mla_sm120.py
-index c57194d3c5bad15dd76c908860a715021add1fcd..846796bf72b322778b764c3f4c5ced8dbb32f0d9 100644
+index c57194d3c5..846796bf72 100644
 --- a/python/sglang/kernels/ops/attention/flash_mla_sm120.py
 +++ b/python/sglang/kernels/ops/attention/flash_mla_sm120.py
 @@ -498,24 +498,25 @@ def _split_kv_pages_to_64(
@@ -62,7 +62,7 @@ index c57194d3c5bad15dd76c908860a715021add1fcd..846796bf72b322778b764c3f4c5ced8d
          idx_flat = touched_indices.reshape(-1).contiguous()
          if idx_flat.dtype != torch.int32:
 diff --git a/test/registered/kernels/ops/attention/test_flash_mla_backends.py b/test/registered/kernels/ops/attention/test_flash_mla_backends.py
-index d105bdfc77a500caaeaf016e6a5fd89d74040d99..ab981df341191fdb9e62f60e2db9d3a637614005 100644
+index d105bdfc77..ab981df341 100644
 --- a/test/registered/kernels/ops/attention/test_flash_mla_backends.py
 +++ b/test/registered/kernels/ops/attention/test_flash_mla_backends.py
 @@ -619,8 +619,8 @@ class TestTouchedPageSplit(CustomTestCase):

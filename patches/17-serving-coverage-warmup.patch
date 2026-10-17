@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/entrypoints/warmup.py b/python/sglang/srt/entrypoints/warmup.py
-index 2608621f6ab5af5ebb6a019e34db882a4f230f19..e29c941b6ec24a1e65b60702e5eb4dd17e1f1da5 100644
+index 2608621f6a..e29c941b6e 100644
 --- a/python/sglang/srt/entrypoints/warmup.py
 +++ b/python/sglang/srt/entrypoints/warmup.py
 @@ -1,7 +1,7 @@
@@ -513,7 +513,7 @@ index 2608621f6ab5af5ebb6a019e34db882a4f230f19..e29c941b6ec24a1e65b60702e5eb4dd1
      """Warmup Triton kernels across a wide range of prefill seq_lens (up to 32K).
 diff --git a/test/registered/unit/entrypoints/test_serving_coverage_warmup.py b/test/registered/unit/entrypoints/test_serving_coverage_warmup.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..524f6c0db5316bfc0b753d159018cd9319d45eb5
+index 0000000000..524f6c0db5
 --- /dev/null
 +++ b/test/registered/unit/entrypoints/test_serving_coverage_warmup.py
 @@ -0,0 +1,699 @@

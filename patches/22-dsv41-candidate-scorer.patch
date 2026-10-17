@@ -1,8 +1,8 @@
 diff --git a/python/sglang/kernels/ops/attention/__init__.py b/python/sglang/kernels/ops/attention/__init__.py
-index d1cb83db0714d3919544a84a61cf93416345158a..33a0cb226a6bab7005c83986b229bb28b79b7da8 100644
+index 4d277dd438..669589b696 100644
 --- a/python/sglang/kernels/ops/attention/__init__.py
 +++ b/python/sglang/kernels/ops/attention/__init__.py
-@@ -397,7 +397,11 @@ register_kernel(
+@@ -411,7 +411,11 @@ register_kernel(
      )
  )
  
@@ -16,10 +16,10 @@ index d1cb83db0714d3919544a84a61cf93416345158a..33a0cb226a6bab7005c83986b229bb28
          KernelSpec(
              op=f"attention.{_fn}",
 diff --git a/python/sglang/kernels/ops/attention/dsv4/candidate_blocks.py b/python/sglang/kernels/ops/attention/dsv4/candidate_blocks.py
-index 4f292307051ab8ab9557ec25441fc27f2295d054..ba5550f0adb6e6ea1a528964a39d7fb611f9c67e 100644
+index ba4abad43a..157d5799a3 100644
 --- a/python/sglang/kernels/ops/attention/dsv4/candidate_blocks.py
 +++ b/python/sglang/kernels/ops/attention/dsv4/candidate_blocks.py
-@@ -143,18 +143,6 @@ def amax_topk_blocks(
+@@ -147,18 +147,6 @@ def amax_topk_blocks(
      return blocks
  
  
@@ -39,10 +39,10 @@ index 4f292307051ab8ab9557ec25441fc27f2295d054..ba5550f0adb6e6ea1a528964a39d7fb6
      logits: torch.Tensor,
      compress_lens: Union[torch.Tensor, int],
 diff --git a/python/sglang/kernels/ops/attention/dsv4/fp4_indexer.py b/python/sglang/kernels/ops/attention/dsv4/fp4_indexer.py
-index bb24846637019a87d58d87ad5ef336b2b336ac6f..c53a669f78b282d1e70a808657f682ddad0a29ab 100644
+index 232bcc37b3..24e84c2d04 100644
 --- a/python/sglang/kernels/ops/attention/dsv4/fp4_indexer.py
 +++ b/python/sglang/kernels/ops/attention/dsv4/fp4_indexer.py
-@@ -891,6 +891,156 @@ def _fp4_index_logits_paged_kernel(
+@@ -893,6 +893,157 @@ def _fp4_index_logits_paged_kernel(
          tl.store(out_ptr + b * out_stride + offs_l, logit, mask=offs_l < L)
  
  
@@ -79,7 +79,6 @@ index bb24846637019a87d58d87ad5ef336b2b336ac6f..c53a669f78b282d1e70a808657f682dd
 +    HALF_D: tl.constexpr,
 +    RATIO: tl.constexpr,
 +):
-+    # Dense-blocks candidates are 8 positions wide; a tile scores 8 blocks.
 +    BLOCK_SIZE: tl.constexpr = 8
 +    BLOCKS_PER_TILE: tl.constexpr = 8
 +    b = tl.program_id(0)
@@ -101,7 +100,6 @@ index bb24846637019a87d58d87ad5ef336b2b336ac6f..c53a669f78b282d1e70a808657f682dd
 +        )
 +        pos = blk * BLOCK_SIZE + within
 +        valid = (blk >= 0) & (pos < n_vis)
-+        # Padding (-1) and invisible blocks store nothing; skip their scoring.
 +        if tl.max(valid.to(tl.int32), axis=0) > 0:
 +            pos = tl.where(valid, pos, 0)
 +            slot = (
@@ -140,11 +138,11 @@ index bb24846637019a87d58d87ad5ef336b2b336ac6f..c53a669f78b282d1e70a808657f682dd
 +    ratio: int,
 +    blocks: torch.Tensor,
 +) -> torch.Tensor:
-+    """``fp4_index_logits_paged`` restricted to candidate ``blocks`` ([batch, n]
-+    ids of 8-position blocks per row, -1 padded) by scoring only those blocks. Candidate positions
-+    hold the masked scan's values and other visible positions -inf, so selections
-+    are unchanged; the scoring work scales with the candidate count, not the
-+    context."""
++    """Score 8-position candidate ``blocks`` ([batch, n] IDs, -1 padded).
++
++    Returns [batch, max_len] FP32 scores, -inf outside the candidates within the
++    visible range. Positions beyond the visible range are uninitialized.
++    """
 +    assert q.dtype == torch.bfloat16 and q.shape[-1] == INDEX_HEAD_DIM
 +    assert table.dtype == torch.uint8 and table.ndim == 2
 +    assert ratio in (1, 2) and max_len <= req_table.shape[1] // ratio
@@ -155,17 +153,20 @@ index bb24846637019a87d58d87ad5ef336b2b336ac6f..c53a669f78b282d1e70a808657f682dd
 +    req = req.contiguous()
 +    lens = lens.contiguous()
 +    blocks = blocks.contiguous()
-+    out = torch.empty(
-+        (batch, triton.cdiv(max_len, 8) * 8), device=q.device, dtype=torch.float32
++    # The same row alignment as fp4_index_logits_paged.
++    out = aligned_new_empty(
++        shape=(batch, max_len),
++        dtype=torch.float32,
++        device=q.device,
++        alignment_bytes=get_input_stride_alignment_bytes(),
 +    )
 +    if not batch or not max_len:
-+        return out[:, :max_len]
++        return out
 +    num_sms = torch.cuda.get_device_properties(q.device).multi_processor_count
 +    fill_workers = min(triton.cdiv(max_len, 4096), triton.cdiv(num_sms * 2, batch))
 +    _neg_inf_visible_kernel[(batch, fill_workers)](
 +        out, lens, max_len, out.stride(0), BLOCK=4096, num_warps=4
 +    )
-+    # Eight blocks per tile, as in the kernel.
 +    workers = max(
 +        1, min(triton.cdiv(blocks.shape[1], 8), triton.cdiv(num_sms * 4, batch))
 +    )
@@ -193,14 +194,14 @@ index bb24846637019a87d58d87ad5ef336b2b336ac6f..c53a669f78b282d1e70a808657f682dd
 +        RATIO=ratio,
 +        num_warps=4,
 +    )
-+    return out[:, :max_len]
++    return out
 +
 +
  def fp4_index_logits_paged(
      q: torch.Tensor,
      weights: torch.Tensor,
 diff --git a/python/sglang/srt/layers/attention/dsv4/v41_indexer/dense_blocks.py b/python/sglang/srt/layers/attention/dsv4/v41_indexer/dense_blocks.py
-index b9ed473ce07ff0dc229bbc8d18822db381e2db9f..995228341668e5507b9d994d91806a33d523805a 100644
+index eda27cf9f9..1e2394a1f9 100644
 --- a/python/sglang/srt/layers/attention/dsv4/v41_indexer/dense_blocks.py
 +++ b/python/sglang/srt/layers/attention/dsv4/v41_indexer/dense_blocks.py
 @@ -10,7 +10,6 @@ import torch
@@ -211,7 +212,7 @@ index b9ed473ce07ff0dc229bbc8d18822db381e2db9f..995228341668e5507b9d994d91806a33
      select_candidate_block_ids,
      topk_among_blocks,
  )
-@@ -43,8 +42,6 @@ class BlockIds(CandidateMetadata, msgspec.Struct):
+@@ -45,8 +44,6 @@ class BlockIds(CandidateMetadata, msgspec.Struct):
      blocks: torch.Tensor
      # prefill: query rows of each request in row order, for the late-layer tail
      rows_per_request: Optional[List[int]] = None
@@ -220,7 +221,7 @@ index b9ed473ce07ff0dc229bbc8d18822db381e2db9f..995228341668e5507b9d994d91806a33
  
      def tail(self, rows_per_request: List[int]) -> BlockIds:
          assert self.rows_per_request is not None, "prefill block ids missing"
-@@ -100,10 +97,7 @@ class DenseBlocksBackend:
+@@ -102,10 +99,7 @@ class DenseBlocksBackend:
              blocks = amax_topk_blocks(
                  d.scores, d.lens, (d.lens + 7) // 8, self.topk_blocks
              )
@@ -232,7 +233,7 @@ index b9ed473ce07ff0dc229bbc8d18822db381e2db9f..995228341668e5507b9d994d91806a33
          else:
              published = BlockIds(
                  blocks=select_candidate_block_ids(
-@@ -125,13 +119,12 @@ class DenseBlocksBackend:
+@@ -127,13 +121,12 @@ class DenseBlocksBackend:
              inputs=inputs,
              token_to_kv_pool=self.token_to_kv_pool,
              req_to_token=self.req_to_token,
@@ -248,7 +249,7 @@ index b9ed473ce07ff0dc229bbc8d18822db381e2db9f..995228341668e5507b9d994d91806a33
              return
          k = min(inputs.indexer.index_topk, d.lmax)
 diff --git a/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py b/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py
-index 9cd90ac0a234c359b5a4fa0c8a96e94f3215e96c..926ad3082870504c29bccc11571fa4e1df742753 100644
+index 2916d1a94e..0b97025587 100644
 --- a/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py
 +++ b/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py
 @@ -12,6 +12,7 @@ import torch
@@ -259,7 +260,7 @@ index 9cd90ac0a234c359b5a4fa0c8a96e94f3215e96c..926ad3082870504c29bccc11571fa4e1
      fp4_index_logits_decode,
      fp4_index_logits_paged,
  )
-@@ -356,8 +357,9 @@ class PagedDecodeScores(msgspec.Struct, frozen=True):
+@@ -371,8 +372,9 @@ class PagedDecodeScores(msgspec.Struct, frozen=True):
      """Paged decode scores with graph-stable capacity ``lmax``.
  
      Only positions below each device-side ``lens`` are initialized. Top-k
@@ -271,12 +272,13 @@ index 9cd90ac0a234c359b5a4fa0c8a96e94f3215e96c..926ad3082870504c29bccc11571fa4e1
      """
  
      bs: int
-@@ -376,9 +378,10 @@ def decode_scores(
+@@ -391,10 +393,11 @@ def decode_scores(
      inputs: DecodeInputs,
      token_to_kv_pool: DeepSeekV4TokenToKVPool,
      req_to_token: torch.Tensor,
 -    candidate_mask: Optional[torch.Tensor] = None,
 +    candidate_blocks: Optional[torch.Tensor] = None,
+     compute_topk_plan: bool = True,
  ) -> Optional[DecodeScores | PagedDecodeScores]:
 -    """None when there is no row, or nothing visible yet."""
 +    """None when there is no row, or nothing visible yet. The paged path scores
@@ -284,10 +286,10 @@ index 9cd90ac0a234c359b5a4fa0c8a96e94f3215e96c..926ad3082870504c29bccc11571fa4e1
      pool = token_to_kv_pool
      ratio = inputs.compress_ratio
      indexer = inputs.indexer
-@@ -406,18 +409,12 @@ def decode_scores(
+@@ -422,18 +425,12 @@ def decode_scores(
          lens = lens.to(torch.int32)
          # Prepare the device-side plan before scoring, away from its top-k consumer.
-         plan = plan_topk_v2(lens)
+         plan = plan_topk_v2(lens) if compute_topk_plan else None
 -        scores = fp4_index_logits_paged(
 -            q,
 -            weights,
@@ -309,7 +311,7 @@ index 9cd90ac0a234c359b5a4fa0c8a96e94f3215e96c..926ad3082870504c29bccc11571fa4e1
          return PagedDecodeScores(
              bs=bs,
              lmax=lmax,
-@@ -427,7 +424,7 @@ def decode_scores(
+@@ -443,7 +440,7 @@ def decode_scores(
              req_to_token=req_to_token,
              ratio=ratio,
              plan=plan,
@@ -319,7 +321,7 @@ index 9cd90ac0a234c359b5a4fa0c8a96e94f3215e96c..926ad3082870504c29bccc11571fa4e1
      inputs.reset_outputs()
      j = torch.arange(lmax, device=pos.device)
 diff --git a/test/registered/kernels/ops/attention/test_fp4_indexer.py b/test/registered/kernels/ops/attention/test_fp4_indexer.py
-index 945a1c34713c20590eacca5b0fa27b76be2f2f98..768fcd5b7abf1e47aeed9480a79c24ab85f6f928 100644
+index d683cf39fc..c80859a472 100644
 --- a/test/registered/kernels/ops/attention/test_fp4_indexer.py
 +++ b/test/registered/kernels/ops/attention/test_fp4_indexer.py
 @@ -22,6 +22,7 @@ from sglang.kernels.ops.attention.dsv4.fp4_indexer import (
@@ -330,7 +332,7 @@ index 945a1c34713c20590eacca5b0fa27b76be2f2f98..768fcd5b7abf1e47aeed9480a79c24ab
      fp4_index_logits_decode,
      fp4_index_logits_paged,
      quantize_fp4_indexer_tensor,
-@@ -616,6 +617,74 @@ def test_fp4_paged_logits_replay(batch, ratio, width, masked):
+@@ -616,6 +617,81 @@ def test_fp4_paged_logits_replay(batch, ratio, width, masked):
                  )
  
  
@@ -346,14 +348,19 @@ index 945a1c34713c20590eacca5b0fa27b76be2f2f98..768fcd5b7abf1e47aeed9480a79c24ab
 +
 +@pytest.mark.skipif(_is_xpu, reason="Paged decode uses CUDA persistent kernels")
 +@pytest.mark.parametrize(
-+    "batch,heads,ratio,width",
-+    [(6, 32, 1, 193), (6, 64, 2, 8193), (4, 64, 1, 32769)],
++    "batch,heads,ratio,width,capacity",
++    [
++        (6, 32, 1, 193, None),
++        (6, 64, 2, 8193, None),
++        (4, 64, 1, 32769, None),
++        (64, 64, 1, 32769, 1048580),
++    ],
 +)
-+def test_fp4_candidate_logits_match_masked_scan(batch, heads, ratio, width):
++def test_fp4_candidate_logits_match_masked_scan(batch, heads, ratio, width, capacity):
 +    q, weights, slots, lens, table = _make_logits_case(batch, heads, width)
 +    # Non-dyadic queries and weights: equality must not depend on exact sums.
 +    q, weights = torch.randn_like(q), torch.randn_like(weights)
-+    capacity = 2 * width + 64
++    capacity = capacity or 2 * width + 64
 +    req = torch.arange(batch, device=q.device, dtype=torch.int32)
 +    req_table = torch.full(
 +        (batch, capacity * ratio), -1, device=q.device, dtype=torch.int32
@@ -396,7 +403,9 @@ index 945a1c34713c20590eacca5b0fa27b76be2f2f98..768fcd5b7abf1e47aeed9480a79c24ab
 +        candidates.fill_(torch.nan)
 +        graph.replay()
 +        vis = torch.arange(capacity, device=q.device)[None, :] < lens[:, None]
-+        assert torch.equal(masked[vis], candidates[vis])
++        assert torch.equal(
++            masked[vis].view(torch.int32), candidates[vis].view(torch.int32)
++        )
 +        if visible == width:
 +            finite = torch.isfinite(candidates[vis])
 +            assert finite.any() and not finite.all()
@@ -405,7 +414,7 @@ index 945a1c34713c20590eacca5b0fa27b76be2f2f98..768fcd5b7abf1e47aeed9480a79c24ab
  @pytest.mark.skipif(
      not torch.cuda.is_available()
      or torch.cuda.get_device_capability()[0] not in (9, 12),
-@@ -681,13 +750,15 @@ def test_paged_indexer_backends_replay(ratio):
+@@ -689,13 +765,15 @@ def test_paged_indexer_backends_replay(ratio):
          for i, out in enumerate(outputs)
      ]
      captured_scores = []
@@ -415,7 +424,7 @@ index 945a1c34713c20590eacca5b0fa27b76be2f2f98..768fcd5b7abf1e47aeed9480a79c24ab
 +    def recorded(name, scorer):
 +        def run_scorer(*args):
 +            captured_scores.append(scorer(*args))
-+            scorers.append((name, args[9:]))
++            scorers.append(name)
 +            return captured_scores[-1]
  
 -    def record_scores(*args, **kwargs):
@@ -427,7 +436,7 @@ index 945a1c34713c20590eacca5b0fa27b76be2f2f98..768fcd5b7abf1e47aeed9480a79c24ab
  
      def run():
          full.topk_decode(decode_inputs[0])
-@@ -698,15 +769,25 @@ def test_paged_indexer_backends_replay(ratio):
+@@ -706,15 +784,21 @@ def test_paged_indexer_backends_replay(ratio):
      for _ in range(3):
          run()
      graph = torch.cuda.CUDAGraph()
@@ -454,15 +463,11 @@ index 945a1c34713c20590eacca5b0fa27b76be2f2f98..768fcd5b7abf1e47aeed9480a79c24ab
 +        torch.cuda.graph(graph),
 +    ):
 +        published = run()
-+    # All three runtime entrypoints took the paged path; only the consumer
-+    # restricts scoring, to the published block ids.
-+    assert [name for name, _ in scorers] == ["paged", "paged", "candidates"]
-+    assert scorers[0][1] == scorers[1][1] == ()
-+    assert scorers[2][1][0] is published.blocks
++    assert scorers == ["paged", "paged", "candidates"]
      for step, visible in enumerate([193, 0, 1, 7, 8, 9, 65, 193]):
          # -1 positions exercise zero-length padded rows, also for ratio 1.
          lens.copy_((visible - torch.arange(batch, device=q.device) % 6).clamp_min(0))
-@@ -742,7 +823,6 @@ def test_paged_indexer_backends_replay(ratio):
+@@ -751,7 +835,6 @@ def test_paged_indexer_backends_replay(ratio):
                      maxima.topk(min(4, nblocks)).values.sort().values,
                  )
              keep = torch.isin(torch.arange(width, device=q.device) // 8, blocks)
