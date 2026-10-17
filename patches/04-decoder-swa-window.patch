@@ -1,0 +1,200 @@
+diff --git a/python/sglang/kernels/ops/attention/dsv4_attn_metadata_kernels.py b/python/sglang/kernels/ops/attention/dsv4_attn_metadata_kernels.py
+index b34b98eca2a5ccd2169160c1eaa488ece67b0c3d..0a2f6bcf5a286e7ba4bbf1dd36450ba2bc748968 100644
+--- a/python/sglang/kernels/ops/attention/dsv4_attn_metadata_kernels.py
++++ b/python/sglang/kernels/ops/attention/dsv4_attn_metadata_kernels.py
+@@ -448,7 +448,7 @@ def late_layer_tail_layout(
+     tail_lens_cpu = [min(tail_len, n) for n in extend_lens_cpu]
+     if len(extend_lens_cpu) == 1:
+         n, t, s = extend_lens_cpu[0], tail_lens_cpu[0], seq_lens_cpu[0]
+-        floor = torch.full((t,), s - t, dtype=torch.int32, device=device)
++        floor = torch.full((t,), max(0, s - tail_len), dtype=torch.int32, device=device)
+         return torch.arange(n - t, n, device=device), tail_lens_cpu, floor
+     # One H2D copy for the three length vectors; launch count does not grow with bs.
+     lens = torch.tensor([extend_lens_cpu, tail_lens_cpu, seq_lens_cpu], device=device)
+@@ -462,7 +462,7 @@ def late_layer_tail_layout(
+         - (torch.cumsum(tail_lens, 0) - tail_lens)[req]
+     )
+     token_indices = (torch.cumsum(extend_lens, 0) - tail_lens)[req] + offs
+-    floor = (seq_lens - tail_lens)[req].to(torch.int32)
++    floor = (seq_lens - tail_len).clamp_min(0)[req].to(torch.int32)
+     return token_indices, tail_lens_cpu, floor
+ 
+ 
+diff --git a/python/sglang/srt/layers/attention/deepseek_v4_backend.py b/python/sglang/srt/layers/attention/deepseek_v4_backend.py
+index 4420fdecd38300ecdfbf6665db7a2f611c7c2580..1fc4ecaaa3129442a6f15e498fb3306858fde785 100644
+--- a/python/sglang/srt/layers/attention/deepseek_v4_backend.py
++++ b/python/sglang/srt/layers/attention/deepseek_v4_backend.py
+@@ -1539,7 +1539,8 @@ class DeepseekV4AttnBackend(
+         self, forward_batch: ForwardBatch
+     ) -> DSV4Metadata:
+         # Each request contributes only its last SWA_WINDOW extend tokens, with the
+-        # window floored at the tail start: window KV before it is never written here.
++        # window floored at seq_len - SWA_WINDOW: a tail shorter than a window reads
++        # rows the previous chunk's tail wrote.
+         extend_lens_cpu = forward_batch.extend_seq_lens_cpu
+         seq_lens_cpu = forward_batch.seq_lens_cpu
+         assert extend_lens_cpu is not None and seq_lens_cpu is not None
+diff --git a/python/sglang/srt/mem_cache/cache_init_params.py b/python/sglang/srt/mem_cache/cache_init_params.py
+index 0aa5d1e4d6d935b643018fe32a93afcf7ee2f4f6..51503280000ba916e7df60a10510f5a05131122f 100644
+--- a/python/sglang/srt/mem_cache/cache_init_params.py
++++ b/python/sglang/srt/mem_cache/cache_init_params.py
+@@ -47,6 +47,7 @@ class CacheInitParams:
+     chunked_prefill_size: Optional[int] = None
+ 
+     sliding_window_size: Optional[int] = None
++    decoder_swa_bounded_replay: bool = False
+ 
+     # Time-to-live for cache entries in seconds. If None, TTL is disabled.
+     cache_ttl_seconds: Optional[float] = None
+diff --git a/python/sglang/srt/mem_cache/kv_cache_builder.py b/python/sglang/srt/mem_cache/kv_cache_builder.py
+index 016d9c4cfa21f9af3dbd32ef4018c70671166b97..8845c2b24c83c750773fb71beaff00ed0467de52 100644
+--- a/python/sglang/srt/mem_cache/kv_cache_builder.py
++++ b/python/sglang/srt/mem_cache/kv_cache_builder.py
+@@ -349,6 +349,7 @@ def build_kv_cache(
+         enable_session_radix_cache=get_memory().enable_session_radix_cache,
+         enable_mamba_extra_buffer=get_exec().mamba.enable_mamba_extra_buffer,
+         enable_mamba_extra_buffer_lazy=get_exec().mamba.enable_mamba_extra_buffer_lazy,
++        decoder_swa_bounded_replay=get_exec().features.enable_decoder_swa_bounded_replay,
+         pp_rank=parallel.pp_rank,
+         pp_size=parallel.pp_size,
+         attn_cp_rank=parallel.attn_cp_rank,
+diff --git a/python/sglang/srt/mem_cache/unified_radix_cache.py b/python/sglang/srt/mem_cache/unified_radix_cache.py
+index 28ac43bbb6e871afe5abb4f63723ec45969d04ac..e420869ad69eb7bbe06e735a631bff46efb55404 100644
+--- a/python/sglang/srt/mem_cache/unified_radix_cache.py
++++ b/python/sglang/srt/mem_cache/unified_radix_cache.py
+@@ -213,6 +213,7 @@ class UnifiedRadixCache(BasePrefixCache):
+         self._sliding_window_size = (
+             params.sliding_window_size if self.is_swa_enabled else None
+         )
++        self.decoder_swa_bounded_replay = params.decoder_swa_bounded_replay
+         # The TreeCore owns the tree member-var state (structure, LRUs, sizes,
+         # evictable leaves) and drives the components' tree-level hooks.
+         self._tree_core_backend = select_tree_core_backend(params)
+@@ -3605,7 +3606,7 @@ class UnifiedRadixCache(BasePrefixCache):
+ 
+     def swa_reprefill_tail_tokens(self) -> int:
+         """
+-        Only unified_kv needs this: SWA lives in a per-request ring
++        unified_kv needs this: SWA lives in a per-request ring
+         (state_slot/pos), not content-stable and never stored in the tree, so a
+         reused prefix's trailing sliding window would read another request's
+         stale ring slots. Re-prefilling that window rewrites this request's ring.
+@@ -3614,6 +3615,12 @@ class UnifiedRadixCache(BasePrefixCache):
+         either way. Returns 0 once SWA has a host pool to restore exact contents
+         from, and for every non-unified_kv layout, whose SWA slots are
+         content-stable.
++
++        DeepSeek-V4.1 decoder SWA bounded replay needs it too: late-layer window
++        KV is written only for the tail rows of an extend, and the cache cannot
++        differentiate which rows of a matched prefix were tails, so the layers
++        after the last kv_source layer have no usable window KV in the prefix.
++        Holding one window back keeps every hit extend at least a window long.
+         """
+         from sglang.kernels.ops.attention.dsv4.unified_kv_kernels.env_gate import (
+             is_unified_kv_triton,
+@@ -3622,6 +3629,8 @@ class UnifiedRadixCache(BasePrefixCache):
+         swa = self.components.get(ComponentType.SWA)
+         if swa is None or not swa.sliding_window_size:
+             return 0
++        if self.decoder_swa_bounded_replay:
++            return swa.sliding_window_size
+         if not is_unified_kv_triton():
+             return 0
+         if self.tree_core.has_swa_host_pool:
+diff --git a/python/sglang/srt/session/streaming_session.py b/python/sglang/srt/session/streaming_session.py
+index efd521eaace2df1d33501fbd7153cea46dd5a73b..da754831d073c8d7fec05bf1d3ac55b3eb8c9ec9 100644
+--- a/python/sglang/srt/session/streaming_session.py
++++ b/python/sglang/srt/session/streaming_session.py
+@@ -111,6 +111,13 @@ class StreamingSession:
+                 self.release_session(req.session.session_id)
+                 return None
+ 
++        # Decoder SWA bounded replay caps the prefix match so the last window is
++        # recomputed. If that cap lands inside the tree-owned prefix, the slot
++        # cannot rewind that far. Release it and use the radix match instead.
++        if min(slot.kv.kv_committed_len, len(params.key)) < slot.kv.cache_protected_len:
++            self.release_session(req.session.session_id)
++            return None
++
+         # Lend the record; the slot keeps the tree lock. A rejected chunked
+         # request matches again next cycle and borrows the same record.
+         req.kv = slot.kv
+diff --git a/test/registered/unit/mem_cache/test_unified_cache_linker.py b/test/registered/unit/mem_cache/test_unified_cache_linker.py
+index 01760d66ed844fe9ce4bef4fc8e593971c3863ef..af5651af9c03ab7fbed641084285e38b4a710ebc 100644
+--- a/test/registered/unit/mem_cache/test_unified_cache_linker.py
++++ b/test/registered/unit/mem_cache/test_unified_cache_linker.py
+@@ -1100,6 +1100,7 @@ def test_swa_reuse_policy_tracks_layout_without_a_tier_condition(
+     cache.token_to_kv_pool_allocator = _swa_allocator(swa_req_ring)
+     cache.components = {ComponentType.SWA: component}
+     cache.cache_controller = object() if enable_hicache else None
++    cache.decoder_swa_bounded_replay = False
+     cache.tree_core = SimpleNamespace(
+         enable_hicache=enable_hicache,
+         has_swa_host_pool=enable_hicache and not unified_kv,
+diff --git a/test/registered/unit/mem_cache/test_unified_radix_cache_unittest.py b/test/registered/unit/mem_cache/test_unified_radix_cache_unittest.py
+index 67986f71b5edc81ed02ef531aaa11ec4075225ce..04b49c77f2ab5617a3569d3ae9b036e24d09ca83 100644
+--- a/test/registered/unit/mem_cache/test_unified_radix_cache_unittest.py
++++ b/test/registered/unit/mem_cache/test_unified_radix_cache_unittest.py
+@@ -150,6 +150,7 @@ class CacheConfig:
+ 
+     # SWA
+     sliding_window_size: Optional[int] = None
++    decoder_swa_bounded_replay: bool = False
+ 
+     # Mamba
+     enable_mamba_extra_buffer: bool = False
+@@ -642,6 +643,7 @@ def build_fixture(
+         page_size=cfg.page_size if tree_page_size is None else tree_page_size,
+         disable=False,
+         sliding_window_size=cfg.sliding_window_size,
++        decoder_swa_bounded_replay=cfg.decoder_swa_bounded_replay,
+         tree_components=cfg.components,
+         enable_mamba_extra_buffer=cfg.enable_mamba_extra_buffer,
+         enable_kv_cache_events=enable_kv_cache_events,
+@@ -11729,5 +11731,46 @@ class TestStreamingSessionLockLifecycle(CustomTestCase):
+         cache.sanity_check()
+ 
+ 
++class TestUnifiedRadixCacheDecoderSwaBoundedReplayHoldBack(CustomTestCase):
++    """Decoder SWA bounded replay attends over only the last window of each
++    extend, so the scheduler's prefix match must stop one window short of the
++    prompt while the flag is on."""
++
++    def _matched_len(self, cache, tokens) -> int:
++        req = Req(
++            rid="decoder-swa-bounded-replay",
++            origin_input_text="",
++            origin_input_ids=array("q", tokens),
++            sampling_params=SamplingParams(temperature=0, max_new_tokens=1),
++        )
++        req.init_next_round_input(cache)
++        return len(req.prefix_indices)
++
++    def test_match_stops_one_window_short_under_bounded_replay(self):
++        cfg = CacheConfig(
++            components=(ComponentType.FULL, ComponentType.SWA),
++            sliding_window_size=128,
++        )
++        for bounded_replay, matched in ((False, 200), (True, 260 - 128)):
++            with self.subTest(decoder_swa_bounded_replay=bounded_replay):
++                cache, allocator, _ = build_fixture(
++                    replace(cfg, decoder_swa_bounded_replay=bounded_replay)
++                )
++                cached = list(range(1, 201))
++                value = allocator.alloc(len(cached))
++                self.assertIsNotNone(value)
++                cache.insert(
++                    InsertParams(
++                        key=RadixKey(array("q", cached)), value=value[: len(cached)]
++                    )
++                )
++                # 200 of 260 cached: a plain hit would leave a 60-row extend
++                prompt = cached + list(range(1001, 1061))
++                self.assertEqual(
++                    cache.swa_reprefill_tail_tokens(), 128 if bounded_replay else 0
++                )
++                self.assertEqual(self._matched_len(cache, prompt), matched)
++
++
+ if __name__ == "__main__":
+     unittest.main()

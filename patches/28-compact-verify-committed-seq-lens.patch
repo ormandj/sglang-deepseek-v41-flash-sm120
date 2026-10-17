@@ -1,0 +1,132 @@
+diff --git a/python/sglang/srt/speculative/dspark_components/dspark_verify.py b/python/sglang/srt/speculative/dspark_components/dspark_verify.py
+index 08a42447d92ac396e6e22f57544ebdb8a415c0b5..cbfe2f385be2e67f254498b5d4b2272f7dcf768b 100644
+--- a/python/sglang/srt/speculative/dspark_components/dspark_verify.py
++++ b/python/sglang/srt/speculative/dspark_components/dspark_verify.py
+@@ -461,7 +461,12 @@ class TargetVerifyExecutor:
+         batch.out_cache_loc = ragged_window.verify_cache_loc
+         seq_lens_cpu_backup = batch.seq_lens_cpu
+         seq_lens_sum_backup = batch.seq_lens_sum
+-        if seq_lens_cpu_backup is not None:
++        # Same contract as run_non_compact: backends that add the verify window
++        # themselves expect committed lengths.
++        if (
++            seq_lens_cpu_backup is not None
++            and not self._verify_backend_self_adds_seq_lens()
++        ):
+             verify_lens_cpu = (
+                 layout.verify_lens_cpu
+                 if layout.verify_lens_cpu is not None
+diff --git a/test/registered/unit/spec/test_dspark_verify_seq_lens.py b/test/registered/unit/spec/test_dspark_verify_seq_lens.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..cbfa595bd3c0e341dbeb173ed6024963f3cd6d62
+--- /dev/null
++++ b/test/registered/unit/spec/test_dspark_verify_seq_lens.py
+@@ -0,0 +1,108 @@
++import unittest
++from types import SimpleNamespace
++
++import torch
++
++from sglang.srt.layers.attention.graph_variants import (
++    DSV41_CANDIDATE_FILTERED,
++    Dsv41CandidateGraphVariants,
++)
++from sglang.srt.speculative.dspark_components.dspark_verify import (
++    TargetVerifyExecutor,
++)
++from sglang.srt.speculative.ragged_verify import RaggedVerifyLayout
++from sglang.test.ci.ci_register import register_cpu_ci
++from sglang.test.test_utils import CustomTestCase
++
++register_cpu_ci(est_time=5, suite="base-a-test-cpu")
++
++_W = 6
++_SPAN = 64
++_COMMITTED = [_SPAN - _W, 10]
++_VERIFY_LENS = [_W, 3]
++
++
++def _executor(*, self_adds: bool):
++    executor = TargetVerifyExecutor.__new__(TargetVerifyExecutor)
++    executor.verify_num_draft_tokens = _W
++    executor._verify_backend_self_adds_seq_lens_cache = self_adds
++    seen = []
++
++    def forward(*, batch, verify_input, seq_lens_cpu_backup, seq_lens_sum_backup):
++        seen.append(batch.seq_lens_cpu.clone())
++        return SimpleNamespace(logits_output=None, can_run_cuda_graph=True)
++
++    executor._forward_prepared_verify = forward
++    return executor, seen
++
++
++def _batch():
++    return SimpleNamespace(
++        seq_lens_cpu=torch.tensor(_COMMITTED, dtype=torch.int64),
++        seq_lens_sum=sum(_COMMITTED),
++        out_cache_loc=None,
++    )
++
++
++def _run_static(executor):
++    bs = len(_COMMITTED)
++    executor.run_non_compact(
++        batch=_batch(),
++        draft_input=SimpleNamespace(nxt_kv_lens_cpu=None),
++        verify_ids_2d=torch.zeros((bs, _W), dtype=torch.int64),
++        verify_window=SimpleNamespace(
++            positions_2d=torch.zeros((bs, _W), dtype=torch.int64),
++            verify_cache_loc=torch.zeros(bs * _W, dtype=torch.int64),
++        ),
++        sampling_info=None,
++    )
++
++
++def _run_compact(executor):
++    num_tokens = sum(_VERIFY_LENS)
++    executor._run_ragged(
++        batch=_batch(),
++        layout=RaggedVerifyLayout.from_verify_lens(
++            verify_lens_cpu=_VERIFY_LENS, device="cpu", grid=[6, 12]
++        ),
++        ragged_window=SimpleNamespace(
++            verify_ids=torch.zeros(num_tokens, dtype=torch.int64),
++            positions=torch.zeros(num_tokens, dtype=torch.int64),
++            verify_cache_loc=torch.zeros(num_tokens, dtype=torch.int64),
++        ),
++        sampling_info=None,
++    )
++
++
++class TestCompactVerifyCommittedSeqLens(CustomTestCase):
++    def test_compact_selects_the_same_candidate_graph_as_static(self):
++        # The DSv4.1 verify graph selector adds the verify width to the CPU
++        # lengths, as the self-adding verify backend does.
++        variants = Dsv41CandidateGraphVariants(
++            graph_limits=(("candidate_unfiltered", _SPAN),),
++            capture_labels=("candidate_unfiltered", DSV41_CANDIDATE_FILTERED),
++            verify_extra_tokens=_W,
++        )
++        static, static_seen = _executor(self_adds=True)
++        compact, compact_seen = _executor(self_adds=True)
++        _run_static(static)
++        _run_compact(compact)
++
++        self.assertEqual(static_seen[0].tolist(), _COMMITTED)
++        self.assertEqual(compact_seen[0].tolist(), _COMMITTED)
++        self.assertEqual(
++            variants.select(SimpleNamespace(seq_lens_cpu=compact_seen[0])),
++            "candidate_unfiltered",
++        )
++
++    def test_compact_extends_lengths_for_other_backends(self):
++        compact, compact_seen = _executor(self_adds=False)
++        _run_compact(compact)
++        self.assertEqual(
++            compact_seen[0].tolist(),
++            [c + v for c, v in zip(_COMMITTED, _VERIFY_LENS)],
++        )
++
++
++if __name__ == "__main__":
++    unittest.main()

@@ -1,0 +1,91 @@
+name: Build SemVer DeepSeek V4.1 Flash SM120 candidate
+# main builds the immutable candidate tag named in release.json; test/**
+# branches build an immutable test-<commit> tag. A candidate builds FROM the
+# stack image (FlashInfer, DeepGEMM, Triton) tagged by the hash of its inputs;
+# the stack is built and pushed only when no image with that tag exists yet.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, test/**]
+    paths:
+      - Containerfile
+      - Containerfile.stack
+      - release.json
+      - stack.lock.json
+      - patches/**
+      - build/**
+      - .forgejo/workflows/build-release.yml
+
+env:
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    name: Build immutable image
+    runs-on: linux
+    timeout-minutes: 300
+    container:
+      image: debian:trixie-slim
+    env:
+      CONTAINER_HOST: unix:///run/podman/podman.sock
+    steps:
+      - name: Install tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            podman skopeo nodejs curl git jq ca-certificates util-linux python3
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Verify release contract and source trees
+        run: ./scripts/verify-patches.sh
+
+      - name: Build and push immutable image
+        run: |
+          set -euo pipefail
+          CONTAINER_REGISTRY="${GITHUB_SERVER_URL#*://}"
+          repository="${CONTAINER_REGISTRY}/${IMAGE_NAME}"
+          if [[ "${GITHUB_REF}" == refs/heads/main ]]; then
+            image="${repository}:$(jq -er .candidate_tag release.json)"
+          else
+            image="${repository}:test-${GITHUB_SHA}"
+          fi
+          printf '%s' "${{ secrets.PACKAGE_TOKEN }}" \
+            | podman login --username "${{ secrets.PACKAGE_USER }}" \
+                --password-stdin "${CONTAINER_REGISTRY}"
+          exec 8>"/run/podman-lock/release-$(printf '%s' "$image" | sha256sum | cut -d' ' -f1).lock"
+          flock 8
+          if skopeo inspect "docker://${image}" >/dev/null 2>&1; then
+            echo "Immutable tag already exists: $image" >&2
+            exit 1
+          fi
+          read -r stack_key flashinfer_key < <(bash build/stack-key.sh .)
+          stack_repo="${repository}-stack"
+          stack="${stack_repo}:stack-${stack_key}"
+          exec 7>"/run/podman-lock/release-$(printf '%s' "$stack" | sha256sum | cut -d' ' -f1).lock"
+          flock 7
+          if ! skopeo inspect "docker://${stack}" >/dev/null 2>&1; then
+            exec 9>/run/podman-lock/graphroot.lock
+            flock 9
+            podman build --layers=true --target stack \
+              --build-arg "FLASHINFER_KEY=${flashinfer_key}" \
+              -f Containerfile.stack -t "$stack" .
+            flock -u 9
+            podman push "$stack"
+          fi
+          flock -u 7
+          stack_digest=$(skopeo inspect --format '{{.Digest}}' "docker://${stack}")
+          [[ "$stack_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "stack ${stack}@${stack_digest}"
+          exec 9>/run/podman-lock/graphroot.lock
+          flock 9
+          podman build --layers=true --target runtime \
+            --build-arg "STACK_IMAGE=${stack_repo}@${stack_digest}" \
+            --build-arg "IMAGE_SOURCE=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --build-arg "IMAGE_SOURCE_REVISION=${GITHUB_SHA}" \
+            -f Containerfile -t "$image" .
+          flock -u 9
+          podman push "$image"
+          digest=$(skopeo inspect --format '{{.Digest}}' "docker://${image}")
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "pushed ${image}@${digest}"

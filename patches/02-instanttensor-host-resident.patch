@@ -1,0 +1,324 @@
+diff --git a/python/sglang/srt/model_loader/loader.py b/python/sglang/srt/model_loader/loader.py
+index 4cf3e28d14793dec7dd08e701990168ace797c5f..2493b0702e22d24a486a43bbcf403e3091c9e749 100644
+--- a/python/sglang/srt/model_loader/loader.py
++++ b/python/sglang/srt/model_loader/loader.py
+@@ -12,6 +12,7 @@ import fnmatch
+ import gc
+ import glob
+ import hashlib
++import itertools
+ import json
+ import logging
+ import math
+@@ -358,6 +359,41 @@ class BaseModelLoader(ABC):
+         raise NotImplementedError
+ 
+ 
++def _split_host_resident_files(
++    files: List[str], patterns: Optional[Tuple[str, ...]]
++) -> Tuple[List[str], List[str]]:
++    """Split safetensors files into (device, host) groups, keeping their order.
++
++    A file goes to the host group when any tensor name in its header contains
++    one of ``patterns``. Only headers are read.
++    """
++    if not patterns:
++        return list(files), []
++    from safetensors.torch import safe_open
++
++    device_files, host_files = [], []
++    for path in files:
++        host = False
++        # Other files stay in the device group; InstantTensor rejects them.
++        if path.endswith(".safetensors"):
++            with safe_open(path, framework="pt") as f:
++                host = any(p in name for name in f.keys() for p in patterns)
++        (host_files if host else device_files).append(path)
++    return device_files, host_files
++
++
++def _to_device_unless_host_resident(
++    weights: Iterable[Tuple[str, torch.Tensor]], patterns: Tuple[str, ...]
++) -> Generator[Tuple[str, torch.Tensor], None, None]:
++    """Move tensors that are not host-resident to the current device, where
++    InstantTensor puts every other tensor, so tensors that are combined
++    during loading share a device."""
++    for name, tensor in weights:
++        if not any(p in name for p in patterns):
++            tensor = tensor.to(current_platform.get_device(torch.cuda.current_device()))
++        yield name, tensor
++
++
+ def _validate_default_loader_extra_config(
+     *, extra_config: dict, load_format: LoadFormat
+ ) -> None:
+@@ -418,6 +454,12 @@ class DefaultModelLoader(BaseModelLoader):
+         model_config: Optional[ModelConfig] = None
+         """The model configuration (for checking architecture, etc)."""
+ 
++        host_resident_weight_patterns: Optional[Tuple[str, ...]] = None
++        """Substrings of checkpoint tensor names the model keeps in host memory.
++
++        Device-direct loaders (InstantTensor) load the files containing them
++        through the CPU safetensors path instead."""
++
+         @classmethod
+         def init_new(cls, model_config: ModelConfig, model):
+             return cls(
+@@ -429,6 +471,9 @@ class DefaultModelLoader(BaseModelLoader):
+                     model, "allow_patterns_overrides", None
+                 ),
+                 model_config=model_config,
++                host_resident_weight_patterns=getattr(
++                    model, "host_resident_weight_patterns", None
++                ),
+             )
+ 
+     @dataclasses.dataclass(frozen=True)
+@@ -640,11 +685,35 @@ class DefaultModelLoader(BaseModelLoader):
+                 hf_weights_files,
+             )
+         elif self.load_config.load_format == LoadFormat.INSTANTTENSOR:
+-            weights_iterator = instanttensor_weights_iterator(
+-                hf_weights_files,
+-                extra_config=extra_config,
+-                load_group=self.load_config.load_group,
++            device_files, host_files = _split_host_resident_files(
++                hf_weights_files, source.host_resident_weight_patterns
++            )
++            weights_iterator = (
++                instanttensor_weights_iterator(
++                    device_files,
++                    extra_config=extra_config,
++                    load_group=self.load_config.load_group,
++                )
++                if device_files
++                else iter(())
+             )
++            if host_files:
++                logger.info(
++                    "Loading %d checkpoint file(s) with host-resident weights "
++                    "through the safetensors path.",
++                    len(host_files),
++                )
++                host_weights = buffered_multi_thread_safetensors_weights_iterator(
++                    host_files,
++                    max_workers=self.DEFAULT_NUM_THREADS,
++                    disable_mmap=get_model().weight_loader_disable_mmap,
++                )
++                weights_iterator = itertools.chain(
++                    weights_iterator,
++                    _to_device_unless_host_resident(
++                        host_weights, source.host_resident_weight_patterns
++                    ),
++                )
+         elif use_safetensors:
+             weight_loader_disable_mmap = get_model().weight_loader_disable_mmap
+             configured_prefetch = get_model().weight_loader_prefetch_checkpoints
+diff --git a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/deepseek_v4.py
+index c0e467e5d5ca6d2edcc57eacc60ae352db002897..d96dbedb510ec8e095d1cdbbb50bb28acc06ff2c 100644
+--- a/python/sglang/srt/models/deepseek_v4.py
++++ b/python/sglang/srt/models/deepseek_v4.py
+@@ -4413,6 +4413,13 @@ class DeepseekV4Model(nn.Module):
+ class DeepseekV4ForCausalLM(nn.Module):
+     supports_cuda_vmm_feature_transport = True
+ 
++    @property
++    def host_resident_weight_patterns(self) -> Optional[Tuple[str, ...]]:
++        """Checkpoint names of the Engram tables kept in host memory."""
++        if envs.SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE.get():
++            return (".engram.embed.",)
++        return None
++
+     def __init__(
+         self,
+         config: DeepSeekV4Config,
+diff --git a/python/sglang/srt/models/deepseek_v4_dspark.py b/python/sglang/srt/models/deepseek_v4_dspark.py
+index 1c6c29dc805d39085db1192074a5e6496e27aa87..f1eccd615d32eb0abe41e6ac44628076a270bb28 100644
+--- a/python/sglang/srt/models/deepseek_v4_dspark.py
++++ b/python/sglang/srt/models/deepseek_v4_dspark.py
+@@ -794,6 +794,8 @@ class DeepseekV4ForCausalLMDSpark(nn.Module):
+     precompile_kernels_after_loading = (
+         DeepseekV4ForCausalLM.precompile_kernels_after_loading
+     )
++    # The draft reads the target checkpoint, Engram files included.
++    host_resident_weight_patterns = DeepseekV4ForCausalLM.host_resident_weight_patterns
+ 
+     @classmethod
+     def shared_experts_fusion_disable_reason(
+diff --git a/test/registered/unit/model_loader/test_instanttensor_loader.py b/test/registered/unit/model_loader/test_instanttensor_loader.py
+index 240c4cac521df92e9b6bbe320b3fc3581b5891b5..98bafba570c5b1daabcf32a060a05a36f6c4e9d8 100644
+--- a/test/registered/unit/model_loader/test_instanttensor_loader.py
++++ b/test/registered/unit/model_loader/test_instanttensor_loader.py
+@@ -1,4 +1,5 @@
+ import json
++import os
+ import sys
+ import tempfile
+ import unittest
+@@ -8,18 +9,19 @@ from types import SimpleNamespace
+ from unittest.mock import MagicMock, patch
+ 
+ import torch
+-from safetensors.torch import save_file
++from safetensors.torch import safe_open, save_file
+ 
+ import sglang.srt.model_loader.loader as loader_mod
+ import sglang.srt.model_loader.weight_utils as weight_utils
+ from sglang.srt.configs.load_config import _DEFAULT_LOAD_GROUP, LoadConfig
++from sglang.srt.environ import envs
+ from sglang.srt.platforms.cuda import CudaSRTPlatform
+ from sglang.srt.platforms.rocm import RocmSRTPlatform
+ from sglang.srt.runtime_context import get_context
+ from sglang.test.ci.ci_register import register_cpu_ci
+ from sglang.test.test_utils import CustomTestCase
+ 
+-register_cpu_ci(est_time=1, suite="base-a-test-cpu")
++register_cpu_ci(est_time=5, suite="base-a-test-cpu")
+ 
+ 
+ class _Backend(Enum):
+@@ -297,5 +299,143 @@ class TestInstantTensorLoader(CustomTestCase):
+         self.safe_open.assert_not_called()
+ 
+ 
++class TestInstantTensorHostResidentWeights(CustomTestCase):
++    """Checkpoint files holding host-resident tensors bypass InstantTensor."""
++
++    # Stands in for the GPU: tensors placed on the device show up as "meta".
++    DEVICE = torch.device("meta")
++
++    def setUp(self):
++        super().setUp()
++        folder = tempfile.TemporaryDirectory()
++        self.addCleanup(folder.cleanup)
++        # DeepSeek-V4.1 checkpoint names; the Engram file also holds a tensor
++        # that is not host-resident.
++        layout = {
++            "model-00001.safetensors": ["layers.0.attn.wq_a.weight"],
++            "model-00002.safetensors": [
++                "layers.1.engram.embed.weight",
++                "layers.1.engram.embed.scale",
++                "layers.1.engram.wkv.weight",
++            ],
++            "model-00003.safetensors": ["layers.2.ffn.w1.weight"],
++        }
++        torch.manual_seed(0)
++        self.files, self.expected = [], {}
++        for file_name, names in layout.items():
++            tensors = {name: torch.randn(4, 8) for name in names}
++            path = os.path.join(folder.name, file_name)
++            save_file(tensors, path)
++            self.files.append(path)
++            self.expected.update(tensors)
++        self.engram_file = self.files[1]
++
++        self.instanttensor_calls = []
++        patches = ExitStack()
++        self.addCleanup(patches.close)
++        patches.enter_context(
++            patch.object(
++                loader_mod,
++                "instanttensor_weights_iterator",
++                side_effect=self._fake_instanttensor,
++            )
++        )
++        patches.enter_context(
++            patch.object(
++                loader_mod.current_platform, "get_device", return_value=self.DEVICE
++            )
++        )
++        patches.enter_context(
++            patch.object(loader_mod.torch.cuda, "current_device", return_value=0)
++        )
++
++    def _fake_instanttensor(self, files, **_kwargs):
++        self.instanttensor_calls.append(list(files))
++        for path in files:
++            with safe_open(path, framework="pt") as f:
++                for name in f.keys():
++                    yield name, f.get_tensor(name).to(self.DEVICE)
++
++    def _load(self, source):
++        model_loader = loader_mod.DefaultModelLoader(
++            LoadConfig(load_format="instanttensor")
++        )
++        resolved = loader_mod.DefaultModelLoader.ResolvedSource(
++            source=source,
++            hf_folder=os.path.dirname(self.files[0]),
++            weight_files=tuple(self.files),
++            use_safetensors=True,
++        )
++        with get_context().override_server_args():
++            return list(
++                model_loader._get_weights_iterator(source, resolved_source=resolved)
++            )
++
++    def _dsv4_source(self, host_table: bool, model_cls=None):
++        from sglang.srt.models.deepseek_v4 import DeepseekV4ForCausalLM
++
++        model_cls = model_cls or DeepseekV4ForCausalLM
++        model = model_cls.__new__(model_cls)
++        model_config = SimpleNamespace(model_path="model", revision=None)
++        with envs.SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE.override(host_table):
++            return loader_mod.DefaultModelLoader.Source.init_new(model_config, model)
++
++    def _host_resident_names(self, result):
++        """Check each tensor arrives once and return the names left on the host."""
++        self.assertCountEqual([name for name, _ in result], self.expected)
++        on_host = set()
++        for name, tensor in result:
++            expected = self.expected[name]
++            self.assertEqual(
++                (tensor.shape, tensor.dtype), (expected.shape, expected.dtype)
++            )
++            if tensor.device != self.DEVICE:
++                self.assertEqual(tensor.device.type, "cpu")
++                torch.testing.assert_close(tensor, expected, rtol=0, atol=0)
++                on_host.add(name)
++        return on_host
++
++    def test_engram_tables_stay_on_host(self):
++        result = self._load(self._dsv4_source(host_table=True))
++
++        self.assertEqual(self.instanttensor_calls, [[self.files[0], self.files[2]]])
++        # The Engram file's other tensor is read on the host but placed on the
++        # device like every InstantTensor tensor.
++        self.assertEqual(
++            self._host_resident_names(result),
++            {"layers.1.engram.embed.weight", "layers.1.engram.embed.scale"},
++        )
++
++    def test_device_tables_keep_every_file_on_instanttensor(self):
++        result = self._load(self._dsv4_source(host_table=False))
++
++        self.assertEqual(self.instanttensor_calls, [self.files])
++        self.assertEqual(self._host_resident_names(result), set())
++
++    def test_only_host_resident_files_skip_instanttensor(self):
++        self.files = [self.engram_file]
++        self.expected = {k: v for k, v in self.expected.items() if ".engram." in k}
++        result = self._load(self._dsv4_source(host_table=True))
++
++        self.assertEqual(self.instanttensor_calls, [])
++        self.assertEqual(len(self._host_resident_names(result)), 2)
++
++    def test_non_safetensors_files_are_left_to_instanttensor(self):
++        # InstantTensor reports unsupported files; the split must not open them.
++        self.assertEqual(
++            loader_mod._split_host_resident_files(
++                ["model.bin", self.engram_file], (".engram.embed.",)
++            ),
++            (["model.bin"], [self.engram_file]),
++        )
++
++    def test_dspark_draft_declares_the_same_tables(self):
++        from sglang.srt.models.deepseek_v4_dspark import DeepseekV4ForCausalLMDSpark
++
++        for enabled, expected in ((False, None), (True, (".engram.embed.",))):
++            source = self._dsv4_source(enabled, DeepseekV4ForCausalLMDSpark)
++            self.assertEqual(source.host_resident_weight_patterns, expected)
++
++
+ if __name__ == "__main__":
+     unittest.main()

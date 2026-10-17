@@ -1,0 +1,260 @@
+name: Build and publish image
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_revision:
+        description: Optional full source commit to build
+        required: false
+        type: string
+  push:
+    branches: [main]
+    # Only changes to image inputs start a build. Validation, documentation,
+    # and workflow changes cannot replace an already-published immutable tag.
+    paths:
+      - Containerfile
+      - Containerfile.stack
+      - release.json
+      - stack.lock.json
+      - patches/**
+      - build/**
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: sglang-deepseek-v41-flash-sm120-image
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # This build uses only an ephemeral GitHub-hosted VM. It is intentionally
+    # not eligible for any self-hosted runner.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Validate requested source revision
+        env:
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+        run: |
+          if [[ -n "$SOURCE_REVISION" && ! "$SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "source_revision must be a full commit SHA" >&2
+            exit 1
+          fi
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
+      - name: Reclaim runner disk space
+        run: |
+          # The CUDA base image, the FlashInfer, Triton and SGLang source builds
+          # and the final runtime layers are large. These SDKs are unrelated to the build and
+          # the VM is discarded after this job.
+          sudo rm -rf \
+            /opt/hostedtoolcache \
+            /opt/ghc \
+            /opt/az \
+            /usr/local/.ghcup \
+            /usr/local/lib/android \
+            /usr/local/share/boost \
+            /usr/local/share/chromium \
+            /usr/local/share/powershell \
+            /usr/local/share/vcpkg \
+            /usr/share/swift \
+            /usr/share/dotnet
+          docker system prune --all --force
+
+          # GitHub currently assigns this label two layouts: one has roughly
+          # 111 GiB free on /, while another has only about 42 GiB on / plus a
+          # larger ephemeral /mnt filesystem. The latter cannot hold this
+          # build's transient layers. Put Docker on whichever filesystem has
+          # more free space before creating the BuildKit builder; no runner
+          # state needs to survive this ephemeral job.
+          root_avail=$(df --output=avail -k / | tail -1)
+          mnt_avail=$(df --output=avail -k /mnt | tail -1)
+          if (( mnt_avail > root_avail )); then
+            sudo systemctl stop docker.service docker.socket
+            sudo install -d -m 0711 /mnt/docker
+            if [[ -f /etc/docker/daemon.json ]]; then
+              jq '. + {"data-root":"/mnt/docker"}' \
+                /etc/docker/daemon.json \
+                | sudo tee /etc/docker/daemon.json.new >/dev/null
+            else
+              printf '%s\n' '{"data-root":"/mnt/docker"}' \
+                | sudo tee /etc/docker/daemon.json.new >/dev/null
+            fi
+            sudo mv /etc/docker/daemon.json.new /etc/docker/daemon.json
+            sudo systemctl start docker.socket docker.service
+          fi
+          docker info --format 'Docker root: {{.DockerRootDir}}'
+          df -h / /mnt
+      - name: Prepare compiler memory headroom
+        run: |
+          free -m
+          swap_dir=/
+          root_avail=$(df --output=avail -k / | tail -1)
+          mnt_avail=$(df --output=avail -k /mnt | tail -1)
+          if (( mnt_avail > root_avail )); then
+            swap_dir=/mnt
+            root_avail=$mnt_avail
+          fi
+          # Retain at least 64 GiB for image extraction and build layers.
+          if (( root_avail < (32 + 64) * 1024 * 1024 )); then
+            echo "insufficient disk for compiler swap and image layers" >&2
+            exit 1
+          fi
+          swap_file="${swap_dir%/}/dsv41-build.swap"
+          sudo fallocate -l 32G "$swap_file"
+          sudo chmod 0600 "$swap_file"
+          sudo mkswap "$swap_file"
+          sudo swapon "$swap_file"
+          free -m
+          swapon --show
+      - name: Log in to GHCR
+        run: |
+          for attempt in 1 2 3; do
+            if printf '%s' '${{ secrets.GITHUB_TOKEN }}' \
+              | docker login ghcr.io \
+                  --username '${{ github.actor }}' \
+                  --password-stdin; then
+              break
+            fi
+            if (( attempt == 3 )); then
+              echo "GHCR login failed after ${attempt} attempts" >&2
+              exit 1
+            fi
+            sleep 10
+          done
+      - name: Verify the locked stack reproduces
+        run: ./scripts/verify-patches.sh
+      - name: Build and push immutable candidate tags
+        run: |
+          # The build scripts default to twelve compiler jobs. This 16 GiB
+          # runner caps them at three (MAX_JOBS), which changes no source,
+          # architecture, optimization or installed runtime setting. Keep the
+          # CI-only recipes outside the checked-out source context: the images
+          # copy and hash the tracked Containerfile.stack, so the stack
+          # identity is unchanged.
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          for name, original in (
+              ("Containerfile.stack", "&& bash /opt/dsv41-platform/scripts/build-base.sh"),
+              ("Containerfile", "RUN bash /opt/dsv41-platform/scripts/build-stack.sh"),
+          ):
+              source = Path(name).read_text()
+              if source.count(original) != 1:
+                  raise SystemExit(f"expected exactly one {original!r} in {name}")
+              patched = source.replace(original, original.replace("bash ", "MAX_JOBS=3 bash ", 1))
+              Path(os.environ["RUNNER_TEMP"], name + ".github").write_text(patched)
+          PY
+          # stack.json and both keys come from the lock; the stack image
+          # recomputes the FlashInfer key and the candidate build recomputes
+          # the stack key, failing on a mismatch.
+          read -r stack_key flashinfer_key < <(bash build/stack-key.sh .)
+          [[ "$stack_key" =~ ^[0-9a-f]{16}$ && "$flashinfer_key" =~ ^[0-9a-f]{16}$ ]]
+          stack_image="dsv41-stack:stack-${stack_key}"
+          monitor_resources() {
+            while true; do
+              date -u +%Y-%m-%dT%H:%M:%SZ
+              free -m
+              df -h / /mnt
+              docker stats --no-stream \
+                --format '{{.Name}} memory={{.MemUsage}} cpu={{.CPUPerc}}' || true
+              # Executable names and RSS only; arguments can contain credentials.
+              ps -eo comm,rss --sort=-rss | head -n 8 || true
+              sleep 30
+            done
+          }
+          monitor_resources &
+          monitor_pid=$!
+          finish_diagnostics() {
+            kill "$monitor_pid" 2>/dev/null || true
+            wait "$monitor_pid" 2>/dev/null || true
+            free -m
+            sudo dmesg --ctime | grep -Ei 'out of memory|killed process|oom' || true
+          }
+          trap finish_diagnostics EXIT
+          repository="ghcr.io/${GITHUB_REPOSITORY}"
+          candidate_tag=$(jq -er '.candidate_tag' release.json)
+          candidate_image="${repository}:${candidate_tag}"
+          build_image="${repository}:build-${GITHUB_RUN_NUMBER}"
+
+          if docker buildx imagetools inspect "$candidate_image" >/dev/null 2>&1; then
+            echo "$candidate_image already exists; SemVer tags are immutable" >&2
+            exit 1
+          fi
+
+          docker build \
+            --file "${RUNNER_TEMP}/Containerfile.stack.github" \
+            --target stack \
+            --platform linux/amd64 \
+            --build-arg "FLASHINFER_KEY=${flashinfer_key}" \
+            --tag "$stack_image" \
+            .
+          docker build \
+            --file "${RUNNER_TEMP}/Containerfile.github" \
+            --target runtime \
+            --platform linux/amd64 \
+            --build-arg "STACK_IMAGE=${stack_image}" \
+            --build-arg "IMAGE_SOURCE=https://github.com/${GITHUB_REPOSITORY}" \
+            --build-arg "IMAGE_SOURCE_REVISION=$(git rev-parse HEAD)" \
+            --tag "$candidate_image" \
+            --tag "$build_image" \
+            .
+          docker push "$candidate_image"
+          docker push "$build_image"
+          rm -f stack.json
+
+          raw_manifest=$(mktemp)
+          docker buildx imagetools inspect --raw "$candidate_image" > "$raw_manifest"
+          if jq -e 'has("manifests")' "$raw_manifest" >/dev/null; then
+            echo "$candidate_image is an OCI index; expected a directly pullable image manifest" >&2
+            exit 1
+          fi
+          jq -e '.config.digest and (.layers | length > 0)' "$raw_manifest" >/dev/null
+          published_digest=$(
+            docker buildx imagetools inspect "$candidate_image" \
+              | awk '$1 == "Digest:" { print $2; exit }'
+          )
+          if [[ ! "$published_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "could not resolve published manifest digest for $candidate_image" >&2
+            exit 1
+          fi
+          echo "published $candidate_image@$published_digest"
+          echo "published $build_image@$published_digest"
+          echo "::notice title=Published image digest::$published_digest"
+      - name: Verify anonymous pull access
+        run: |
+          image=${GITHUB_REPOSITORY}
+          tag=$(jq -er '.candidate_tag' release.json)
+          token=$(
+            curl --fail --silent --show-error \
+              "https://ghcr.io/token?service=ghcr.io&scope=repository:${image}:pull" \
+              | jq -r '.token'
+          )
+          test -n "$token"
+          test "$token" != null
+          curl --fail --silent --show-error \
+            --header 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+            --header "Authorization: Bearer $token" \
+            "https://ghcr.io/v2/${image}/manifests/${tag}" \
+            >/dev/null
+      - name: Delete superseded untagged package versions
+        # Best effort: the candidate tag is already published, so a failure here
+        # must not fail the build.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          package=${GITHUB_REPOSITORY#*/}
+          owner=${GITHUB_REPOSITORY_OWNER}
+          # Only versions carrying no tag at all are removed, which can never
+          # include the version the candidate tag currently points at.
+          gh api --paginate \
+            --jq '.[] | select((.metadata.container.tags | length) == 0) | .id' \
+            "/users/${owner}/packages/container/${package}/versions?per_page=100" \
+            | while read -r id; do
+              gh api --method DELETE \
+                "/users/${owner}/packages/container/${package}/versions/${id}"
+            done

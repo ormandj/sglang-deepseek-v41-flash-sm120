@@ -1,0 +1,39 @@
+name: Validate release bundle
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: linux
+    timeout-minutes: 60
+    container:
+      image: debian:trixie-slim
+    steps:
+      - name: Install tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            bash coreutils curl git jq nodejs ca-certificates python3
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Check shell syntax
+        run: bash -n scripts/*.sh build/*.sh examples/*.sh
+
+      - name: Check JSON syntax
+        run: jq -e . release.json stack.lock.json >/dev/null
+
+      - name: Test release publication tooling
+        run: |
+          python3 scripts/test_validate_publish_release.py
+          python3 scripts/test_verify_release_target.py
+
+      - name: Validate documentation contract
+        run: ./scripts/validate-docs.sh
+
+      - name: Verify release contract and source trees
+        run: ./scripts/verify-patches.sh

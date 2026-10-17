@@ -1,0 +1,298 @@
+diff --git a/python/sglang/srt/disaggregation/decode.py b/python/sglang/srt/disaggregation/decode.py
+index c4cf6ec4f52a2e0b85ac601b159a69a81f424139..732b5ef3fffc6564ed9b9867e00bb2d5e1d315e3 100644
+--- a/python/sglang/srt/disaggregation/decode.py
++++ b/python/sglang/srt/disaggregation/decode.py
+@@ -253,7 +253,9 @@ class DecodeReqToTokenPool:
+ 
+     def clear(self):
+         self.free_slots = list(range(1, self._alloc_size))
+-        self.req_generation.zero_()
++        # Generations keep counting across a clear: state keyed by (row,
++        # generation), such as relayed DSpark confidences, must not match a
++        # request allocated after it.
+ 
+     def register_on_alloc_rows(self, hook: Callable[[List[int]], None]) -> None:
+         assert self._on_alloc_rows is None
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index 097d8652e4c1513ea89ef339e2cc5b03b6210049..89e8c85b24f63e50f84a19886930960dfe586632 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -530,6 +530,11 @@ class Envs:
+     # ===================================================================
+     # DSpark speculative decoding
+     # ===================================================================
++    # Weight of the newest survival in the per-request running average the host
++    # budget planner sizes each step from (1.0 = only the newest). The budget is
++    # decided from confidences RELAY_LAG_STEPS old, and one request's drafts vary
++    # a lot from step to step, so an average predicts the current draft better.
++    SGLANG_DSPARK_BUDGET_SURVIVAL_EMA = EnvFloat(1.0)
+     SGLANG_DSPARK_DEBUG_CONFIDENCE_PREFIX_SCHEDULER = EnvBool(False)
+     SGLANG_DSPARK_DEBUG_CONFIDENCE_METRICS = EnvBool(False)
+     SGLANG_DSPARK_DEBUG_DUMP = EnvTuple(tuple())
+diff --git a/python/sglang/srt/mem_cache/memory_pool.py b/python/sglang/srt/mem_cache/memory_pool.py
+index 412c11db64aa3530a623e15359670925dc1bd153..f962b5b55e5ef9012401f25e44344781d7a489c0 100644
+--- a/python/sglang/srt/mem_cache/memory_pool.py
++++ b/python/sglang/srt/mem_cache/memory_pool.py
+@@ -458,7 +458,9 @@ class ReqToTokenPool:
+ 
+     def clear(self):
+         self.free_slots = list(range(1, self._alloc_size))
+-        self.req_generation.zero_()
++        # Generations keep counting across a clear: state keyed by (row,
++        # generation), such as relayed DSpark confidences, must not match a
++        # request allocated after it.
+         if self._aux_cache is not None:
+             self._aux_cache.clear()
+ 
+diff --git a/python/sglang/srt/speculative/dspark_components/dspark_planner.py b/python/sglang/srt/speculative/dspark_components/dspark_planner.py
+index 6c6a509e7812055b9a316ec5d0378fd3f599ddc9..3c114d41aade7c715a61d3d673dd9a0e4d88da04 100644
+--- a/python/sglang/srt/speculative/dspark_components/dspark_planner.py
++++ b/python/sglang/srt/speculative/dspark_components/dspark_planner.py
+@@ -341,6 +341,10 @@ class DSparkVerifyPlanner:
+         all_gather_single(gathered, local_tensor, group=cpu_group)
+         batch.global_spec_verify_tier_num_tokens = gathered.tolist()
+ 
++    def reset_request_history(self) -> None:
++        if self._budget_planner is not None:
++            self._budget_planner.reset_request_history()
++
+     def note_non_decode_step(self) -> None:
+         if self._budget_planner is not None:
+             self._budget_planner.note_non_decode_step()
+@@ -1168,6 +1172,13 @@ class HostConfidenceBudgetPlanner:
+         self._carry_confidence: Optional[torch.Tensor] = None
+         self._carry_generation: Optional[torch.Tensor] = None
+         self._carry_pos = 0
++        self.survival_ema = float(envs.SGLANG_DSPARK_BUDGET_SURVIVAL_EMA.get())
++        if not 0.0 < self.survival_ema <= 1.0:
++            raise ValueError(
++                "SGLANG_DSPARK_BUDGET_SURVIVAL_EMA must be in (0, 1], got "
++                f"{self.survival_ema}."
++            )
++        self._solo_ema: Optional[tuple[tuple[int, int], torch.Tensor]] = None
+ 
+     def compute_budget(
+         self,
+@@ -1188,6 +1199,12 @@ class HostConfidenceBudgetPlanner:
+             lagged_generation=lagged_generation,
+             current_generation=current_generation,
+         )
++        survival = self._smoothed_survival(
++            survival=survival,
++            lagged_generation=lagged_generation,
++            current_generation=current_generation,
++            req_pool_indices_cpu=req_pool_indices_cpu,
++        )
+         forced_frac = self.forced_budget_frac
+         if forced_frac is not None:
+             full_budget = int(survival[:, : self.cfg.resolved_max_verify_len()].numel())
+@@ -1212,6 +1229,14 @@ class HostConfidenceBudgetPlanner:
+     def note_non_decode_step(self) -> None:
+         self.last_decision = None
+ 
++    def reset_request_history(self) -> None:
++        """Drop per-row history (lag carry and smoothed survival) when the
++        request pool is cleared and its generations restart."""
++        self._carry_confidence = None
++        self._carry_generation = None
++        self._carry_pos = 0
++        self._solo_ema = None
++
+     def _shift_to_lag(
+         self,
+         *,
+@@ -1245,6 +1270,37 @@ class HostConfidenceBudgetPlanner:
+         ).view(-1, 1)
+         return torch.where(fresh, k_survival, torch.ones_like(k_survival))
+ 
++    def _smoothed_survival(
++        self,
++        *,
++        survival: torch.Tensor,
++        lagged_generation: torch.Tensor,
++        current_generation: torch.Tensor,
++        req_pool_indices_cpu: torch.Tensor,
++    ) -> torch.Tensor:
++        """With one running request, size the step from a running average of
++        its lagged survival; allocation still uses the current confidences.
++        With more requests the batch's tier already averages several requests'
++        drafts, so their lagged survival passes through and the average
++        restarts the next time a request runs alone. The average also restarts
++        when the request changes; a request without a fresh lagged survival
++        passes through."""
++        if self.survival_ema >= 1.0:
++            return survival
++        if survival.shape[0] != 1:
++            self._solo_ema = None
++            return survival
++        generation = int(current_generation[0])
++        if generation < 1 or int(lagged_generation[0]) != generation:
++            return survival
++        key = (int(req_pool_indices_cpu[0]), generation)
++        current = survival.to(torch.float32, copy=True)
++        if self._solo_ema is not None and self._solo_ema[0] == key:
++            alpha = self.survival_ema
++            current = self._solo_ema[1].mul(1.0 - alpha).add_(current, alpha=alpha)
++        self._solo_ema = (key, current)
++        return current.clone().to(survival.dtype)
++
+     def _ensure_carry(self, *, gamma: int) -> None:
+         if self._carry_confidence is not None:
+             return
+diff --git a/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py b/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
+index ccbd9f4d3ffe3bd0d766dce891969cde3ef1916f..6c06226dbc0cc0fba3cbe4c7a14dc62a937356ff 100644
+--- a/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
++++ b/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
+@@ -544,7 +544,11 @@ class DSparkWorkerV2(BaseSpecWorker):
+         )
+ 
+     def clear_cache_pool(self):
+-        pass
++        # The request pool's generations restart from zero, so per-row history
++        # keyed by (row, generation) would match unrelated new requests.
++        planner = self.__dict__.get("_verify_planner")
++        if planner is not None:
++            planner.reset_request_history()
+ 
+     def post_capture_init(self) -> None:
+         if not self._hosts_draft:
+diff --git a/test/registered/spec/dspark/test_dspark_budget_smoothing.py b/test/registered/spec/dspark/test_dspark_budget_smoothing.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a6ced9595f9485065515e08dcec5283d5cc2cac8
+--- /dev/null
++++ b/test/registered/spec/dspark/test_dspark_budget_smoothing.py
+@@ -0,0 +1,134 @@
++import os
++import unittest
++from types import SimpleNamespace
++from unittest import mock
++
++import torch
++
++from sglang.srt.speculative.dspark_components.dspark_planner import (
++    DSparkScheduleConfig,
++    HostConfidenceBudgetPlanner,
++)
++from sglang.srt.speculative.dspark_components.dspark_sps import SpsCostTable
++from sglang.test.ci.ci_register import register_cpu_ci
++from sglang.test.test_utils import CustomTestCase
++
++register_cpu_ci(est_time=2, suite="base-a-test-cpu")
++
++
++def _flat_table() -> SpsCostTable:
++    return SpsCostTable(
++        sample_batch_tokens=[1], sample_steps_per_sec=[1.0], max_batch_tokens=4096
++    )
++
++
++def _smoothing_planner(alpha: float, pool: int = 4) -> HostConfidenceBudgetPlanner:
++    model_runner = SimpleNamespace(
++        req_to_token_pool=SimpleNamespace(req_to_token=torch.zeros(pool, 8))
++    )
++    with mock.patch.dict(
++        os.environ,
++        {
++            "SGLANG_DSPARK_BUDGET_SURVIVAL_EMA": str(alpha),
++            "SGLANG_DSPARK_CONFIDENCE_RELAY_LAG_STEPS": "1",
++        },
++    ):
++        return HostConfidenceBudgetPlanner(
++            sps_table=_flat_table(),
++            cfg=DSparkScheduleConfig(gamma=2),
++            model_runner=model_runner,
++        )
++
++
++class TestSmoothedBudgetSurvival(CustomTestCase):
++    def _step(self, planner, rows, conf, gens, lagged=None):
++        g = torch.tensor(gens, dtype=torch.int64)
++        return planner._smoothed_survival(
++            survival=torch.tensor(conf, dtype=torch.float32),
++            lagged_generation=g if lagged is None else torch.tensor(lagged),
++            current_generation=g,
++            req_pool_indices_cpu=torch.tensor(rows),
++        )
++
++    def test_off_by_default_passes_survival_through(self):
++        planner = _smoothing_planner(1.0)
++        s = torch.tensor([[0.9, 0.2]])
++        out = planner._smoothed_survival(
++            survival=s,
++            lagged_generation=torch.tensor([1]),
++            current_generation=torch.tensor([1]),
++            req_pool_indices_cpu=torch.tensor([0]),
++        )
++        self.assertIs(out, s)
++
++    def test_running_average_of_a_lone_request(self):
++        planner = _smoothing_planner(0.5)
++        first = self._step(planner, [2], [[0.8, 0.4]], [1])
++        self.assertTrue(torch.allclose(first, torch.tensor([[0.8, 0.4]])))
++        second = self._step(planner, [2], [[0.4, 0.0]], [1])
++        self.assertTrue(torch.allclose(second, torch.tensor([[0.6, 0.2]])))
++
++    def test_output_does_not_alias_the_state(self):
++        planner = _smoothing_planner(0.5)
++        first = self._step(planner, [2], [[0.8, 0.4]], [1])
++        first.zero_()
++        second = self._step(planner, [2], [[0.4, 0.0]], [1])
++        self.assertTrue(torch.allclose(second, torch.tensor([[0.6, 0.2]])))
++
++    def test_batches_pass_through_and_restart_the_average(self):
++        planner = _smoothing_planner(0.5)
++        self._step(planner, [2], [[1.0, 1.0]], [1])
++        both = torch.tensor([[0.2, 0.1], [0.3, 0.2]])
++        out = planner._smoothed_survival(
++            survival=both,
++            lagged_generation=torch.tensor([1, 1]),
++            current_generation=torch.tensor([1, 1]),
++            req_pool_indices_cpu=torch.tensor([2, 3]),
++        )
++        self.assertIs(out, both)
++        alone = self._step(planner, [2], [[0.2, 0.1]], [1])
++        self.assertTrue(torch.allclose(alone, torch.tensor([[0.2, 0.1]])))
++
++    def test_new_request_in_a_row_restarts(self):
++        planner = _smoothing_planner(0.5)
++        self._step(planner, [1], [[1.0, 1.0]], [3])
++        out = self._step(planner, [1], [[0.2, 0.1]], [4])
++        self.assertTrue(torch.allclose(out, torch.tensor([[0.2, 0.1]])))
++
++    def test_stale_lagged_survival_passes_through_and_keeps_state(self):
++        planner = _smoothing_planner(0.5)
++        self._step(planner, [0], [[0.8, 0.4]], [1])
++        # Lagged confidence from an older generation: survival is the planner's
++        # placeholder (ones) and must neither be smoothed nor folded in.
++        out = self._step(planner, [0], [[1.0, 1.0]], [1], lagged=[0])
++        self.assertTrue(torch.equal(out, torch.ones(1, 2)))
++        again = self._step(planner, [0], [[0.4, 0.0]], [1])
++        self.assertTrue(torch.allclose(again, torch.tensor([[0.6, 0.2]])))
++
++    def test_pool_clear_forgets_history(self):
++        planner = _smoothing_planner(0.5)
++        self._step(planner, [1], [[1.0, 1.0]], [1])
++        planner.reset_request_history()
++        out = self._step(planner, [1], [[0.2, 0.1]], [1])
++        self.assertTrue(torch.allclose(out, torch.tensor([[0.2, 0.1]])))
++
++    def test_request_pool_generations_survive_clear(self):
++        from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
++
++        pool = ReqToTokenPool(
++            size=2, max_context_len=4, device="cpu", enable_memory_saver=False
++        )
++        rows = pool.alloc_rows(2)
++        before = pool.req_generation[rows].clone()
++        pool.clear()
++        again = pool.alloc_rows(2)
++        self.assertEqual(sorted(rows), sorted(again))
++        self.assertTrue(bool((pool.req_generation[again] > before).all()))
++
++    def test_rejects_out_of_range_weight(self):
++        with self.assertRaises(ValueError):
++            _smoothing_planner(0.0)
++
++
++if __name__ == "__main__":
++    unittest.main()

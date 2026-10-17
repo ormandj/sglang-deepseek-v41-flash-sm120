@@ -1,0 +1,151 @@
+diff --git a/python/sglang/srt/speculative/dspark_components/dspark_draft_sampler.py b/python/sglang/srt/speculative/dspark_components/dspark_draft_sampler.py
+index f24e6d6e5f257dd93a9d8cefad334ef160435a83..16f9b559c769993ec6ddafba5828df189e032bd3 100644
+--- a/python/sglang/srt/speculative/dspark_components/dspark_draft_sampler.py
++++ b/python/sglang/srt/speculative/dspark_components/dspark_draft_sampler.py
+@@ -21,15 +21,6 @@ logger = logging.getLogger(__name__)
+ _CAPTURE_HEADROOM_GB = 1.0
+ 
+ 
+-def _base_logits_dtype(model) -> torch.dtype:
+-    """Dtype of the block logits; a quantized head's packed `weight` carries no
+-    logits dtype, its kernel emits the activation (draft param) dtype instead."""
+-    weight = model.lm_head.weight
+-    if weight.is_floating_point():
+-        return weight.dtype
+-    return next(model.markov_head.parameters()).dtype
+-
+-
+ def greedy_step_sampler(step_logits: torch.Tensor, step_idx: int) -> torch.Tensor:
+     del step_idx
+     return torch.argmax(step_logits, dim=-1)
+@@ -85,9 +76,12 @@ class DsparkDraftSampler:
+             self.exp_noise = torch.empty(
+                 (max_bs, vocab), dtype=torch.float32, device=device
+             )
++            # Acceptance rebuilds the draft distribution from these logits, so
++            # keep the precision they were sampled at (FP32 when the Markov
++            # bias is FP32, e.g. DeepSeek-V4).
+             self.corrected_out = torch.empty(
+                 (max_bs * self.gamma, vocab),
+-                dtype=_base_logits_dtype(model),
++                dtype=torch.float32,
+                 device=device,
+             )
+ 
+@@ -200,7 +194,7 @@ def _resolve_folded_sampling(
+         return False
+     vocab = int(model.lm_head.org_vocab_size)
+     noise_bytes = max_bs * vocab * 4
+-    logits_bytes = max_bs * gamma * vocab * _base_logits_dtype(model).itemsize
++    logits_bytes = max_bs * gamma * vocab * 4
+     need_gb = (noise_bytes + logits_bytes) / (1 << 30)
+     if available_memory_gb - need_gb >= _CAPTURE_HEADROOM_GB:
+         return True
+diff --git a/test/registered/spec/dspark/test_dspark_draft_sampler.py b/test/registered/spec/dspark/test_dspark_draft_sampler.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..00cbfa37bf9c393f1072323d16585733ef9c5b37
+--- /dev/null
++++ b/test/registered/spec/dspark/test_dspark_draft_sampler.py
+@@ -0,0 +1,102 @@
++import unittest
++from types import SimpleNamespace
++
++import torch
++
++from sglang.srt.models.dspark import VanillaMarkov
++from sglang.srt.speculative.dspark_components.dspark_draft import sample_draft_block
++from sglang.srt.speculative.dspark_components.dspark_draft_sampler import (
++    DsparkDraftSampler,
++)
++from sglang.srt.speculative.spec_tp_sync import SpecTpSync
++from sglang.test.ci.ci_register import register_cpu_ci
++from sglang.test.test_utils import CustomTestCase
++
++register_cpu_ci(est_time=5, suite="base-a-test-cpu")
++
++_BS, _GAMMA, _HIDDEN, _VOCAB, _RANK = 3, 4, 16, 64, 8
++
++
++def _single_rank_tp_sync() -> SpecTpSync:
++    return SpecTpSync(SimpleNamespace(world_size=1, rank_in_group=0))
++
++
++class _DraftModel:
++    """BF16 base logits plus an FP32 Markov bias, as in the DeepSeek-V4 draft
++    head, so the corrected step logits are FP32."""
++
++    sample_from_anchor = True
++
++    def __init__(self):
++        gen = torch.Generator().manual_seed(0)
++        self.head_weight = torch.randn(_VOCAB, _HIDDEN, generator=gen).bfloat16()
++        self.lm_head = SimpleNamespace(org_vocab_size=_VOCAB, weight=self.head_weight)
++        self.markov_head = VanillaMarkov(vocab_size=_VOCAB, markov_rank=_RANK)
++        with torch.no_grad():
++            for param in self.markov_head.parameters():
++                param.copy_(torch.randn(param.shape, generator=gen))
++
++    def compute_base_logits(self, hidden):
++        return hidden.bfloat16() @ self.head_weight.T, None
++
++
++class TestFoldedCorrectedLogits(CustomTestCase):
++    def setUp(self):
++        gen = torch.Generator().manual_seed(1)
++        self.model = _DraftModel()
++        self.hidden = torch.randn(_BS * _GAMMA, _HIDDEN, generator=gen)
++        self.input_ids = torch.randint(0, _VOCAB, (_BS * _GAMMA,), generator=gen)
++        self.anchor = self.input_ids.view(_BS, _GAMMA)[:, 0]
++        self.sampler = DsparkDraftSampler(
++            model=self.model,
++            gamma=_GAMMA,
++            max_bs=_BS,
++            device="cpu",
++            tp_sync=_single_rank_tp_sync(),
++        )
++
++    def _corrected(self):
++        return self.sampler.corrected_out[: _BS * _GAMMA].view(_BS, _GAMMA, -1)
++
++    def test_sampled_rows_keep_the_logits_they_were_drawn_from(self):
++        sampling_info = SimpleNamespace(
++            temperatures=torch.full((_BS, 1), 0.7),
++            top_ks=torch.full((_BS,), 1 << 30, dtype=torch.int32),
++        )
++        self.sampler.stage_sampling_params(bs=_BS, sampling_info=sampling_info)
++        self.sampler(self.hidden, self.input_ids)
++
++        tokens = self.sampler.out[: _BS * _GAMMA].view(_BS, _GAMMA)
++        base = self.model.compute_base_logits(self.hidden)[0].view(_BS, _GAMMA, -1)
++        corrected = self._corrected()
++        self.assertEqual(corrected.dtype, torch.float32)
++        prev = self.anchor
++        for step in range(_GAMMA):
++            step_logits = self.model.markov_head.apply_step_logits(
++                base[:, step], token_ids=prev, hidden_states=None
++            )
++            self.assertEqual(step_logits.dtype, torch.float32)
++            self.assertTrue(torch.equal(corrected[:, step], step_logits))
++            prev = tokens[:, step]
++
++    def test_greedy_rows_match_the_eager_proposal(self):
++        self.sampler.stage_sampling_params(bs=_BS, sampling_info=None)
++        self.sampler(self.hidden, self.input_ids)
++
++        base = self.model.compute_base_logits(self.hidden)[0].view(_BS, _GAMMA, -1)
++        eager = sample_draft_block(
++            base_logits=base,
++            anchor_tokens=self.anchor,
++            draft_hidden=self.hidden.view(_BS, _GAMMA, -1),
++            sampling_info=None,
++            markov_head=self.model.markov_head,
++            device="cpu",
++            tp_sync=_single_rank_tp_sync(),
++        )
++        tokens = self.sampler.out[: _BS * _GAMMA].view(_BS, _GAMMA)
++        self.assertTrue(torch.equal(tokens, eager.draft_tokens))
++        self.assertTrue(torch.equal(self._corrected(), eager.corrected_logits))
++
++
++if __name__ == "__main__":
++    unittest.main()

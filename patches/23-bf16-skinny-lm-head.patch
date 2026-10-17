@@ -1,0 +1,474 @@
+diff --git a/python/sglang/kernels/ops/gemm/__init__.py b/python/sglang/kernels/ops/gemm/__init__.py
+index 77e7e84b4e43a0df8291e9e42510f923a62db33b..77ff403064c165308fd376b51f364ae666865ebf 100644
+--- a/python/sglang/kernels/ops/gemm/__init__.py
++++ b/python/sglang/kernels/ops/gemm/__init__.py
+@@ -433,6 +433,19 @@ register_kernel(
+         capabilities=frozenset({CapabilityRequirement.CUDA}),
+     )
+ )
++register_kernel(
++    KernelSpec(
++        op="gemm.bf16_skinny_gemm",
++        backend=KernelBackend.TRITON,
++        target="sglang.kernels.ops.gemm.bf16_skinny_gemm:bf16_skinny_gemm",
++        capabilities=_CUDA,
++        format_signature=FormatSignature(
++            supported_dtypes=("bfloat16",),
++            description="[m, k] @ [n, k].T for m <= 16, k % 128 == 0; batch-invariant rows",
++        ),
++        description="Weight-streaming BF16 GEMM for decode-sized LM heads (Triton).",
++    )
++)
+ register_kernel(
+     KernelSpec(
+         op="gemm.hopper_bf16_gemv",
+diff --git a/python/sglang/kernels/ops/gemm/bf16_skinny_gemm.py b/python/sglang/kernels/ops/gemm/bf16_skinny_gemm.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..364a0f30bbea70bf9beb47b5aa1a22665c8496b9
+--- /dev/null
++++ b/python/sglang/kernels/ops/gemm/bf16_skinny_gemm.py
+@@ -0,0 +1,107 @@
++"""BF16 out[M, N] = x[M, K] @ weight[N, K].T for decode-sized M (<= 16) and large N.
++
++A weight-streaming kernel for wide, bandwidth-bound projections such as a vocab-parallel
++LM head: each CTA owns BN output columns over the whole K, so there is no split-K
++reduction. A row's arithmetic (BK tiling, FP32 accumulation order) depends only on
++(N, K), never on M, so each row gives the same bits alone or in any batch of up to 16.
++"""
++
++import torch
++import triton
++import triton.language as tl
++
++MAX_M = 16
++_BLOCK_N = 64
++_BLOCK_K = 128
++
++
++@triton.jit
++def _bf16_skinny_kernel(
++    x_ptr,
++    w_ptr,
++    out_ptr,
++    M,
++    N,
++    K,
++    stride_xm,
++    stride_wn,
++    stride_om,
++    BM: tl.constexpr,
++    BN: tl.constexpr,
++    BK: tl.constexpr,
++):
++    pid = tl.program_id(0)
++    # int64 row offsets: a large weight or row stride exceeds 2**31 elements.
++    offs_m = tl.arange(0, BM).to(tl.int64)
++    offs_n = pid.to(tl.int64) * BN + tl.arange(0, BN)
++    offs_k = tl.arange(0, BK)
++    mask_m = offs_m < M
++    mask_n = offs_n < N
++    x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_k[None, :]
++    w_ptrs = w_ptr + offs_n[:, None] * stride_wn + offs_k[None, :]
++    acc = tl.zeros((BM, BN), dtype=tl.float32)
++    for _ in range(0, K, BK):
++        a = tl.load(x_ptrs, mask=mask_m[:, None], other=0.0)
++        w = tl.load(
++            w_ptrs, mask=mask_n[:, None], other=0.0, eviction_policy="evict_first"
++        )
++        acc = tl.dot(a, tl.trans(w), acc)
++        x_ptrs += BK
++        w_ptrs += BK
++    out_ptrs = out_ptr + offs_m[:, None] * stride_om + offs_n[None, :]
++    tl.store(
++        out_ptrs,
++        acc.to(out_ptr.dtype.element_ty),
++        mask=mask_m[:, None] & mask_n[None, :],
++    )
++
++
++def bf16_skinny_supported(x: torch.Tensor, weight: torch.Tensor) -> bool:
++    """1 <= M <= 16 BF16 rows on one CUDA (not ROCm) device, K % 128 == 0, unit
++    stride along K and arbitrary row strides."""
++    return (
++        x.is_cuda
++        and torch.version.hip is None
++        and weight.device == x.device
++        and x.dim() == 2
++        and 0 < x.shape[0] <= MAX_M
++        and x.dtype == weight.dtype == torch.bfloat16
++        and weight.dim() == 2
++        and x.shape[1] == weight.shape[1]
++        and x.shape[1] % _BLOCK_K == 0
++        and x.stride(1) == 1
++        and weight.stride(1) == 1
++    )
++
++
++def bf16_skinny_gemm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
++    assert bf16_skinny_supported(x, weight), (
++        x.shape,
++        x.dtype,
++        x.device,
++        weight.shape,
++        weight.dtype,
++        weight.device,
++    )
++    m, k = x.shape
++    n = weight.shape[0]
++    out = torch.empty((m, n), dtype=x.dtype, device=x.device)
++    # Triton launches on the current device; the operands may be on another.
++    with torch.cuda.device(x.device):
++        _bf16_skinny_kernel[(triton.cdiv(n, _BLOCK_N),)](
++            x,
++            weight,
++            out,
++            m,
++            n,
++            k,
++            x.stride(0),
++            weight.stride(0),
++            out.stride(0),
++            BM=MAX_M,
++            BN=_BLOCK_N,
++            BK=_BLOCK_K,
++            num_warps=4,
++            num_stages=4,
++        )
++    return out
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index 46d30c9fbc34e41b4319753d95064090f8262011..7ca367a8e98b3919642febc8c9e1e0140a6c92d1 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -540,6 +540,9 @@ class Envs:
+     SGLANG_DSPARK_ENABLE_SPS_RECORD = EnvBool(False)
+     SGLANG_DSPARK_FAST_KERNEL = EnvBool(True)
+     SGLANG_DSPARK_FP32_LM_HEAD = EnvBool(False)
++    # BF16 LM head (target and DSpark draft) at <= 16 rows through a weight-streaming
++    # Triton kernel instead of cuBLAS; each row's result is independent of the batch.
++    SGLANG_ENABLE_BF16_SKINNY_LM_HEAD = EnvBool(False)
+     SGLANG_DSPARK_FAST_SAMPLING = EnvBool(True)
+     SGLANG_DSPARK_FOLDED_SAMPLING = EnvInt(DsparkFoldedSampling.AUTO)
+     SGLANG_DSPARK_FOLDED_PROPOSAL = EnvBool(True)
+diff --git a/python/sglang/srt/layers/logits_processor.py b/python/sglang/srt/layers/logits_processor.py
+index b9a49fc8bebeb71078201beda60958e53029b935..912dcd741c7102ecebeabac3c444ccb18e502f0b 100644
+--- a/python/sglang/srt/layers/logits_processor.py
++++ b/python/sglang/srt/layers/logits_processor.py
+@@ -119,6 +119,21 @@ class SamplingMaskOutput:
+             self.num_accept_tokens = fn(self.num_accept_tokens)
+ 
+ 
++def bf16_lm_head_matmul(hidden: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
++    """hidden @ weight.T for an unquantized LM head; decode-sized BF16 batches can use
++    a weight-streaming kernel (SGLANG_ENABLE_BF16_SKINNY_LM_HEAD)."""
++    hidden = hidden.to(weight.dtype)
++    if envs.SGLANG_ENABLE_BF16_SKINNY_LM_HEAD.get():
++        from sglang.kernels.ops.gemm.bf16_skinny_gemm import (
++            bf16_skinny_gemm,
++            bf16_skinny_supported,
++        )
++
++        if bf16_skinny_supported(hidden, weight):
++            return bf16_skinny_gemm(hidden, weight)
++    return torch.matmul(hidden, weight.T)
++
++
+ def _trace_e2e_logits(stage: str, **fields) -> None:
+     if not envs.SGLANG_TRACE_LOGITS_E2E.get():
+         return
+@@ -1015,9 +1030,7 @@ class LogitsProcessor(nn.Module):
+                     hidden_states.bfloat16(), lm_head.weight.T.bfloat16()
+                 )
+             else:
+-                logits = torch.matmul(
+-                    hidden_states.to(lm_head.weight.dtype), lm_head.weight.T
+-                )
++                logits = bf16_lm_head_matmul(hidden_states, lm_head.weight)
+         else:
+             # GGUF models
+             # TODO: use weight_packed_linear for GGUF models
+diff --git a/python/sglang/srt/models/dspark.py b/python/sglang/srt/models/dspark.py
+index c39d13200d087821bc6dd5f0a7e776914fa7fd61..3ff776ea4ca737a40c38329d48994b487d1582a5 100644
+--- a/python/sglang/srt/models/dspark.py
++++ b/python/sglang/srt/models/dspark.py
+@@ -13,7 +13,10 @@ from sglang.kernels.ops.speculative.dspark.dspark_draft_model import (
+ from sglang.srt.distributed.communication_op import tensor_model_parallel_all_gather
+ from sglang.srt.environ import envs
+ from sglang.srt.layers.linear import ReplicatedLinear
+-from sglang.srt.layers.logits_processor import should_apply_lm_head_quant_method
++from sglang.srt.layers.logits_processor import (
++    bf16_lm_head_matmul,
++    should_apply_lm_head_quant_method,
++)
+ from sglang.srt.mem_cache.memory_pool import KVWriteLoc
+ from sglang.srt.model_loader.weight_utils import default_weight_loader
+ from sglang.srt.models.dflash import DFlashDraftModel
+@@ -45,8 +48,7 @@ def project_through_lm_head(hidden: torch.Tensor, lm_head: nn.Module) -> torch.T
+     quant_method = lm_head.quant_method
+     if should_apply_lm_head_quant_method(lm_head, quant_method):
+         return quant_method.apply(lm_head, hidden, None)
+-    weight = lm_head.weight
+-    return torch.matmul(hidden.to(weight.dtype), weight.T)
++    return bf16_lm_head_matmul(hidden, lm_head.weight)
+ 
+ 
+ def run_markov_block(
+diff --git a/test/registered/kernels/ops/gemm/test_bf16_skinny_gemm.py b/test/registered/kernels/ops/gemm/test_bf16_skinny_gemm.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..7d979e806997221f6400ea6765a2de028405f6a9
+--- /dev/null
++++ b/test/registered/kernels/ops/gemm/test_bf16_skinny_gemm.py
+@@ -0,0 +1,153 @@
++"""Weight-streaming BF16 GEMM for decode-sized LM heads.
++
++A row's tiling and FP32 accumulation order depend only on (N, K), so a row must give
++the same bits alone or in any batch of up to 16 rows, also under CUDA graph replay.
++Row offsets are 64-bit, and the launch follows the operands' device. The LM-head
++dispatch is tested in test/registered/unit/layers/test_logits_processor_bf16_lm_head.py.
++"""
++
++import unittest
++from unittest import mock
++
++import torch
++
++from sglang.kernels.ops.gemm.bf16_skinny_gemm import (
++    MAX_M,
++    bf16_skinny_gemm,
++    bf16_skinny_supported,
++)
++from sglang.test.ci.ci_register import register_cuda_ci
++from sglang.test.test_utils import CustomTestCase
++
++register_cuda_ci(est_time=30, stage="base-b-kernel-unit", runner_config="1-gpu-small")
++
++# A TP4 DeepSeek-V4.1 LM head shard, and a small shape whose N is not a block multiple.
++SHAPES = [(32320, 4096), (1000, 256)]
++
++
++def _inputs(m, n, k, seed=0):
++    g = torch.Generator(device="cuda").manual_seed(seed)
++    x = torch.randn(m, k, device="cuda", generator=g).bfloat16()
++    w = (torch.randn(n, k, device="cuda", generator=g) / k**0.5).bfloat16()
++    return x, w
++
++
++def _bits(t):
++    return t.view(torch.int16)
++
++
++def _error_bound(x, w):
++    """FP64 result and the bound for an FP32-accumulated dot product rounded once to
++    BF16: gamma_K * (|x| @ |w|.T) for the accumulation plus one BF16 ulp."""
++    ref = x.double() @ w.double().T
++    k = x.shape[1]
++    gamma = k * 2.0**-24 / (1 - k * 2.0**-24)
++    ulp = torch.exp2(torch.floor(torch.log2(ref.abs().clamp_min(2.0**-126))) - 7)
++    return ref, gamma * (x.double().abs() @ w.double().abs().T) + ulp
++
++
++@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
++class TestBf16SkinnyGemm(CustomTestCase):
++    def test_within_fp32_accumulation_bound(self):
++        for n, k in SHAPES:
++            for m in (1, 6, MAX_M):
++                with self.subTest(n=n, k=k, m=m):
++                    x, w = _inputs(m, n, k)
++                    ref, bound = _error_bound(x, w)
++                    err = (bf16_skinny_gemm(x, w).double() - ref).abs()
++                    self.assertTrue(bool((err <= bound).all()))
++
++    def test_rows_are_batch_invariant(self):
++        for n, k in SHAPES:
++            x, w = _inputs(MAX_M, n, k, seed=1)
++            alone = torch.cat([bf16_skinny_gemm(x[i : i + 1], w) for i in range(MAX_M)])
++            for m in range(2, MAX_M + 1):
++                with self.subTest(n=n, k=k, m=m):
++                    self.assertTrue(
++                        torch.equal(_bits(bf16_skinny_gemm(x[:m], w)), _bits(alone[:m]))
++                    )
++
++    def test_graph_replay_reads_new_activations(self):
++        x, w = _inputs(6, 1000, 256, seed=2)
++        stream = torch.cuda.Stream()
++        stream.wait_stream(torch.cuda.current_stream())
++        with torch.cuda.stream(stream):
++            bf16_skinny_gemm(x, w)
++        torch.cuda.current_stream().wait_stream(stream)
++        graph = torch.cuda.CUDAGraph()
++        with torch.cuda.graph(graph):
++            out = bf16_skinny_gemm(x, w)
++        x.copy_(_inputs(6, 1000, 256, seed=3)[0])
++        graph.replay()
++        self.assertTrue(torch.equal(_bits(out), _bits(bf16_skinny_gemm(x, w))))
++
++    def test_strided_rows_match_contiguous(self):
++        x, w = _inputs(6, 1000, 256, seed=5)
++        x_rows = torch.zeros(6, 384, dtype=x.dtype, device="cuda")[:, :256]
++        w_rows = torch.zeros(1000, 512, dtype=w.dtype, device="cuda")[:, :256]
++        x_rows.copy_(x)
++        w_rows.copy_(w)
++        self.assertTrue(bf16_skinny_supported(x_rows, w_rows))
++        self.assertTrue(
++            torch.equal(
++                _bits(bf16_skinny_gemm(x_rows, w_rows)), _bits(bf16_skinny_gemm(x, w))
++            )
++        )
++
++    def test_row_offsets_beyond_int32(self):
++        # Three weight rows 2**30 + 256 elements apart: the last row starts past
++        # 2**31 elements, so 32-bit row offsets would wrap.
++        n, k, row_stride = 3, 256, 2**30 + 256
++        size = (n - 1) * row_stride + k
++        self.assertGreater((n - 1) * row_stride, 2**31)
++        if torch.cuda.mem_get_info()[0] < size * 2 + 2**30:
++            self.skipTest("needs about 5 GiB of free GPU memory")
++        x, w = _inputs(6, n, k, seed=7)
++        storage = torch.empty(size, dtype=torch.bfloat16, device="cuda")
++        w_far = storage.as_strided((n, k), (row_stride, 1))
++        w_far.copy_(w)
++        self.assertTrue(bf16_skinny_supported(x, w_far))
++        self.assertTrue(
++            torch.equal(
++                _bits(bf16_skinny_gemm(x, w_far)), _bits(bf16_skinny_gemm(x, w))
++            )
++        )
++
++    @unittest.skipUnless(torch.cuda.device_count() >= 2, "needs two GPUs")
++    def test_operands_on_a_non_current_device(self):
++        x, w = _inputs(6, 1000, 256, seed=6)
++        ref, bound = _error_bound(x, w)
++        x1, w1 = x.to("cuda:1"), w.to("cuda:1")
++        torch.cuda.synchronize(0)
++        torch.cuda.synchronize(1)
++        with torch.cuda.device(0):
++            # Keep device 0 busy, so a launch on its stream instead of device 1's
++            # would not have run when device 1 is synchronized below.
++            torch.cuda._sleep(2**31)
++            out = bf16_skinny_gemm(x1, w1)
++        torch.cuda.synchronize(1)
++        self.assertEqual(out.device, x1.device)
++        err = (out.cpu().double() - ref.cpu()).abs()
++        self.assertTrue(bool((err <= bound.cpu()).all()))
++        torch.cuda.synchronize(0)
++
++    def test_supported_inputs(self):
++        x, w = _inputs(4, 1000, 256)
++        self.assertTrue(bf16_skinny_supported(x, w))
++        rejected = {
++            "rows > 16": (_inputs(MAX_M + 1, 1000, 256)[0], w),
++            "float16": (x.half(), w.half()),
++            "K % 128": (x[:, :192], w[:, :192]),
++            "strided x columns": (x.t().contiguous().t(), w),
++            "strided weight columns": (x, w.t().contiguous().t()),
++            "weight on CPU": (x, w.cpu()),
++        }
++        for name, (a, b) in rejected.items():
++            with self.subTest(name):
++                self.assertFalse(bf16_skinny_supported(a, b))
++        with self.subTest("ROCm"), mock.patch.object(torch.version, "hip", "6.4"):
++            self.assertFalse(bf16_skinny_supported(x, w))
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/test/registered/unit/layers/test_logits_processor_bf16_lm_head.py b/test/registered/unit/layers/test_logits_processor_bf16_lm_head.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..7a71726392c86e1945c785116b2e1ad77401a581
+--- /dev/null
++++ b/test/registered/unit/layers/test_logits_processor_bf16_lm_head.py
+@@ -0,0 +1,95 @@
++"""LM-head dispatch to the BF16 skinny GEMM, without a GPU.
++
++bf16_lm_head_matmul and both production LM-head callers (target logits and the
++DSpark draft projection) must call the kernel only when
++SGLANG_ENABLE_BF16_SKINNY_LM_HEAD is set and bf16_skinny_supported accepts the
++operands, and use torch.matmul otherwise. The kernel and its predicate are
++stubbed; their GPU behavior is tested in
++test/registered/kernels/ops/gemm/test_bf16_skinny_gemm.py.
++"""
++
++import unittest
++from types import SimpleNamespace
++from unittest import mock
++
++import torch
++
++from sglang.kernels.ops.gemm import bf16_skinny_gemm as skinny
++from sglang.srt.environ import envs
++from sglang.srt.layers.logits_processor import LogitsProcessor, bf16_lm_head_matmul
++from sglang.srt.models.dspark import project_through_lm_head
++from sglang.test.ci.ci_register import register_cpu_ci
++from sglang.test.test_utils import CustomTestCase
++
++register_cpu_ci(est_time=5, suite="base-a-test-cpu")
++
++
++def _target_logits(hidden, weight):
++    processor = SimpleNamespace(use_fp32_lm_head=False, rl_on_policy_target=None)
++    return LogitsProcessor._compute_lm_head(
++        processor, hidden, SimpleNamespace(weight=weight)
++    )
++
++
++def _draft_logits(hidden, weight):
++    return project_through_lm_head(
++        hidden, SimpleNamespace(weight=weight, quant_method=None)
++    )
++
++
++CALLERS = {
++    "bf16_lm_head_matmul": bf16_lm_head_matmul,
++    "target logits": _target_logits,
++    "draft projection": _draft_logits,
++}
++
++
++class TestBf16LmHeadDispatch(CustomTestCase):
++    def setUp(self):
++        g = torch.Generator().manual_seed(0)
++        # FP32 hidden states: the callers cast them to the weight dtype first.
++        self.hidden = torch.randn(6, 256, generator=g)
++        self.weight = torch.randn(1000, 256, generator=g).bfloat16()
++        self.kernel_out = torch.full((6, 1000), 7.0, dtype=torch.bfloat16)
++
++    def _call(self, caller, enabled, supported):
++        with (
++            envs.SGLANG_ENABLE_BF16_SKINNY_LM_HEAD.override(enabled),
++            mock.patch.object(
++                skinny, "bf16_skinny_supported", return_value=supported
++            ) as predicate,
++            mock.patch.object(
++                skinny, "bf16_skinny_gemm", return_value=self.kernel_out
++            ) as kernel,
++        ):
++            out = caller(self.hidden, self.weight)
++        return out, predicate, kernel
++
++    def test_enabled_and_supported_calls_the_kernel(self):
++        for name, caller in CALLERS.items():
++            with self.subTest(name):
++                out, predicate, kernel = self._call(caller, True, True)
++                kernel.assert_called_once()
++                x, w = kernel.call_args.args
++                self.assertTrue(torch.equal(x, self.hidden.bfloat16()))
++                self.assertIs(w, self.weight)
++                self.assertIs(out, self.kernel_out)
++
++    def test_otherwise_uses_matmul(self):
++        want = self.hidden.bfloat16() @ self.weight.T
++        for name, caller in CALLERS.items():
++            for enabled, supported in ((True, False), (False, True)):
++                with self.subTest(name, enabled=enabled, supported=supported):
++                    out, predicate, kernel = self._call(caller, enabled, supported)
++                    kernel.assert_not_called()
++                    self.assertEqual(predicate.called, enabled)
++                    self.assertTrue(torch.equal(out, want))
++
++    def test_cpu_operands_are_not_supported(self):
++        self.assertFalse(
++            skinny.bf16_skinny_supported(self.hidden.bfloat16(), self.weight)
++        )
++
++
++if __name__ == "__main__":
++    unittest.main()

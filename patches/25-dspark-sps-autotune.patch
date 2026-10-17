@@ -1,0 +1,4501 @@
+diff --git a/python/sglang/srt/arg_groups/fields/spec.py b/python/sglang/srt/arg_groups/fields/spec.py
+index 199e865ef11325924b432a915dd9c94da568dc99..e1f377c9657e1a9caf1b68a7f38431ac8ddd535e 100644
+--- a/python/sglang/srt/arg_groups/fields/spec.py
++++ b/python/sglang/srt/arg_groups/fields/spec.py
+@@ -106,6 +106,25 @@ class Spec(msgspec.Struct):
+         "it into extra real verification at the same step time. Off by default; when "
+         "off the schedule is byte-for-byte unchanged.",
+     ] = False
++    speculative_dspark_sps_autotune: A[
++        str,
++        Arg(
++            help="DSPARK compact ragged-verify only. Fit the SPS cost table at "
++            "startup, before the server is ready, from real decode steps: for "
++            "each (batch size, verify tier) the planner can choose, the verify "
++            "budget is pinned to that tier and synthetic requests run until "
++            "enough steady steps are timed (the dspark_sps_profiler method). "
++            "'auto' loads a table cached for the same hardware, parallel "
++            "layout, captured graphs, model and software, and measures and "
++            "caches one otherwise; --speculative-dspark-sps-table-path takes "
++            "precedence. 'force' always measures, replacing a configured table. "
++            "A measurement takes a few minutes, once per configuration, and "
++            "runs in the HTTP server's startup (other entrypoints keep the "
++            "configured table). On failure every rank keeps the configured "
++            "table. 'off' (default) leaves startup unchanged.",
++            choices=["off", "auto", "force"],
++        ),
++    ] = "off"
+     speculative_accept_threshold_single: A[
+         float,
+         "Accept a draft token if its probability in the target model is greater than this threshold.",
+diff --git a/python/sglang/srt/arg_groups/speculative_hook.py b/python/sglang/srt/arg_groups/speculative_hook.py
+index 39134de1489d91600f6265d1cca2c46630cdfc32..b68f7b65c0f9ef3fb8a599a29ab8b3262a68928a 100644
+--- a/python/sglang/srt/arg_groups/speculative_hook.py
++++ b/python/sglang/srt/arg_groups/speculative_hook.py
+@@ -801,6 +801,15 @@ def _handle_dspark(server_args: ServerArgs) -> None:
+             "scheduler, which is off under SGLANG_RAGGED_VERIFY_MODE=static; it "
+             "will be a no-op."
+         )
++    if (
++        cfg.speculative_dspark_sps_autotune != "off"
++        and ragged_mode is not RaggedVerifyMode.COMPACT
++    ):
++        logger.warning(
++            "--speculative-dspark-sps-autotune only takes effect with "
++            "SGLANG_RAGGED_VERIFY_MODE=compact (got %r); it will be a no-op.",
++            ragged_mode.value,
++        )
+ 
+ 
+ def _resolve_dflash_draft_attention_backend(server_args: ServerArgs) -> None:
+diff --git a/python/sglang/srt/entrypoints/http_server.py b/python/sglang/srt/entrypoints/http_server.py
+index 0fb6f4813a8b2d4806f1c65a49da65004860a230..6d22685735b347ad6ed971e3626ab2bd54b658cd 100644
+--- a/python/sglang/srt/entrypoints/http_server.py
++++ b/python/sglang/srt/entrypoints/http_server.py
+@@ -406,6 +406,14 @@ async def lifespan(fast_api_app: FastAPI):
+         )
+         logger.info("Warmup ended")
+ 
++    # DSpark SPS autotune (--speculative-dspark-sps-autotune): measure real
++    # decode steps and install the fitted table before the server listens.
++    from sglang.srt.speculative.dspark_components.dspark_sps_autotune import (
++        run_startup_autotune,
++    )
++
++    await run_startup_autotune(_global_state.tokenizer_manager)
++
+     # Start the native gRPC server and warmup inside the try so a failure in
+     # either still runs the finally cleanup below. Native gRPC is enabled via
+     # --grpc-port / SGLANG_GRPC_PORT; only the single-tokenizer process is
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index 7ca367a8e98b3919642febc8c9e1e0140a6c92d1..1c0ba6d68f5e4b2fae11d59aff5f90bb95b9b271 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -558,6 +558,29 @@ class Envs:
+     SGLANG_DSPARK_NVLINK_VOCAB_GATHER = EnvBool(True)
+     SGLANG_DSPARK_ENABLE_MULTI_STREAM = EnvBool(True)
+     SGLANG_DSPARK_CONFIDENCE_RELAY_LAG_STEPS = EnvInt(2)
++    # --speculative-dspark-sps-autotune: cache directory; passes over the cells
++    # (alternating order, median per cell); decode steps skipped and then
++    # timed per cell; per-cell and total time limits; prompt length; sampling
++    # temperature and top_p (set them to the deployment's usual values: they
++    # change verify-side sampling cost and acceptance); shared context lengths
++    # of the long-context cells that fit the context term, near and far (the
++    # far one fits the slope past the near one; 0 disables each);
++    # measured batch sizes (comma list, default 1, 2, 3, 4, 6, 8, 12, 16, ...
++    # up to the running-request limit).
++    SGLANG_DSPARK_SPS_AUTOTUNE_CACHE_DIR = EnvStr(
++        lambda: _default_cache_subdir("dspark_sps")
++    )
++    SGLANG_DSPARK_SPS_AUTOTUNE_PASSES = EnvInt(2)
++    SGLANG_DSPARK_SPS_AUTOTUNE_WARMUP_STEPS = EnvInt(8)
++    SGLANG_DSPARK_SPS_AUTOTUNE_STEADY_STEPS = EnvInt(64)
++    SGLANG_DSPARK_SPS_AUTOTUNE_CELL_TIMEOUT_SECONDS = EnvFloat(60.0)
++    SGLANG_DSPARK_SPS_AUTOTUNE_MAX_SECONDS = EnvFloat(900.0)
++    SGLANG_DSPARK_SPS_AUTOTUNE_INPUT_LEN = EnvInt(256)
++    SGLANG_DSPARK_SPS_AUTOTUNE_TEMPERATURE = EnvFloat(1.0)
++    SGLANG_DSPARK_SPS_AUTOTUNE_TOP_P = EnvFloat(1.0)
++    SGLANG_DSPARK_SPS_AUTOTUNE_LONG_CONTEXT = EnvInt(32768)
++    SGLANG_DSPARK_SPS_AUTOTUNE_LONG_CONTEXT_FAR = EnvInt(131072)
++    SGLANG_DSPARK_SPS_AUTOTUNE_BATCH_SIZES = EnvStr("")
+ 
+     # ===================================================================
+     # Memory pools and KV-cache sizing
+diff --git a/python/sglang/srt/managers/scheduler.py b/python/sglang/srt/managers/scheduler.py
+index 14580235e2e2680fb18887676a2eb63e52c24383..f4cbbcc802249cff5d7d440c9b07415a98c6dae6 100644
+--- a/python/sglang/srt/managers/scheduler.py
++++ b/python/sglang/srt/managers/scheduler.py
+@@ -1146,6 +1146,12 @@ class Scheduler(
+ 
+         refresh_deep_gemm_layout_memory_budget(model_runner, only_if_initialized=True)
+ 
++        post_capture_init = getattr(self.draft_worker, "post_capture_init", None)
++        if post_capture_init is not None:
++            # After capture and KV sizing, before serving (DSpark SPS autotune).
++            with device_module.stream(forward_stream):
++                post_capture_init()
++
+         if (
+             get_exec().moe.elastic_ep_backend is not None
+             and get_exec().moe.ep_join_mode == "recover"
+diff --git a/python/sglang/srt/managers/scheduler_components/internal_state.py b/python/sglang/srt/managers/scheduler_components/internal_state.py
+index 917e198c5312f1c06ad2859ec90d425053b91887..7dd028d00f4e9b2b532f4eb1a2ae6d063b66bd33 100644
+--- a/python/sglang/srt/managers/scheduler_components/internal_state.py
++++ b/python/sglang/srt/managers/scheduler_components/internal_state.py
+@@ -127,6 +127,10 @@ class SchedulerInternalStateController:
+             info_record = scheduler.draft_worker.dump_info_records()
+             if info_record is not None:
+                 state["dspark_info_record"] = info_record
++            autotune = getattr(scheduler.draft_worker, "sps_autotune_status", None)
++            autotune_status = autotune() if autotune is not None else None
++            if autotune_status is not None:
++                state["dspark_sps_autotune"] = autotune_status
+ 
+     def _add_step_times(self, state: Dict[str, Any]) -> None:
+         if self.record_step_time:
+@@ -181,6 +185,14 @@ class SchedulerInternalStateController:
+             "dspark_clear_info_records": _UpdateHandler(
+                 self._validate_dspark_clear_records, self._apply_dspark_clear_records
+             ),
++            "dspark_sps_autotune_record": _UpdateHandler(
++                self._validate_dspark_autotune_record,
++                self._apply_dspark_autotune_record,
++            ),
++            "dspark_sps_autotune_table": _UpdateHandler(
++                self._validate_dspark_autotune_table,
++                self._apply_dspark_autotune_table,
++            ),
+         }
+ 
+     def _validate_pp_micro_batch_size(self, key: str, value: Any) -> None:
+@@ -249,6 +261,32 @@ class SchedulerInternalStateController:
+         if value:
+             self.scheduler.draft_worker.clear_info_records()
+ 
++    # The startup SPS measurement (--speculative-dspark-sps-autotune) drives
++    # these two; both need its pending measurement.
++    def _validate_dspark_autotune_record(self, key: str, value: Any) -> None:
++        self._require_pending_autotune(key)
++        if not isinstance(value, bool):
++            raise UpdateRejected(f"{key} must be true or false, got {value!r}.")
++
++    def _apply_dspark_autotune_record(self, key: str, value: Any) -> None:
++        self.scheduler.draft_worker.set_sps_autotune_recording(value)
++
++    def _validate_dspark_autotune_table(self, key: str, value: Any) -> None:
++        self._require_pending_autotune(key)
++        if value is not None and not isinstance(value, str):
++            raise UpdateRejected(f"{key} must be a JSON string or null.")
++
++    def _apply_dspark_autotune_table(self, key: str, value: Any) -> None:
++        # Every TP rank applies this in the same iteration; the install agrees
++        # across them before any rank uses the table.
++        self.scheduler.draft_worker.install_sps_autotune_table(value)
++
++    def _require_pending_autotune(self, key: str) -> None:
++        self._require_dspark_worker(key, "sps_autotune_status")
++        status = self.scheduler.draft_worker.sps_autotune_status()
++        if not (status and status.get("pending")):
++            raise UpdateRejected(f"{key} requires a pending DSpark SPS autotune.")
++
+     def _require_dspark_worker(self, key: str, command: str) -> None:
+         if not self.scheduler.spec_algorithm.is_dspark() or not hasattr(
+             self.scheduler.draft_worker, command
+diff --git a/python/sglang/srt/speculative/base_spec_worker.py b/python/sglang/srt/speculative/base_spec_worker.py
+index d8bab5c4289a2ee54d73d332564dcc6b825b8877..45753334f2355803bc65b19653ce80f528c14aae 100644
+--- a/python/sglang/srt/speculative/base_spec_worker.py
++++ b/python/sglang/srt/speculative/base_spec_worker.py
+@@ -224,6 +224,9 @@ class BaseSpecWorker(ABC):
+     def prewarm_sampling(self) -> SamplingPrewarmResult:
+         return self.target_worker.model_runner.prewarm_sampling()
+ 
++    def post_capture_init(self) -> None:
++        """Runs on every rank after graph capture and KV sizing, before serving."""
++
+     @property
+     def preloaded_weights_bytes(self) -> int:
+         if self.draft_worker is None:
+diff --git a/python/sglang/srt/speculative/dspark_components/dspark_observability.py b/python/sglang/srt/speculative/dspark_components/dspark_observability.py
+index bb9754c1d7f20291f7492751ed4ce0babda559a3..c6323b5e542412403c5cf46a0bd3f78a0989101f 100644
+--- a/python/sglang/srt/speculative/dspark_components/dspark_observability.py
++++ b/python/sglang/srt/speculative/dspark_components/dspark_observability.py
+@@ -182,6 +182,7 @@ class DsparkInfoDumper:
+         self._sps_report_interval = int(sps_report_interval)
+         if self._sps_report_interval > 0:
+             self._components.add(InfoComponent.STEP_GPU_TIME)
++        self._configured_components = set(self._components)
+         # Dedup within an attention-TP group only: records describe the
+         # DP-rank-local batch, so under dp-attention every DP rank must keep
+         # dumping (the SPS profiler reads one payload per DP rank).
+@@ -202,6 +203,13 @@ class DsparkInfoDumper:
+         ] = {}
+         self._open_segments: dict[InfoSegment, torch.cuda.Event] = {}
+ 
++    def set_runtime_components(self, components: set[InfoComponent]) -> None:
++        """Record ``components`` on top of the configured ones until reset with
++        an empty set. Starts from cleared records."""
++        self._components = self._configured_components | set(components)
++        self.enabled = bool(self._components) and self.attn_tp_rank == 0
++        self.clear()
++
+     def begin_step(self) -> None:
+         if not self.enabled:
+             return
+@@ -806,6 +814,13 @@ class DsparkStepObservers:
+     def clear_info_records(self) -> None:
+         self._info_dumper.clear()
+ 
++    def set_sps_recording(self, on: bool) -> None:
++        """Per-step periods for the startup SPS measurement (the components
++        SGLANG_DSPARK_ENABLE_SPS_RECORD enables)."""
++        self._info_dumper.set_runtime_components(
++            {InfoComponent.CORE, InfoComponent.STEP_CPU_TIME} if on else set()
++        )
++
+     def block_accept_estimate_log_suffix(self) -> Optional[str]:
+         if self._block_accept_recorder is None:
+             return None
+diff --git a/python/sglang/srt/speculative/dspark_components/dspark_planner.py b/python/sglang/srt/speculative/dspark_components/dspark_planner.py
+index 4096f867cd8cbe065dfb0b6558cd4617c95d87dc..6c6a509e7812055b9a316ec5d0378fd3f599ddc9 100644
+--- a/python/sglang/srt/speculative/dspark_components/dspark_planner.py
++++ b/python/sglang/srt/speculative/dspark_components/dspark_planner.py
+@@ -8,6 +8,7 @@ import torch
+ 
+ from sglang.kernels.ops.speculative.cache_locs import assign_extend_cache_locs_func
+ from sglang.kernels.ops.speculative.dspark.dspark_schedule import (
++    _value_independent_descending_order,
+     ScheduleVerifyLensTopk,
+     compute_sort_survival,
+ )
+@@ -67,6 +68,14 @@ class VerifyWindow(msgspec.Struct, frozen=True):
+     verify_cache_loc_2d: torch.Tensor
+ 
+ 
++class ContextCost(msgspec.Struct, frozen=True):
++    """A batch's context cost under an SPS table that prices context: the
++    per-step part and each request's cost per verify token (batch order)."""
++
++    step_seconds: float
++    token_seconds: torch.Tensor
++
++
+ class DSparkVerifyPlanner:
+     def __init__(
+         self,
+@@ -165,6 +174,11 @@ class DSparkVerifyPlanner:
+                 model_runner=self.model_runner,
+                 relay_lag_steps=relay_lag_steps,
+             )
++            # Graph-tier alignment fills each tier with real draft tokens, so a
++            # step's context-reading tokens are the whole tier.
++            self._budget_planner.fill_tiers = bool(
++                self._align_verify_tokens_to_graph_tier
++            )
+             self._dynamic_graph_tier = not is_dp_attention_enabled()
+             self._dp_tier_gather_enabled = (
+                 self._ragged_verify_mode is RaggedVerifyMode.COMPACT
+@@ -297,7 +311,9 @@ class DSparkVerifyPlanner:
+             return
+         resolved = future_map.resolve_confidence_cpu(batch)
+         draft_input.verify_token_budget = self._budget_from_resolved(
+-            resolved=resolved, req_pool_indices_cpu=batch.req_pool_indices_cpu
++            resolved=resolved,
++            req_pool_indices_cpu=batch.req_pool_indices_cpu,
++            context_cost=self.batch_context_cost(batch),
+         )
+         batch.spec_verify_tier_num_tokens = local_verify_tier_num_tokens(
+             bs=batch.batch_size(),
+@@ -333,12 +349,48 @@ class DSparkVerifyPlanner:
+         if self._budget_planner is not None:
+             self._budget_planner.forced_budget_frac = frac
+ 
++    def install_sps_table(self, table: SpsAdditiveCostTable, *, source: str) -> None:
++        """Replace the SPS table before serving (the boot-time autotuner). Every
++        TP rank must install the same table: budgets are computed per rank."""
++        if self._budget_planner is None:
++            raise RuntimeError(
++                "DSpark SPS table install requires the ragged-verify scheduler."
++            )
++        self._budget_planner.sps_table = table
++        self._budget_planner.last_decision = None
++        self._is_verify_all = False
++        if getattr(self, "_sps_measurement_verify_all", None) is not None:
++            self._sps_measurement_verify_all = False
++        self._uniform_layout_cache.clear()
++        if get_parallel().tp_rank == 0:
++            logger.info("DSpark SPS table installed (sps_table=%s).", source)
++
++    def set_sps_measurement(self, on: bool) -> None:
++        """While the startup SPS measurement runs, schedule verify lengths even
++        with a flat table, so the pinned budget decides each step's tier."""
++        if self._budget_planner is None:
++            return
++        saved = getattr(self, "_sps_measurement_verify_all", None)
++        if on and saved is None:
++            self._sps_measurement_verify_all = self._is_verify_all
++            self._is_verify_all = False
++            # The pinned budget must fill its tier with drafts, so no draft is
++            # left out for low survival: the cell then executes its full width.
++            self._sps_measurement_survival_eps = self._schedule_cfg.survival_eps
++            self._schedule_cfg.survival_eps = 0.0
++        elif not on and saved is not None:
++            self._is_verify_all = saved
++            self._sps_measurement_verify_all = None
++            self._schedule_cfg.survival_eps = self._sps_measurement_survival_eps
++        self._uniform_layout_cache.clear()
++
+     def compute_budget_sync(
+         self,
+         *,
+         confidence: torch.Tensor,
+         prefix_lens: torch.Tensor,
+         req_pool_indices: torch.Tensor,
++        context_cost: Optional[ContextCost] = None,
+     ) -> Optional[int]:
+         del prefix_lens
+         if self._budget_planner is None:
+@@ -352,7 +404,31 @@ class DSparkVerifyPlanner:
+             generation=generation,
+         )
+         return self._budget_from_resolved(
+-            resolved=resolved, req_pool_indices_cpu=req_pool_indices_cpu
++            resolved=resolved,
++            req_pool_indices_cpu=req_pool_indices_cpu,
++            context_cost=context_cost,
++        )
++
++    def batch_context_cost(self, batch: Optional[ScheduleBatch]) -> Optional[ContextCost]:
++        """The batch's context cost, each request priced at its own context (so
++        a knee applies per request), from the scheduler's host-side request
++        state (no device read; under overlap it trails the device by at most
++        one step). None unless the installed SPS table prices context."""
++        if self._budget_planner is None or batch is None:
++            return None
++        table = self._budget_planner.sps_table
++        if not getattr(table, "prices_context", False):
++            return None
++        reqs = getattr(batch, "reqs", None)
++        if not reqs:
++            return None
++        lens = [req.seqlen for req in reqs]
++        return ContextCost(
++            step_seconds=sum(table.context_step_seconds_at(n) for n in lens) / len(lens),
++            token_seconds=torch.tensor(
++                [table.context_seconds_per_verify_token(n) for n in lens],
++                dtype=torch.float64,
++            ),
+         )
+ 
+     def resolve_verify_token_budget(
+@@ -362,6 +438,7 @@ class DSparkVerifyPlanner:
+         confidence: Optional[torch.Tensor],
+         prefix_lens: torch.Tensor,
+         req_pool_indices: torch.Tensor,
++        context_cost: Optional[ContextCost] = None,
+     ) -> Optional[int]:
+         """Per-step verify-token budget: under overlap it was precomputed into
+         the draft input by prepare_verify_budget; otherwise compute it now."""
+@@ -376,6 +453,7 @@ class DSparkVerifyPlanner:
+             confidence=confidence,
+             prefix_lens=prefix_lens,
+             req_pool_indices=req_pool_indices,
++            context_cost=context_cost,
+         )
+         return draft_input.verify_token_budget
+ 
+@@ -389,6 +467,7 @@ class DSparkVerifyPlanner:
+         *,
+         resolved: Optional[ResolvedConfidence],
+         req_pool_indices_cpu: torch.Tensor,
++        context_cost: Optional[ContextCost] = None,
+     ) -> Optional[int]:
+         if resolved is None:
+             self._budget_planner.note_non_decode_step()
+@@ -402,6 +481,7 @@ class DSparkVerifyPlanner:
+                 generation=resolved.generation,
+                 current_generation=current_generation,
+                 req_pool_indices_cpu=req_pool_indices_cpu,
++                context_cost=context_cost,
+             )
+         )
+ 
+@@ -939,10 +1019,35 @@ def compute_verify_token_budget(
+     history_survival_probs: torch.Tensor,
+     sps_table: Union[SpsCostTable, SpsAdditiveCostTable],
+     cfg: DSparkScheduleConfig,
++    context_cost: Optional[ContextCost] = None,
++    fill_tiers: bool = True,
+ ) -> VerifyBudgetDecision:
+     num_requests = history_survival_probs.shape[0]
+     max_len = cfg.resolved_max_verify_len()
+ 
++    context_cum = None
++    if context_cost is not None:
++        # The context each executed draft token reads, in the order the
++        # allocation (and alignment's fill) takes them: by survival.
++        survival = history_survival_probs[:, :max_len]
++        cols = survival.shape[1]
++        rows = torch.arange(num_requests).repeat_interleave(cols)
++        # The allocator's own order, ties included (position, then request).
++        valid = survival.reshape(-1) >= cfg.survival_eps
++        order = _value_independent_descending_order(
++            probs=survival.reshape(-1).to(torch.float64),
++            positions=torch.arange(cols).repeat(num_requests),
++            requests=rows,
++            valid=valid,
++        )
++        token = context_cost.token_seconds.to(torch.float64)
++        # Drafts under the survival cutoff are never allocated; a tier filled
++        # past the valid ones pads with tokens that read no context.
++        per_draft = token[rows[order]] * valid[order].to(torch.float64)
++        context_cum = torch.cat(
++            [torch.zeros(1, dtype=torch.float64), torch.cumsum(per_draft, 0)]
++        ) + float(token.sum())
++
+     candidates = history_survival_probs[:, :max_len].flatten()
+     candidates = candidates[candidates >= cfg.survival_eps].to(torch.float64)
+     candidates_sorted = torch.sort(candidates, descending=True).values
+@@ -956,6 +1061,10 @@ def compute_verify_token_budget(
+             table=sps_table,
+             num_requests=int(num_requests),
+             num_budgets=int(tau_star.numel()),
++            context_cum=context_cum,
++            context_step=0.0 if context_cost is None else context_cost.step_seconds,
++            fill_tiers=fill_tiers,
++            verify_width=max_len,
+         )
+         theta = tau_star / step_time
+         idx = int(torch.argmax(theta))
+@@ -985,8 +1094,20 @@ def _lookup_sps_tensor(
+ 
+ 
+ def _additive_step_time_tensor(
+-    *, table: SpsAdditiveCostTable, num_requests: int, num_budgets: int
++    *,
++    table: SpsAdditiveCostTable,
++    num_requests: int,
++    num_budgets: int,
++    context_cost: float = 0.0,
++    fill_tiers: bool = True,
++    verify_width: int = 0,
++    context_cum: Optional[torch.Tensor] = None,
++    context_step: float = 0.0,
+ ) -> torch.Tensor:
++    """Step seconds for each budget 0..num_budgets-1. Context is priced either
++    uniformly (``context_cost`` seconds per executed verify token) or per
++    executed token (``context_cum[k]``: the cost of the requests' first tokens
++    plus the k next drafts in allocation order), plus ``context_step``."""
+     floor = table.bias_seconds + _interp_clamped(
+         table.bs_probes, table.alpha_seconds, float(num_requests)
+     )
+@@ -1000,7 +1121,28 @@ def _additive_step_time_tensor(
+     span = (m_probes[hi] - m_probes[lo]).clamp_(min=1e-9)
+     frac = (m - m_probes[lo]) / span
+     theta_at_m = theta_vals[lo] + frac * (theta_vals[hi] - theta_vals[lo])
+-    return floor + theta_at_m
++    step = floor + theta_at_m
++    if context_cost > 0 or context_cum is not None or context_step > 0:
++        # Price the tokens the step executes: alignment fills the whole tier.
++        verify_tokens = num_requests + torch.arange(num_budgets, dtype=torch.float64)
++        executed = verify_tokens
++        if fill_tiers and table.verify_tiers:
++            tiers = torch.tensor(table.verify_tiers, dtype=torch.float64)
++            idx = torch.bucketize(verify_tokens, tiers).clamp_(max=tiers.numel() - 1)
++            executed = torch.maximum(tiers[idx], verify_tokens)
++            if verify_width:
++                # Alignment fills a tier only with the drafts that exist.
++                executed = torch.minimum(
++                    executed,
++                    torch.clamp(verify_tokens, min=float(num_requests * verify_width)),
++                )
++        if context_cum is not None:
++            k = (executed - num_requests).clamp_(0, context_cum.numel() - 1).long()
++            step = step + context_cum[k]
++        else:
++            step = step + float(context_cost) * executed
++        step = step + float(context_step)
++    return step
+ 
+ 
+ class HostConfidenceBudgetPlanner:
+@@ -1017,6 +1159,7 @@ class HostConfidenceBudgetPlanner:
+         self.cfg = cfg
+         self._model_runner = model_runner
+         self.forced_budget_frac: Optional[float] = None
++        self.fill_tiers = True
+         self.last_decision: Optional[VerifyBudgetDecision] = None
+         self.lag_steps = max(
+             int(envs.SGLANG_DSPARK_CONFIDENCE_RELAY_LAG_STEPS.get()), 1
+@@ -1033,6 +1176,7 @@ class HostConfidenceBudgetPlanner:
+         generation: torch.Tensor,
+         current_generation: torch.Tensor,
+         req_pool_indices_cpu: torch.Tensor,
++        context_cost: Optional[ContextCost] = None,
+     ) -> int:
+         lagged_confidence, lagged_generation = self._shift_to_lag(
+             confidence=confidence,
+@@ -1054,6 +1198,8 @@ class HostConfidenceBudgetPlanner:
+             history_survival_probs=survival,
+             sps_table=self.sps_table,
+             cfg=self.cfg,
++            context_cost=context_cost,
++            fill_tiers=self.fill_tiers,
+         )
+         self.last_decision = decision
+         return decision.budget
+diff --git a/python/sglang/srt/speculative/dspark_components/dspark_sps.py b/python/sglang/srt/speculative/dspark_components/dspark_sps.py
+index bfefe12195b2d3fafd6c9a2c80602caf0721a320..19e9ce4a531400e2e4c146a6c44e2c1e51a944fa 100644
+--- a/python/sglang/srt/speculative/dspark_components/dspark_sps.py
++++ b/python/sglang/srt/speculative/dspark_components/dspark_sps.py
+@@ -60,11 +60,32 @@ def _interp_clamped(xs: list[int], ys: list[float], x: float) -> float:
+ 
+ 
+ class SpsAdditiveCostTable(msgspec.Struct, frozen=True):
++    """Step time ``bias + alpha(bs) + theta(M) + context_seconds * M * ctx``.
++
++    ``M`` is the verify-token count and ``ctx`` the batch's mean context length
++    in tokens. ``context_seconds`` (seconds per verify token per context token)
++    prices attention and indexer work that grows with the context each verify
++    token reads; 0 keeps the context-free model. With ``context_knee_tokens``
++    set, context beyond the knee costs ``context_seconds_beyond`` per token
++    instead (indexers that search a bounded candidate pool stop growing). The context term counts the
++    tokens the step executes: ``M`` rounded up to the next of ``verify_tiers``
++    (the captured verify tiers, which graph-tier alignment fills), or ``M``
++    itself when the table lists none.
++    """
++
+     bias_seconds: float
+     bs_probes: list[int]
+     alpha_seconds: list[float]
+     m_probes: list[int]
+     theta_seconds: list[float]
++    context_seconds: float = 0.0
++    verify_tiers: list[int] = []
++    context_knee_tokens: int = 0
++    context_seconds_beyond: float = 0.0
++    # Per step (not per verify token), per context token: context work a step
++    # does once, whatever its width.
++    context_step_seconds: float = 0.0
++    context_step_seconds_beyond: float = 0.0
+ 
+     def __post_init__(self) -> None:
+         for name, probes, values in (
+@@ -84,15 +105,95 @@ class SpsAdditiveCostTable(msgspec.Struct, frozen=True):
+                 )
+         if self.bias_seconds <= 0:
+             raise ValueError(f"bias_seconds must be > 0, got {self.bias_seconds}.")
++        if not (0.0 <= self.context_seconds < float("inf")):
++            raise ValueError(
++                f"context_seconds must be finite and >= 0, got {self.context_seconds}."
++            )
++        for name in ("context_step_seconds", "context_step_seconds_beyond"):
++            if not (0.0 <= getattr(self, name) < float("inf")):
++                raise ValueError(
++                    f"{name} must be finite and >= 0, got {getattr(self, name)}."
++                )
++        if not (0.0 <= self.context_seconds_beyond < float("inf")):
++            raise ValueError(
++                "context_seconds_beyond must be finite and >= 0, got "
++                f"{self.context_seconds_beyond}."
++            )
++        if self.context_knee_tokens < 0:
++            raise ValueError(
++                f"context_knee_tokens must be >= 0, got {self.context_knee_tokens}."
++            )
++        if self.verify_tiers and (
++            self.verify_tiers != sorted(set(self.verify_tiers))
++            or self.verify_tiers[0] < 1
++        ):
++            raise ValueError(
++                "verify_tiers must be strictly increasing positive token counts, "
++                f"got {self.verify_tiers}."
++            )
++
++    @property
++    def prices_context(self) -> bool:
++        knee = bool(self.context_knee_tokens)
++        return bool(
++            self.context_seconds
++            or self.context_step_seconds
++            or (knee and (self.context_seconds_beyond or self.context_step_seconds_beyond))
++        )
++
++    def _piecewise(self, near: float, beyond: float, context_tokens: float) -> float:
++        ctx = max(float(context_tokens), 0.0)
++        knee = self.context_knee_tokens
++        if knee <= 0 or ctx <= knee:
++            return near * ctx
++        return near * knee + beyond * (ctx - knee)
++
++    def context_step_seconds_at(self, context_tokens: float) -> float:
++        """Per-step context cost at ``context_tokens`` of context."""
++        return self._piecewise(
++            self.context_step_seconds, self.context_step_seconds_beyond, context_tokens
++        )
+ 
+-    def step_time(self, *, num_reqs: int, budget: int) -> float:
+-        return (
++    def context_seconds_per_verify_token(self, context_tokens: float) -> float:
++        """Context cost of one verify token at ``context_tokens`` of context."""
++        return self._piecewise(
++            self.context_seconds, self.context_seconds_beyond, context_tokens
++        )
++
++    def executed_verify_tokens(self, m: float, max_tokens: float = 0.0) -> float:
++        """Verify tokens a step with ``m`` budgeted tokens executes: its tier,
++        filled by alignment up to ``max_tokens`` (all requests' drafts) when
++        given."""
++        tiers = self.verify_tiers
++        if not tiers:
++            return m
++        tier = max(float(tiers[min(bisect.bisect_left(tiers, m), len(tiers) - 1)]), m)
++        return min(tier, max(float(max_tokens), m)) if max_tokens else tier
++
++    def step_time(
++        self,
++        *,
++        num_reqs: int,
++        budget: int,
++        context_tokens: float = 0.0,
++        fill_tiers: bool = True,
++        verify_width: int = 0,
++    ) -> float:
++        m = float(num_reqs + budget)
++        step = (
+             self.bias_seconds
+             + _interp_clamped(self.bs_probes, self.alpha_seconds, float(num_reqs))
+-            + _interp_clamped(
+-                self.m_probes, self.theta_seconds, float(num_reqs + budget)
+-            )
++            + _interp_clamped(self.m_probes, self.theta_seconds, m)
+         )
++        if self.prices_context and context_tokens > 0:
++            tokens = (
++                self.executed_verify_tokens(m, num_reqs * verify_width)
++                if fill_tiers
++                else m
++            )
++            step += self.context_seconds_per_verify_token(context_tokens) * tokens
++            step += self.context_step_seconds_at(context_tokens)
++        return step
+ 
+     def to_json(self) -> str:
+         return msgspec.json.encode(self).decode("utf-8")
+diff --git a/python/sglang/srt/speculative/dspark_components/dspark_sps_autotune.py b/python/sglang/srt/speculative/dspark_components/dspark_sps_autotune.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f3ee4e775d6ba26a7c2bb4f610c7a5ce6519c8e1
+--- /dev/null
++++ b/python/sglang/srt/speculative/dspark_components/dspark_sps_autotune.py
+@@ -0,0 +1,1753 @@
++"""Startup autotuning of the DSpark SPS cost table from real decode steps.
++
++The compact ragged-verify planner prices a decode step as
++``bias + alpha(bs) + theta(M)`` (``SpsAdditiveCostTable``), where ``M`` is the
++verify-token count, rounded up to the captured CUDA graph tier the verify
++forward replays. ``dspark_sps_profiler`` fits that table from the step period
++of real serving rounds; this module does the same measurement inside the
++server, before it reports ready, so a deployment needs no profiling run.
++
++Two halves cooperate:
++
++* Scheduler side (every TP rank, after graph capture): build the cache key from
++  hardware, parallel layout, captured graphs, model and software, agree on it
++  over the TP CPU group, and load a cached table if one exists. Otherwise mark
++  a measurement as pending and describe the cells it needs. The measured table
++  arrives later through ``/set_internal_state``; every rank validates it, the
++  ranks agree, all of them install it and rank 0 caches it.
++* Server side (the HTTP process, in its startup hook, before it listens): for
++  each cell (batch size ``bs``, verify tier ``t``), pin the verify budget so
++  every step verifies exactly ``t`` tokens (the profiler's forced budget),
++  submit ``bs`` synthetic requests, read the scheduler's per-step period
++  records until enough steady steps ran at ``bs`` requests and tier ``t``, and
++  keep their median. Cells run in alternating order over several passes; the
++  per-cell median feeds a robust, monotone fit of the additive tier model.
++
++Any failure leaves every rank on the table it already had; serving starts
++either way.
++"""
++
++from __future__ import annotations
++
++import asyncio
++import bisect
++import contextlib
++import dataclasses
++import enum
++import hashlib
++import importlib.metadata
++import json
++import logging
++import math
++import os
++import random
++import statistics
++import tempfile
++import time
++from pathlib import Path
++from typing import Any, Awaitable, Callable, Optional, Sequence
++
++import msgspec
++import numpy as np
++import torch
++
++from sglang.srt.speculative.dspark_components.dspark_sps import SpsAdditiveCostTable
++
++logger = logging.getLogger(__name__)
++
++# Bump when the measurement or the fit changes, so older cache files miss.
++AUTOTUNE_SCHEMA = 3
++METADATA_FIELD = "dspark_sps_autotune"
++CACHE_FILE_PREFIX = "dspark_sps_"
++STATUS_FIELD = "dspark_sps_autotune"
++RECORD_KEY = "dspark_sps_autotune_record"
++TABLE_KEY = "dspark_sps_autotune_table"
++
++_ENV_PREFIXES = ("SGLANG_", "SGL_", "NCCL_", "TORCH_NCCL_")
++_ENV_NAMES = ("CUDA_DEVICE_MAX_CONNECTIONS",)
++# Per-run or location-only variables: hashing them would make every boot miss.
++_ENV_EXCLUDE_SUBSTRINGS = ("RUN_ID", "CACHE_DIR", "PORT", "HOST", "ADDR", "URL")
++_OWN_ENV_PREFIX = "SGLANG_DSPARK_SPS_AUTOTUNE_"
++
++# Server arguments that can change the cost of a decode step. Missing names hash
++# as None, so the list may name arguments some builds do not have.
++_SERVER_ARG_FIELDS = (
++    "model_path",
++    "revision",
++    "tokenizer_path",
++    "tokenizer_mode",
++    "tokenizer_backend",
++    "trust_remote_code",
++    "skip_tokenizer_init",
++    "disable_radix_cache",
++    "dtype",
++    "quantization",
++    "kv_cache_dtype",
++    "context_length",
++    "json_model_override_args",
++    "attention_backend",
++    "decode_attention_backend",
++    "dsv4_attn_backend",
++    "sampling_backend",
++    "moe_runner_backend",
++    "moe_a2a_backend",
++    "fp8_gemm_runner_backend",
++    "tp_size",
++    "dp_size",
++    "ep_size",
++    "pp_size",
++    "attn_cp_size",
++    "enable_dp_attention",
++    "enable_dp_lm_head",
++    "page_size",
++    "max_running_requests",
++    "cuda_graph_max_bs_decode",
++    "cuda_graph_bs_decode",
++    "disable_custom_all_reduce",
++    "enable_symm_mem",
++    "enable_deepseek_v4_fp4_indexer",
++    "enable_torch_compile",
++    "disable_overlap_schedule",
++    "speculative_algorithm",
++    "speculative_draft_model_path",
++    "speculative_draft_model_revision",
++    "speculative_draft_load_format",
++    "speculative_num_draft_tokens",
++    "speculative_dspark_block_size",
++    "speculative_dspark_confidence_sts_path",
++    "speculative_dspark_align_verify_tokens_to_graph_tier",
++    "speculative_draft_attention_backend",
++    "speculative_draft_kv_cache_dtype",
++    "speculative_moe_runner_backend",
++)
++
++_PACKAGES = (
++    "sglang",
++    "torch",
++    "triton",
++    "flashinfer-python",
++    "flashinfer-cubin",
++    "flashinfer-jit-cache",
++    "sgl-kernel",
++    "sglang-kernel",
++    "deep-gemm",
++    "sgl-deep-gemm",
++    "nvidia-nccl-cu12",
++    "nvidia-nccl-cu13",
++)
++
++_SOURCE_SUFFIXES = (".py", ".cu", ".cuh", ".h", ".hpp", ".cpp", ".cc")
++
++# Extra decode steps a request may run before the steady window fills (ramp,
++# polling latency).
++_STEP_SLACK = 48
++_RANDOM_TOKEN_LOW = 1000
++_POLL_SECONDS = 0.25
++# Each long-context request is the shared prefix plus this many own tokens.
++_LONG_SUFFIX_LEN = 64
++# Smallest shared context worth measuring for the context term.
++_MIN_LONG_CONTEXT = 4096
++
++
++class SpsAutotuneMode(str, enum.Enum):
++    OFF = "off"
++    AUTO = "auto"
++    FORCE = "force"
++
++    @classmethod
++    def parse(cls, value: Optional[str]) -> SpsAutotuneMode:
++        if value is None:
++            return cls.OFF
++        return cls(str(value).lower())
++
++
++class SpsAutotuneSkip(Exception):
++    """This rank cannot run the autotuner; every rank keeps its table."""
++
++
++@dataclasses.dataclass(frozen=True)
++class AutotuneParams:
++    """Measurement settings; part of the cache key."""
++
++    passes: int = 2
++    warmup_steps: int = 8
++    steady_steps: int = 64
++    cell_timeout_seconds: float = 60.0
++    max_seconds: float = 900.0
++    input_len: int = 256
++    temperature: float = 1.0
++    top_p: float = 1.0
++    long_context: int = 32768
++    long_context_far: int = 131072
++    batch_sizes: tuple[int, ...] = ()
++
++    def validate(self) -> None:
++        for name in ("passes", "steady_steps", "input_len"):
++            if getattr(self, name) < 1:
++                raise ValueError(f"autotune {name} must be >= 1.")
++        if self.warmup_steps < 0:
++            raise ValueError("autotune warmup_steps must be >= 0.")
++        if self.cell_timeout_seconds <= 0 or self.max_seconds <= 0:
++            raise ValueError("autotune timeouts must be > 0.")
++        if self.temperature < 0:
++            raise ValueError("autotune temperature must be >= 0.")
++        if not 0.0 < self.top_p <= 1.0:
++            raise ValueError("autotune top_p must be in (0, 1].")
++        if self.long_context < 0 or self.long_context_far < 0:
++            raise ValueError("autotune long contexts must be >= 0.")
++        if any(int(b) < 1 for b in self.batch_sizes):
++            raise ValueError(f"autotune batch sizes must be >= 1: {self.batch_sizes}")
++
++    @classmethod
++    def from_env(cls) -> AutotuneParams:
++        from sglang.srt.environ import envs
++
++        raw_bs = envs.SGLANG_DSPARK_SPS_AUTOTUNE_BATCH_SIZES.get()
++        params = cls(
++            passes=int(envs.SGLANG_DSPARK_SPS_AUTOTUNE_PASSES.get()),
++            warmup_steps=int(envs.SGLANG_DSPARK_SPS_AUTOTUNE_WARMUP_STEPS.get()),
++            steady_steps=int(envs.SGLANG_DSPARK_SPS_AUTOTUNE_STEADY_STEPS.get()),
++            cell_timeout_seconds=float(
++                envs.SGLANG_DSPARK_SPS_AUTOTUNE_CELL_TIMEOUT_SECONDS.get()
++            ),
++            max_seconds=float(envs.SGLANG_DSPARK_SPS_AUTOTUNE_MAX_SECONDS.get()),
++            input_len=int(envs.SGLANG_DSPARK_SPS_AUTOTUNE_INPUT_LEN.get()),
++            temperature=float(envs.SGLANG_DSPARK_SPS_AUTOTUNE_TEMPERATURE.get()),
++            top_p=float(envs.SGLANG_DSPARK_SPS_AUTOTUNE_TOP_P.get()),
++            long_context=int(envs.SGLANG_DSPARK_SPS_AUTOTUNE_LONG_CONTEXT.get()),
++            long_context_far=int(
++                envs.SGLANG_DSPARK_SPS_AUTOTUNE_LONG_CONTEXT_FAR.get()
++            ),
++            batch_sizes=tuple(
++                sorted({int(b) for b in raw_bs.replace(",", " ").split() if b})
++            ),
++        )
++        params.validate()
++        return params
++
++
++# ---------------------------------------------------------------------------
++# Cell design
++# ---------------------------------------------------------------------------
++
++
++def _pad_up(values: Sequence[int], x: int) -> int:
++    idx = bisect.bisect_left(values, x)
++    return values[min(idx, len(values) - 1)]
++
++
++def default_batch_sizes(max_running: int) -> list[int]:
++    """1, 2, 3, 4, 6, 8, 12, 16, 24, ... up to ``max_running``, plus it."""
++    sizes, power = {1}, 1
++    while power <= max_running:
++        sizes.add(power)
++        if power * 3 // 2 <= max_running:
++            sizes.add(power * 3 // 2)
++        power *= 2
++    sizes.add(max_running)
++    return sorted(b for b in sizes if 1 <= b <= max_running)
++
++
++def plan_cells(
++    *, tiers: Sequence[int], batch_sizes: Sequence[int], verify_width: int
++) -> list[tuple[int, int]]:
++    """Every (batch size, verify tier) the planner can choose: the tiers that
++    ``M`` in ``[bs, bs * verify_width]`` rounds up to."""
++    tiers = sorted({int(t) for t in tiers})
++    cells = []
++    for bs in sorted({int(b) for b in batch_sizes}):
++        if bs > tiers[-1]:
++            continue
++        low, high = _pad_up(tiers, bs), _pad_up(tiers, bs * verify_width)
++        cells.extend((bs, t) for t in tiers if low <= t <= high)
++    return cells
++
++
++def long_context_tokens(
++    requested: int,
++    *,
++    context_len: int,
++    kv_tokens: int,
++    max_bs: int,
++    max_new_tokens: int,
++    prefix_cache: bool,
++    input_len: int = 0,
++) -> int:
++    """Shared-prefix length of the long-context cells, or 0 to skip them. The
++    prefix is held once (the prefix cache shares it, so it needs the cache);
++    it and every request's own tokens must fit the context window and most
++    of the KV pool."""
++    if not prefix_cache or requested <= 0:
++        return 0
++    own = _LONG_SUFFIX_LEN + max_new_tokens
++    length = min(requested, context_len - own - 1)
++    if kv_tokens:
++        length = min(length, int(0.8 * kv_tokens) - max_bs * own)
++    # The context term is fitted from the difference to the short cells.
++    return length if length >= max(_MIN_LONG_CONTEXT, input_len + _MIN_LONG_CONTEXT) else 0
++
++
++def plan_long_cells(cells: Sequence[tuple[int, int]]) -> list[tuple[int, int]]:
++    """The cells re-measured at a long shared context to fit the context term:
++    each batch size's narrowest and widest tier (the term scales with the
++    verify-token count, so the widest tier carries most of the signal)."""
++    by_bs: dict[int, list[int]] = {}
++    for bs, tier in cells:
++        by_bs.setdefault(int(bs), []).append(int(tier))
++    out = []
++    for bs, tiers in sorted(by_bs.items()):
++        out.extend((bs, t) for t in sorted({min(tiers), max(tiers)}))
++    return out
++
++
++def forced_budget_frac(*, bs: int, tier: int, gamma: int) -> float:
++    """The ``dspark_force_budget_frac`` that makes ``bs`` requests verify
++    ``tier`` tokens: the planner's forced budget is ``int(frac * bs * gamma)``
++    tokens above the one-token floor per request."""
++    full = bs * gamma
++    budget = min(max(tier - bs, 0), full)
++    if budget >= full:
++        return 1.0
++    # Half a token of margin keeps int() from rounding down; frac must be > 0.
++    return (budget + 0.5) / full
++
++
++def cell_step_seconds(
++    records: Sequence[dict],
++    *,
++    bs: int,
++    tier: int,
++    warmup_steps: int,
++    steady_steps: int,
++) -> Optional[float]:
++    """Median step period of the first ``steady_steps`` decode steps that ran at
++    ``bs`` requests and verify tier ``tier``, after ``warmup_steps`` such steps;
++    None until that many were recorded."""
++    aligned = sorted(
++        (int(r["forward_ct"]), float(r["step_cpu_ms"]))
++        for r in records
++        if r.get("step_cpu_ms") is not None
++        and int(r.get("num_running_reqs", -1)) == bs
++        and int(r.get("num_verify_tokens", -1)) == tier
++    )
++    window = aligned[warmup_steps : warmup_steps + steady_steps]
++    if len(window) < steady_steps:
++        return None
++    return statistics.median(ms for _, ms in window) / 1000.0
++
++
++# ---------------------------------------------------------------------------
++# Fit
++# ---------------------------------------------------------------------------
++
++
++def _pava(values: Sequence[float], weights: Sequence[float]) -> list[float]:
++    """Weighted least-squares non-decreasing fit (pool adjacent violators)."""
++    blocks: list[list[float]] = []  # [mean, weight, count]
++    for value, weight in zip(values, weights):
++        blocks.append([float(value), max(float(weight), 1e-12), 1])
++        while len(blocks) > 1 and blocks[-2][0] > blocks[-1][0]:
++            m2, w2, c2 = blocks.pop()
++            m1, w1, c1 = blocks.pop()
++            blocks.append([(m1 * w1 + m2 * w2) / (w1 + w2), w1 + w2, c1 + c2])
++    out: list[float] = []
++    for mean, _, count in blocks:
++        out.extend([mean] * count)
++    return out
++
++
++def _connected(cells: Sequence[tuple[int, int]]) -> bool:
++    parent: dict = {}
++
++    def find(x):
++        while parent.setdefault(x, x) != x:
++            parent[x] = parent[parent[x]]
++            x = parent[x]
++        return x
++
++    for bs, tier in cells:
++        parent[find(("b", bs))] = find(("t", tier))
++    return len({find(node) for node in list(parent)}) == 1
++
++
++@dataclasses.dataclass(frozen=True)
++class FitStats:
++    cells: int
++    rms_ms: float
++    max_abs_ms: float
++
++
++def fit_step_cost_table(
++    cells: Sequence[tuple[int, int, float]],
++    *,
++    huber_ms: float = 0.5,
++    iterations: int = 200,
++) -> tuple[SpsAdditiveCostTable, FitStats]:
++    """Fit ``step(bs, M) = bias + alpha(bs) + theta(tier(M))`` to measured
++    ``(bs, tier, seconds)`` cells.
++
++    Repeated cells are reduced to their median. The fit is least squares with
++    Huber weights (residuals beyond ``huber_ms`` count linearly), so one noisy
++    cell cannot move a tier shared by many batch sizes, under the constraint
++    that cost does not decrease with the tier or the batch size (alternating
++    isotonic projections). ``theta`` is flat across each tier, with probes at
++    its first and last token count; ``alpha`` is probed at the measured batch
++    sizes and interpolated between them by the planner.
++    """
++    by_cell: dict[tuple[int, int], list[float]] = {}
++    for bs, tier, seconds in cells:
++        bs, tier, seconds = int(bs), int(tier), float(seconds)
++        if bs < 1 or tier < 1 or not (0 < seconds < math.inf):
++            raise ValueError(f"invalid cell (bs={bs}, tier={tier}, s={seconds}).")
++        by_cell.setdefault((bs, tier), []).append(seconds * 1e3)
++    if len(by_cell) < 2:
++        raise ValueError(f"need at least 2 distinct cells, got {len(by_cell)}.")
++    if not _connected(list(by_cell)):
++        raise ValueError(
++            "cells do not link every batch size and tier through shared "
++            "measurements; the additive model is not identifiable."
++        )
++    keys = sorted(by_cell)
++    y = np.array([statistics.median(by_cell[k]) for k in keys])
++    bss = sorted({b for b, _ in keys})
++    tiers = sorted({t for _, t in keys})
++    b_idx = np.array([bss.index(b) for b, _ in keys])
++    t_idx = np.array([tiers.index(t) for _, t in keys])
++
++    # Huber-weighted least squares, alpha(bss[0]) = 0.
++    cols = len(tiers) + len(bss) - 1
++    design = np.zeros((len(keys), cols))
++    design[np.arange(len(keys)), t_idx] = 1.0
++    for row, bi in enumerate(b_idx):
++        if bi > 0:
++            design[row, len(tiers) + bi - 1] = 1.0
++    weights = np.ones(len(keys))
++    for _ in range(30):
++        sw = np.sqrt(weights)
++        x, *_ = np.linalg.lstsq(design * sw[:, None], y * sw, rcond=None)
++        resid = y - design @ x
++        new = np.where(
++            np.abs(resid) <= huber_ms, 1.0, huber_ms / np.maximum(np.abs(resid), 1e-12)
++        )
++        if np.allclose(new, weights, atol=1e-6):
++            break
++        weights = new
++    theta = np.array(x[: len(tiers)])
++    alpha = np.concatenate([[0.0], x[len(tiers) :]])
++
++    # Monotone in tier and batch size: block-coordinate isotonic projections.
++    for _ in range(iterations):
++        prev = (theta.copy(), alpha.copy())
++        theta = np.array(
++            _pava(
++                [
++                    np.average(
++                        y[t_idx == i] - alpha[b_idx[t_idx == i]],
++                        weights=weights[t_idx == i],
++                    )
++                    for i in range(len(tiers))
++                ],
++                [weights[t_idx == i].sum() for i in range(len(tiers))],
++            )
++        )
++        alpha = np.array(
++            _pava(
++                [
++                    np.average(
++                        y[b_idx == i] - theta[t_idx[b_idx == i]],
++                        weights=weights[b_idx == i],
++                    )
++                    for i in range(len(bss))
++                ],
++                [weights[b_idx == i].sum() for i in range(len(bss))],
++            )
++        )
++        if np.allclose(prev[0], theta, atol=1e-7) and np.allclose(
++            prev[1], alpha, atol=1e-7
++        ):
++            break
++    theta, alpha = theta + alpha[0], alpha - alpha[0]
++    resid = y - theta[t_idx] - alpha[b_idx]
++
++    base = 0.5 * float(theta.min())
++    if not base > 0:
++        raise ValueError(f"fitted tier costs must be positive, got {theta.tolist()}.")
++    m_probes, theta_seconds, prev_tier = [], [], 0
++    for tier, value in zip(tiers, theta):
++        for m in [tier] if prev_tier + 1 == tier else [prev_tier + 1, tier]:
++            m_probes.append(m)
++            theta_seconds.append((float(value) - base) / 1e3)
++        prev_tier = tier
++    table = SpsAdditiveCostTable(
++        bias_seconds=base / 1e3,
++        bs_probes=bss,
++        alpha_seconds=[float(a) / 1e3 for a in alpha],
++        m_probes=m_probes,
++        theta_seconds=theta_seconds,
++    )
++    stats = FitStats(
++        cells=len(keys),
++        rms_ms=float(np.sqrt(np.mean(resid**2))),
++        max_abs_ms=float(np.max(np.abs(resid))),
++    )
++    return table, stats
++
++
++def reference_context_tokens(params: AutotuneParams) -> float:
++    """Mean context of a short cell's timed steps: the prompt plus the tokens
++    generated until the middle of the steady window, one committed token per
++    step (the measurement commits bonus tokens only)."""
++    return float(params.input_len + params.warmup_steps + params.steady_steps / 2)
++
++
++def with_context_term(
++    table: SpsAdditiveCostTable,
++    *,
++    context_seconds: float,
++    reference_context_tokens: float,
++    tiers: Sequence[int],
++    context_knee_tokens: int = 0,
++    context_seconds_beyond: float = 0.0,
++    context_step_seconds: float = 0.0,
++    context_step_seconds_beyond: float = 0.0,
++) -> SpsAdditiveCostTable:
++    """``table`` (fitted at ``reference_context_tokens``, below any knee)
++    re-based to context zero, plus the context term; tier costs stay
++    non-decreasing."""
++    tiers = sorted({int(t) for t in tiers})
++    theta, running = [], -math.inf
++    for m, value in zip(table.m_probes, table.theta_seconds):
++        tier = next((t for t in tiers if t >= m), tiers[-1])
++        running = max(
++            running,
++            value
++            - (context_seconds * tier + context_step_seconds) * reference_context_tokens,
++        )
++        theta.append(running)
++    return msgspec.structs.replace(
++        table,
++        theta_seconds=theta,
++        context_seconds=context_seconds,
++        verify_tiers=tiers,
++        context_knee_tokens=int(context_knee_tokens),
++        context_seconds_beyond=float(context_seconds_beyond),
++        context_step_seconds=float(context_step_seconds),
++        context_step_seconds_beyond=float(context_step_seconds_beyond),
++    )
++
++
++def fit_context_seconds(
++    short_ms: dict[tuple[int, int], float],
++    long_ms: dict[tuple[int, int], float],
++    *,
++    context_delta: float,
++    verify_width: int = 0,
++    huber_ns: float = 5.0,
++) -> dict:
++    """Context cost from cells measured at a short and at a long context. Per
++    paired cell, the step-time difference per context token is modeled as
++    ``step + token * executed`` (a per-step part and a per-verify-token part)
++    and fitted by Huber-weighted least squares, so one noisy cell cannot set
++    it. Neither part is negative."""
++    if context_delta <= 0:
++        raise ValueError(f"context_delta must be > 0, got {context_delta}.")
++    xs, ys, keys = [], [], []
++    for (bs, tier), long_value in sorted(long_ms.items()):
++        if (bs, tier) in short_ms:
++            executed = min(tier, bs * verify_width) if verify_width else tier
++            xs.append(float(executed))
++            ys.append((long_value - short_ms[(bs, tier)]) / 1e3 / context_delta)
++            keys.append((bs, tier))
++    if not keys:
++        raise ValueError("no cell was measured at both contexts.")
++    if len(set(xs)) < 2:
++        # One executed width cannot separate the per-step from the per-token part.
++        raise ValueError("the paired cells share one executed width.")
++    x, y = np.array(xs), np.array(ys)
++    w = np.ones_like(y)
++    step, token = 0.0, float(np.median(y / x))
++    if len(set(xs)) > 1:
++        design = np.stack([np.ones_like(x), x], axis=1)
++        for _ in range(30):
++            sw = np.sqrt(w)
++            (step, token), *_ = np.linalg.lstsq(design * sw[:, None], y * sw, rcond=None)
++            resid = np.abs(y - step - token * x) * 1e9  # ns per context token
++            new = np.where(resid <= huber_ns, 1.0, huber_ns / np.maximum(resid, 1e-12))
++            if np.allclose(new, w, atol=1e-6):
++                break
++            w = new
++    if token < 0:
++        token, step = 0.0, max(float(np.median(y)), 0.0)
++    elif step < 0:
++        step, token = 0.0, max(float(np.sum(w * x * y) / np.sum(w * x * x)), 0.0)
++    return {
++        "context_seconds": float(token),
++        "context_step_seconds": float(step),
++        "context_delta": float(context_delta),
++        "per_cell_ns": {
++            f"{b},{t}": round(v * 1e9 / xe, 4) for (b, t), v, xe in zip(keys, ys, xs)
++        },
++    }
++
++
++# ---------------------------------------------------------------------------
++# Cache
++# ---------------------------------------------------------------------------
++
++
++def canonical_json(obj: Any) -> str:
++    return json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
++
++
++def cache_key(material: Any) -> str:
++    return hashlib.sha256(canonical_json(material).encode("utf-8")).hexdigest()
++
++
++def cache_path_for(cache_dir: str, key: str) -> Path:
++    return Path(os.path.expanduser(cache_dir)) / f"{CACHE_FILE_PREFIX}{key[:32]}.json"
++
++
++def encode_cache_payload(
++    *, table: SpsAdditiveCostTable, key: str, metadata: dict
++) -> str:
++    """The table's own fields plus a metadata object, so the file also loads as
++    a plain ``--speculative-dspark-sps-table-path`` table."""
++    payload = msgspec.to_builtins(table)
++    payload[METADATA_FIELD] = {**metadata, "schema": AUTOTUNE_SCHEMA, "key": key}
++    return json.dumps(payload, indent=1, sort_keys=True, default=str)
++
++
++def decode_cache_payload(data: str, *, key: str) -> Optional[SpsAdditiveCostTable]:
++    """The table when ``data`` was written for ``key`` and validates, else None."""
++    try:
++        payload = json.loads(data)
++    except (TypeError, ValueError):
++        return None
++    if not isinstance(payload, dict):
++        return None
++    meta = payload.get(METADATA_FIELD)
++    if (
++        not isinstance(meta, dict)
++        or meta.get("schema") != AUTOTUNE_SCHEMA
++        or meta.get("key") != key
++    ):
++        return None
++    try:
++        return SpsAdditiveCostTable.from_json(data)
++    except (msgspec.ValidationError, msgspec.DecodeError, TypeError, ValueError):
++        return None
++
++
++def read_cached_payload(path: Path, *, key: str) -> Optional[str]:
++    try:
++        data = path.read_text(encoding="utf-8")
++    except (OSError, ValueError):  # ValueError covers undecodable bytes
++        return None
++    return data if decode_cache_payload(data, key=key) is not None else None
++
++
++def write_cache_atomic(path: Path, data: str) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
++    try:
++        with os.fdopen(fd, "w", encoding="utf-8") as f:
++            f.write(data)
++            f.flush()
++            os.fsync(f.fileno())
++        os.replace(tmp, path)
++    except BaseException:
++        with contextlib.suppress(OSError):
++            os.unlink(tmp)
++        raise
++
++
++# ---------------------------------------------------------------------------
++# Rank agreement
++# ---------------------------------------------------------------------------
++
++
++class _Ranks:
++    """Collectives over a CPU (gloo) group; a single rank needs no group."""
++
++    def __init__(self, group) -> None:
++        self.group = group
++        if group is None:
++            self.rank, self.world_size, self.src = 0, 1, 0
++        else:
++            import torch.distributed as dist
++
++            self.rank = dist.get_rank(group=group)
++            self.world_size = dist.get_world_size(group=group)
++            self.src = dist.get_process_group_ranks(group)[0]
++
++    def all_ok(self, ok: bool) -> bool:
++        if self.world_size == 1:
++            return ok
++        import torch.distributed as dist
++
++        flag = torch.tensor([1 if ok else 0], dtype=torch.int64)
++        dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=self.group)
++        return bool(flag.item())
++
++    def all_gather(self, obj: Any) -> list[Any]:
++        if self.world_size == 1:
++            return [obj]
++        import torch.distributed as dist
++
++        out: list[Any] = [None] * self.world_size
++        dist.all_gather_object(out, obj, group=self.group)
++        return out
++
++    def broadcast(self, obj: Any) -> Any:
++        if self.world_size == 1:
++            return obj
++        import torch.distributed as dist
++
++        box = [obj if self.rank == 0 else None]
++        dist.broadcast_object_list(box, src=self.src, group=self.group)
++        return box[0]
++
++
++def _agree_on_table(ranks: _Ranks, payload: Optional[str], *, key: str):
++    """Decode rank 0's payload on every rank; a table only if all ranks can."""
++    payload = ranks.broadcast(payload)
++    table = decode_cache_payload(payload, key=key) if payload is not None else None
++    if not ranks.all_ok(table is not None):
++        return None
++    return table
++
++
++# ---------------------------------------------------------------------------
++# Scheduler side
++# ---------------------------------------------------------------------------
++
++
++@dataclasses.dataclass
++class AutotunePrepared:
++    """A pending measurement; every rank agreed on it at startup."""
++
++    key: str
++    cache_path: Path
++    material: dict
++    cells: tuple[tuple[int, int], ...]
++    params: AutotuneParams
++
++    def status(self) -> dict:
++        """What the server side needs to run the measurement."""
++        dspark = self.material["dspark"]
++        return {
++            "pending": True,
++            "key": self.key,
++            "cells": [list(cell) for cell in self.cells],
++            "gamma": int(dspark["gamma"]),
++            "verify_num_draft_tokens": int(dspark["verify_num_draft_tokens"]),
++            "max_new_tokens": int(dspark["max_new_tokens"]),
++            "kv_tokens": int(dspark.get("kv_tokens") or 0),
++            "long_context": int(dspark.get("long_context") or 0),
++            "long_context_far": int(dspark.get("long_context_far") or 0),
++            "prompt_source": dspark.get("prompt_source", "text"),
++            "long_cells": (
++                [list(c) for c in plan_long_cells(self.cells)]
++                if dspark.get("long_context")
++                else []
++            ),
++            "params": dataclasses.asdict(self.params),
++        }
++
++
++def agree_on_startup(
++    *,
++    mode: SpsAutotuneMode,
++    explicit_table_path: Optional[str],
++    cache_dir: str,
++    group,
++    prepare: Callable[[], tuple[dict, list[tuple[int, int]], AutotuneParams]],
++) -> tuple[Optional[SpsAdditiveCostTable], Optional[AutotunePrepared], str]:
++    """Agree on the cache key and either a cached table or a pending
++    measurement. Returns ``(table, prepared, source)``; ``table`` set means
++    install it, ``prepared`` set means a measurement is pending, neither means
++    keep the configured table. Every rank of ``group`` must call this.
++
++    ``prepare`` is local work (eligibility, settings, key material, cells) and
++    raises ``SpsAutotuneSkip`` to opt out; every rank learns every outcome
++    through one all-gather before anything depends on it.
++    """
++    if mode is SpsAutotuneMode.OFF:
++        return None, None, "off"
++    if mode is SpsAutotuneMode.AUTO and explicit_table_path:
++        return None, None, "explicit-table"
++    ranks = _Ranks(group)
++    material, cells, params, reason = None, None, None, ""
++    try:
++        material, cells, params = prepare()
++    except SpsAutotuneSkip as exc:
++        reason = str(exc)
++    except Exception as exc:  # local only: report and opt out together
++        logger.exception("DSpark SPS autotune preparation failed.")
++        reason = f"{type(exc).__name__}: {exc}"
++    gathered = ranks.all_gather(
++        {
++            "material": material,
++            "cells": cells,
++            "params": None if params is None else dataclasses.asdict(params),
++            "reason": reason,
++        }
++    )
++    reasons = [
++        f"rank {i}: {g['reason'] or 'not prepared'}"
++        for i, g in enumerate(gathered)
++        if g["material"] is None
++    ]
++    if reasons:
++        if ranks.rank == 0:
++            logger.warning(
++                "DSpark SPS autotune skipped; keeping the configured table (%s).",
++                "; ".join(reasons),
++            )
++        return None, None, "skipped"
++    for field in ("cells", "params"):
++        if any(g[field] != gathered[0][field] for g in gathered):
++            if ranks.rank == 0:
++                logger.warning(
++                    "DSpark SPS autotune skipped: ranks disagree on %s.", field
++                )
++            return None, None, "skipped"
++
++    key = cache_key(
++        {"schema": AUTOTUNE_SCHEMA, "ranks": [g["material"] for g in gathered]}
++    )
++    path = cache_path_for(cache_dir, key)
++    if mode is SpsAutotuneMode.AUTO:
++        payload = None
++        if ranks.rank == 0:
++            try:
++                payload = read_cached_payload(path, key=key)
++            except Exception:
++                logger.exception("DSpark SPS autotune could not read %s.", path)
++        table = _agree_on_table(ranks, payload, key=key)
++        if table is not None:
++            if ranks.rank == 0:
++                logger.info(
++                    "DSpark SPS autotune: loaded cached table %s (key %s).",
++                    path,
++                    key[:16],
++                )
++            return table, None, "cache"
++    prepared = AutotunePrepared(
++        key=key,
++        cache_path=path,
++        material=gathered[0]["material"],
++        cells=tuple(tuple(c) for c in cells),
++        params=params,
++    )
++    if ranks.rank == 0:
++        logger.info(
++            "DSpark SPS autotune: no cached table for key %s; the HTTP server "
++            "measures %d cells before it is ready (other entrypoints keep the "
++            "configured table).",
++            key[:16],
++            len(prepared.cells),
++        )
++    return None, prepared, "pending"
++
++
++def decode_install_request(
++    payload: Any, *, key: str
++) -> tuple[Optional[SpsAdditiveCostTable], dict]:
++    """Validate a measured-table request: ``{"key", "table", "metadata"}``."""
++    if not isinstance(payload, str):
++        return None, {}
++    try:
++        request = json.loads(payload)
++    except ValueError:
++        return None, {}
++    if not isinstance(request, dict) or request.get("key") != key:
++        return None, {}
++    try:
++        table = msgspec.convert(request.get("table"), SpsAdditiveCostTable)
++    except (msgspec.ValidationError, TypeError, ValueError):
++        return None, {}
++    metadata = request.get("metadata")
++    return table, metadata if isinstance(metadata, dict) else {}
++
++
++def install_measured_table(
++    *, payload: Any, prepared: AutotunePrepared, group, install: Callable
++) -> bool:
++    """Install a measured table on every rank or on none, then cache it on
++    rank 0. Runs inside ``/set_internal_state``, which every TP rank processes
++    in the same scheduler iteration, so the collective lines up."""
++    ranks = _Ranks(group)
++    table, metadata = decode_install_request(payload, key=prepared.key)
++    if not ranks.all_ok(table is not None):
++        if ranks.rank == 0:
++            logger.warning("DSpark SPS autotune: measured table rejected.")
++        return False
++    install(table, f"autotune-measured:{prepared.cache_path}")
++    if ranks.rank == 0:
++        try:
++            write_cache_atomic(
++                prepared.cache_path,
++                encode_cache_payload(
++                    table=table,
++                    key=prepared.key,
++                    metadata={**metadata, "material": prepared.material},
++                ),
++            )
++        except Exception as exc:
++            logger.warning(
++                "DSpark SPS autotune could not write %s (%s); the table is used "
++                "for this run only.",
++                prepared.cache_path,
++                exc,
++            )
++    return True
++
++
++# ---------------------------------------------------------------------------
++# Cache-key material
++# ---------------------------------------------------------------------------
++
++
++def env_digest(environ: Optional[dict] = None) -> str:
++    environ = os.environ if environ is None else environ
++    items = sorted(
++        (k, v)
++        for k, v in environ.items()
++        if (k.startswith(_ENV_PREFIXES) or k in _ENV_NAMES)
++        and not k.startswith(_OWN_ENV_PREFIX)
++        and not any(s in k for s in _ENV_EXCLUDE_SUBSTRINGS)
++    )
++    return hashlib.sha256(canonical_json(items).encode("utf-8")).hexdigest()
++
++
++def source_digest(roots: Sequence[Path]) -> str:
++    """Hash of the installed source tree, standing in for a commit id that
++    patched builds do not change."""
++    digest = hashlib.sha256()
++    for root in roots:
++        if not root.is_dir():
++            continue
++        for path in sorted(root.rglob("*")):
++            if path.suffix not in _SOURCE_SUFFIXES or not path.is_file():
++                continue
++            digest.update(str(path.relative_to(root.parent)).encode("utf-8"))
++            digest.update(b"\0")
++            digest.update(path.read_bytes())
++            digest.update(b"\0")
++    return digest.hexdigest()
++
++
++def package_versions() -> dict:
++    versions = {}
++    for name in _PACKAGES:
++        try:
++            versions[name] = importlib.metadata.version(name)
++        except importlib.metadata.PackageNotFoundError:
++            continue
++    return versions
++
++
++def _config_digest(path: Optional[str]) -> Optional[str]:
++    if not path:
++        return None
++    config = Path(path) / "config.json"
++    try:
++        return hashlib.sha256(config.read_bytes()).hexdigest()
++    except OSError:
++        return None
++
++
++def server_arg_material(server_args) -> dict:
++    return {name: getattr(server_args, name, None) for name in _SERVER_ARG_FIELDS}
++
++
++def _nvml_material(device_index: int) -> Optional[dict]:
++    """Power limit, driver and maximum SM clock of this CUDA device, or None
++    when NVML is unavailable."""
++    try:
++        import pynvml
++    except ImportError:
++        return None
++    try:
++        props = torch.cuda.get_device_properties(device_index)
++        bus = getattr(props, "pci_bus_id", None)
++        dev = getattr(props, "pci_device_id", None)
++        domain = getattr(props, "pci_domain_id", None)
++        if bus is None or dev is None or domain is None:
++            return None
++        pynvml.nvmlInit()
++        try:
++            handle = pynvml.nvmlDeviceGetHandleByPciBusId(
++                f"{int(domain):08X}:{int(bus):02X}:{int(dev):02X}.0"
++            )
++            return {
++                "power_limit_mw": int(pynvml.nvmlDeviceGetEnforcedPowerLimit(handle)),
++                "max_sm_clock_mhz": int(
++                    pynvml.nvmlDeviceGetMaxClockInfo(handle, pynvml.NVML_CLOCK_SM)
++                ),
++                "driver": str(pynvml.nvmlSystemGetDriverVersion()),
++            }
++        finally:
++            pynvml.nvmlShutdown()
++    except Exception:
++        return None
++
++
++def device_material(device_index: int) -> dict:
++    props = torch.cuda.get_device_properties(device_index)
++    return {
++        "name": props.name,
++        "capability": [int(props.major), int(props.minor)],
++        "total_memory": int(props.total_memory),
++        "multi_processor_count": int(props.multi_processor_count),
++        "visible_device_count": int(torch.cuda.device_count()),
++        "cuda": torch.version.cuda,
++        "nvml": _nvml_material(device_index),
++    }
++
++
++def _hook_names(model_runner) -> list[str]:
++    return [
++        getattr(hook, "__qualname__", type(hook).__qualname__)
++        for hook in getattr(model_runner, "capture_tail_hooks", ())
++    ]
++
++
++def config_skip_reason() -> Optional[str]:
++    """Why this deployment cannot autotune, checked before any collective.
++
++    Under these layouts the TP group is not the set of ranks that run a
++    measured step together, several schedulers or tokenizers would split the
++    synthetic load, or not every rank reaches the autotuner (elastic EP
++    recovery). The settings are shared by every rank.
++    """
++    from sglang.srt.runtime_context import get_exec, get_parallel, get_serving
++
++    parallel = get_parallel()
++    if parallel.attn_dp_enabled or parallel.dp_size > 1:
++        return "data parallelism is not supported"
++    if parallel.pp_size > 1:
++        return "pipeline parallelism is not supported"
++    if get_exec().moe.elastic_ep_backend is not None:
++        return "elastic expert parallelism is not supported"
++    if get_serving().tokenizer_worker_num > 1:
++        return "multiple tokenizer workers are not supported"
++    return None
++
++
++def build_startup_material(
++    *,
++    planner,
++    target_model_runner,
++    draft_model_runner,
++    server_args,
++    gamma: int,
++    verify_num_draft_tokens: int,
++    simulate_acc_len: float,
++    draft_sampler=None,
++) -> tuple[dict, list[tuple[int, int]], AutotuneParams]:
++    """Local eligibility, settings, cells and cache-key material."""
++    from sglang.srt.runtime_context import get_parallel, get_schedule
++
++    if not planner.schedules_verify_budget or not planner.is_compact_mode:
++        raise SpsAutotuneSkip("it requires SGLANG_RAGGED_VERIFY_MODE=compact")
++    if simulate_acc_len > 0:
++        raise SpsAutotuneSkip("SGLANG_SIMULATE_ACC_LEN is set (profiling mode)")
++    try:
++        params = AutotuneParams.from_env()
++    except ValueError as exc:
++        raise SpsAutotuneSkip(str(exc)) from exc
++    target_runner = target_model_runner.decode_cuda_graph_runner
++    if target_runner is None or not getattr(target_runner, "ragged_verify_mode", False):
++        raise SpsAutotuneSkip("the target did not capture compact verify tiers")
++    tiers = sorted(int(t) for t in target_runner.capture_num_tokens or ())
++    if not tiers:
++        raise SpsAutotuneSkip("the target did not capture compact verify tiers")
++    # The worker's effective limit (memory may cap the configured one).
++    max_running = int(
++        getattr(target_model_runner, "max_running_requests", None)
++        or get_schedule().max_running_requests
++        or target_runner.max_bs
++    )
++    max_running = min(max_running, int(target_runner.max_bs))
++    # Long enough for warmup and steady steps even if every draft is accepted,
++    # within the context window.
++    steps = params.warmup_steps + params.steady_steps + _STEP_SLACK
++    context_len = int(
++        getattr(getattr(target_model_runner, "model_config", None), "context_len", 0)
++        or 1 << 30
++    )
++    max_new_tokens = min(
++        steps * int(verify_num_draft_tokens), context_len - params.input_len - 1
++    )
++    if max_new_tokens < steps:
++        raise SpsAutotuneSkip(
++            f"the context length {context_len} is too short for {steps} steps"
++        )
++    batch_sizes = [
++        b
++        for b in (params.batch_sizes or default_batch_sizes(max_running))
++        if b <= max_running
++    ]
++    cells = plan_cells(
++        tiers=tiers, batch_sizes=batch_sizes, verify_width=verify_num_draft_tokens
++    )
++    if not cells:
++        raise SpsAutotuneSkip("no measurable (batch size, tier) cells")
++    kv_tokens = int(getattr(target_model_runner, "max_total_num_tokens", 0) or 0)
++    long_context = long_context_tokens(
++        params.long_context,
++        context_len=context_len,
++        kv_tokens=kv_tokens,
++        max_bs=max(b for b, _ in cells),
++        max_new_tokens=max_new_tokens,
++        prefix_cache=not getattr(server_args, "disable_radix_cache", False),
++        input_len=params.input_len,
++    )
++    # A second, farther context fits the slope beyond the first (indexers that
++    # search a bounded candidate pool stop growing with context).
++    long_context_far = (
++        long_context_tokens(
++            params.long_context_far,
++            context_len=context_len,
++            kv_tokens=kv_tokens,
++            max_bs=max(b for b, _ in cells),
++            max_new_tokens=max_new_tokens,
++            prefix_cache=not getattr(server_args, "disable_radix_cache", False),
++            input_len=long_context,
++        )
++        if long_context
++        else 0
++    )
++    prompt_source = (
++        "random" if getattr(server_args, "skip_tokenizer_init", False) else "text"
++    )
++
++    import sglang
++
++    package_root = Path(sglang.__file__).resolve().parent
++    draft_runner = getattr(draft_model_runner, "decode_cuda_graph_runner", None)
++    parallel = get_parallel()
++    material = {
++        "device": device_material(torch.cuda.current_device()),
++        "parallel": {
++            "world_size": int(parallel.tp_group.world_size),
++            "tp_rank": int(parallel.tp_group.rank_in_group),
++        },
++        "server_args": server_arg_material(server_args),
++        "model_config": _config_digest(getattr(server_args, "model_path", None)),
++        "draft_config": _config_digest(
++            getattr(server_args, "speculative_draft_model_path", None)
++        ),
++        "graphs": {
++            "verify_tiers": tiers,
++            "target_capture_bs": [int(b) for b in target_runner.capture_bs],
++            "draft_capture_bs": (
++                None
++                if draft_runner is None
++                else [int(b) for b in draft_runner.capture_bs]
++            ),
++            "max_running_requests": max_running,
++            "target_tail_hooks": _hook_names(target_model_runner),
++            "draft_tail_hooks": _hook_names(draft_model_runner),
++            "draft_sampler": (
++                None
++                if draft_sampler is None
++                else {
++                    "type": type(draft_sampler).__qualname__,
++                    "folded_sampling": getattr(draft_sampler, "folded_sampling", None),
++                }
++            ),
++        },
++        "dspark": {
++            "gamma": int(gamma),
++            "verify_num_draft_tokens": int(verify_num_draft_tokens),
++            "max_new_tokens": int(max_new_tokens),
++            "kv_tokens": kv_tokens,
++            "long_context": int(long_context),
++            "long_context_far": int(long_context_far),
++            "prompt_source": prompt_source,
++            "ragged_verify_mode": planner.mode_value,
++        },
++        "params": dataclasses.asdict(params),
++        "software": {
++            "sglang_version": getattr(sglang, "__version__", None),
++            "packages": package_versions(),
++            "source": source_digest([package_root / "srt", package_root / "kernels"]),
++            "env": env_digest(),
++        },
++    }
++    return material, cells, params
++
++
++def maybe_autotune_sps_table(
++    *,
++    planner,
++    target_model_runner,
++    draft_model_runner,
++    server_args,
++    gamma: int,
++    verify_num_draft_tokens: int,
++    simulate_acc_len: float,
++    draft_sampler=None,
++) -> Optional[AutotunePrepared]:
++    """Startup half of ``--speculative-dspark-sps-autotune``: install a cached
++    table, or return the pending measurement. Off by default. Failures are
++    logged and leave every rank on the table it already had."""
++    from sglang.srt.environ import envs
++    from sglang.srt.runtime_context import get_parallel, get_spec
++
++    spec = get_spec()
++    mode = SpsAutotuneMode.parse(getattr(spec, "speculative_dspark_sps_autotune", None))
++    if mode is SpsAutotuneMode.OFF:
++        return None
++    group = get_parallel().tp_group
++    is_rank0 = group.rank_in_group == 0
++    explicit = spec.speculative_dspark_sps_table_path
++    if mode is SpsAutotuneMode.AUTO and explicit:
++        if is_rank0:
++            logger.info(
++                "DSpark SPS autotune (auto) not run: "
++                "--speculative-dspark-sps-table-path %s is configured; use force "
++                "to measure anyway.",
++                explicit,
++            )
++        return None
++    skip = config_skip_reason()
++    if skip is not None:
++        if is_rank0:
++            logger.warning("DSpark SPS autotune skipped: %s.", skip)
++        return None
++    cpu_group = group.cpu_group if group.world_size > 1 else None
++    try:
++        table, prepared, source = agree_on_startup(
++            mode=mode,
++            explicit_table_path=explicit,
++            cache_dir=envs.SGLANG_DSPARK_SPS_AUTOTUNE_CACHE_DIR.get(),
++            group=cpu_group,
++            prepare=lambda: build_startup_material(
++                planner=planner,
++                target_model_runner=target_model_runner,
++                draft_model_runner=draft_model_runner,
++                server_args=server_args,
++                gamma=gamma,
++                verify_num_draft_tokens=verify_num_draft_tokens,
++                simulate_acc_len=simulate_acc_len,
++                draft_sampler=draft_sampler,
++            ),
++        )
++    except Exception:
++        # Local steps are caught inside; what reaches here is a failed
++        # collective, which fails on every rank.
++        logger.exception("DSpark SPS autotune failed; keeping the configured table.")
++        return None
++    if table is not None:
++        planner.install_sps_table(table, source=f"autotune-{source}")
++    return prepared
++
++
++# ---------------------------------------------------------------------------
++# Server side: the measurement
++# ---------------------------------------------------------------------------
++
++
++class MeasureClient:
++    """What the measurement needs from the server: control requests, per-step
++    records and a synthetic load. Wraps a ``TokenizerManager``; every call is
++    bounded by ``rpc_timeout`` seconds."""
++
++    def __init__(self, tokenizer_manager, *, rpc_timeout: float = 60.0) -> None:
++        self.tm = tokenizer_manager
++        self.rpc_timeout = rpc_timeout
++
++    async def _call(self, awaitable):
++        # Never cancel the communicator's wait: its reply is not tagged, so a
++        # late reply to a cancelled call would answer the next one. The
++        # shielded call keeps its place (the communicator serializes calls),
++        # and later calls queue behind it under their own deadlines.
++        task = asyncio.ensure_future(awaitable)
++        return await asyncio.wait_for(asyncio.shield(task), timeout=self.rpc_timeout)
++
++    async def status(self) -> list[dict]:
++        states = await self._call(self.tm.get_internal_state())
++        return [s.get(STATUS_FIELD) for s in states if s.get(STATUS_FIELD)]
++
++    async def set_state(self, **values) -> bool:
++        from sglang.srt.managers.io_struct import SetInternalStateReq
++
++        results = await self._call(
++            self.tm.set_internal_state(SetInternalStateReq(server_args=values))
++        )
++        return bool(results) and all(results)
++
++    async def records(self) -> list[dict]:
++        states = await self._call(self.tm.get_internal_state())
++        records: list[dict] = []
++        for state in states:
++            payload = state.get("dspark_info_record") or {}
++            records.extend(payload.get("records", []))
++        return records
++
++    def start_load(self, *, input_ids, sampling_params) -> asyncio.Task:
++        from sglang.srt.managers.io_struct import GenerateReqInput
++
++        request = GenerateReqInput(input_ids=input_ids, sampling_params=sampling_params)
++
++        async def drain():
++            with contextlib.suppress(Exception):
++                async for _ in self.tm.generate_request(request, None):
++                    pass
++
++        return asyncio.ensure_future(drain())
++
++    async def stop_load(self, task: asyncio.Task) -> None:
++        self.tm.abort_request(abort_all=True)
++        with contextlib.suppress(Exception):
++            await asyncio.wait_for(asyncio.shield(task), timeout=self.rpc_timeout)
++        if not task.done():
++            task.cancel()
++
++    async def flush_cache(self) -> None:
++        with contextlib.suppress(Exception):
++            await self._call(self.tm.flush_cache())
++
++    def text_token_ids(self, count: int) -> Optional[list[int]]:
++        """``count`` token ids of real text (this package's Python source), or
++        None without a tokenizer."""
++        tokenizer = getattr(self.tm, "tokenizer", None)
++        if tokenizer is None:
++            return None
++        return source_text_token_ids(tokenizer, count)
++
++
++def source_text_token_ids(tokenizer, count: int) -> Optional[list[int]]:
++    import sglang
++
++    root = Path(sglang.__file__).resolve().parent / "srt"
++    ids: list[int] = []
++    for path in sorted(root.rglob("*.py")):
++        if len(ids) >= count:
++            break
++        with contextlib.suppress(OSError, UnicodeDecodeError):
++            text = f"# {path.relative_to(root)}\n{path.read_text()}\n"
++            ids.extend(tokenizer.encode(text, add_special_tokens=False))
++    return ids[:count] if len(ids) >= count else None
++
++
++async def measure_cell(
++    client: MeasureClient,
++    *,
++    bs: int,
++    tier: int,
++    gamma: int,
++    max_new_tokens: int,
++    params: AutotuneParams,
++    prompts: Sequence[Sequence[int]],
++    shared_prefix_len: int = 0,
++    kv_tokens: int = 0,
++    sleep: Callable[[float], Awaitable] = asyncio.sleep,
++    clock: Callable[[], float] = time.monotonic,
++) -> Optional[float]:
++    """Median step period (seconds) of one cell, or None if it timed out.
++    ``prompts`` holds ``bs`` token lists; the first ``shared_prefix_len``
++    tokens of each are one cached prefix shared by all of them."""
++    if not await client.set_state(
++        dspark_force_budget_frac=forced_budget_frac(bs=bs, tier=tier, gamma=gamma),
++        dspark_clear_info_records=True,
++    ):
++        raise RuntimeError("the scheduler rejected the forced verify budget")
++    # The requests must fit the KV pool together; leave a fifth for the rest.
++    if kv_tokens:
++        own_prompt = max(len(p) for p in prompts) - shared_prefix_len
++        max_new_tokens = min(
++            max_new_tokens,
++            (int(0.8 * kv_tokens) - shared_prefix_len) // bs - own_prompt,
++        )
++    if max_new_tokens < params.warmup_steps + params.steady_steps + 2:
++        logger.warning(
++            "DSpark SPS autotune: %d requests do not fit the KV pool; cell "
++            "(%d, %d) skipped.",
++            bs,
++            bs,
++            tier,
++        )
++        return None
++    sampling_params = {
++        "temperature": params.temperature,
++        "max_new_tokens": max_new_tokens,
++        "ignore_eos": True,
++    }
++    if params.top_p < 1.0:
++        sampling_params["top_p"] = params.top_p
++    task = client.start_load(
++        input_ids=[list(p) for p in prompts[:bs]], sampling_params=sampling_params
++    )
++    deadline = clock() + params.cell_timeout_seconds
++    seconds = None
++    try:
++        while clock() < deadline:
++            await sleep(_POLL_SECONDS)
++            seconds = cell_step_seconds(
++                await client.records(),
++                bs=bs,
++                tier=tier,
++                warmup_steps=params.warmup_steps,
++                steady_steps=params.steady_steps,
++            )
++            if seconds is not None or task.done():
++                break
++    finally:
++        await client.stop_load(task)
++    return seconds
++
++
++class _Prompts:
++    """Measurement prompts: windows of real text (the server's own source
++    code) when the tokenizer is available, else random token ids. Real text
++    matters: random ids route MoE tokens differently and accept differently."""
++
++    def __init__(
++        self,
++        *,
++        text_ids: Optional[Sequence[int]],
++        vocab_size: int,
++        input_len: int,
++        rng: random.Random,
++    ) -> None:
++        self.text_ids = list(text_ids) if text_ids else None
++        self.vocab_size = vocab_size
++        self.input_len = input_len
++        self.rng = rng
++
++    def window(self, length: int) -> list[int]:
++        ids = self.text_ids
++        if ids and len(ids) > length + 1:
++            # Offsets >= 1: no window starts like the shared long prefix.
++            start = self.rng.randrange(1, len(ids) - length)
++            return ids[start : start + length]
++        high = max(self.vocab_size - 1000, _RANDOM_TOKEN_LOW + 1)
++        return [self.rng.randrange(_RANDOM_TOKEN_LOW, high) for _ in range(length)]
++
++    def short(self, bs: int) -> list[list[int]]:
++        return [self.window(self.input_len) for _ in range(bs)]
++
++    def shared_prefix(self, length: int) -> list[int]:
++        ids = self.text_ids
++        if ids and len(ids) >= length:
++            return ids[:length]
++        return random.Random(1).choices(
++            range(_RANDOM_TOKEN_LOW, max(self.vocab_size - 1000, _RANDOM_TOKEN_LOW + 1)),
++            k=length,
++        )
++
++    def long(self, bs: int, prefix: Sequence[int]) -> list[list[int]]:
++        return [list(prefix) + self.window(_LONG_SUFFIX_LEN) for _ in range(bs)]
++
++
++async def run_measurement(
++    client: MeasureClient,
++    status: dict,
++    *,
++    vocab_size: int,
++    sleep: Callable[[float], Awaitable] = asyncio.sleep,
++    clock: Callable[[], float] = time.monotonic,
++) -> Optional[dict]:
++    """Measure every cell of ``status`` over the configured passes, then the
++    long-context cells, and fit. Returns the install request, or None when the
++    measurement failed."""
++    params = AutotuneParams(
++        **{
++            k: tuple(v) if k == "batch_sizes" else v
++            for k, v in status["params"].items()
++        }
++    )
++    cells = [tuple(c) for c in status["cells"]]
++    long_cells = [tuple(c) for c in status.get("long_cells") or []]
++    long_context = int(status.get("long_context") or 0) if long_cells else 0
++    long_context_far = int(status.get("long_context_far") or 0) if long_context else 0
++    gamma = int(status["gamma"])
++    max_new_tokens = int(status["max_new_tokens"])
++    kv_tokens = int(status.get("kv_tokens") or 0)
++    rng = random.Random(0)
++    text_ids = None
++    with contextlib.suppress(Exception):
++        text_ids = client.text_token_ids(
++            max(
++                max(long_context, long_context_far) + 4 * _LONG_SUFFIX_LEN,
++                64 * params.input_len,
++            )
++        )
++    if status.get("prompt_source") == "text" and not text_ids:
++        # The cache key promises text prompts; do not cache a random-id table.
++        raise RuntimeError("the tokenizer did not produce the text prompts")
++    prompts = _Prompts(
++        text_ids=text_ids, vocab_size=vocab_size, input_len=params.input_len, rng=rng
++    )
++    started = clock()
++    samples: dict[tuple[int, int], list[float]] = {c: [] for c in cells}
++    long_samples: dict[tuple[int, int], list[float]] = {c: [] for c in long_cells}
++    far_samples: dict[tuple[int, int], list[float]] = {c: [] for c in long_cells}
++    failed: list[tuple[int, int]] = []
++
++    async def one(cell, *, prefix=None):
++        if clock() - started > params.max_seconds:
++            raise TimeoutError(f"measurement exceeded {params.max_seconds:.0f} s")
++        bs, tier = cell
++        return await measure_cell(
++            client,
++            bs=bs,
++            tier=tier,
++            gamma=gamma,
++            max_new_tokens=max_new_tokens,
++            kv_tokens=kv_tokens,
++            params=params,
++            prompts=prompts.short(bs) if prefix is None else prompts.long(bs, prefix),
++            shared_prefix_len=0 if prefix is None else len(prefix),
++            sleep=sleep,
++            clock=clock,
++        )
++
++    try:
++        if not await client.set_state(**{RECORD_KEY: True}):
++            raise RuntimeError("the scheduler rejected autotune recording")
++        # One unrecorded cell warms the largest shape before anything counts.
++        await one(cells[-1])
++        for pass_idx in range(params.passes):
++            for cell in cells if pass_idx % 2 == 0 else cells[::-1]:
++                seconds = await one(cell)
++                if seconds is None:
++                    failed.append(cell)
++                else:
++                    samples[cell].append(seconds)
++        for length, store in ((long_context, long_samples), (long_context_far, far_samples)):
++            if not (long_cells and length):
++                continue
++            prefix = prompts.shared_prefix(length)
++            # Prefill the shared prefix once so every long cell hits the cache.
++            await one(long_cells[0], prefix=prefix)
++            for pass_idx in range(params.passes):
++                for cell in long_cells if pass_idx % 2 == 0 else long_cells[::-1]:
++                    seconds = await one(cell, prefix=prefix)
++                    if seconds is not None:
++                        store[cell].append(seconds)
++    finally:
++        # The terminal table request also unpins and stops recording on every
++        # rank; this only restores the scheduler early.
++        with contextlib.suppress(Exception):
++            await client.set_state(dspark_force_budget_frac=None)
++        with contextlib.suppress(Exception):
++            await client.set_state(**{RECORD_KEY: False})
++        await client.flush_cache()
++    measured = [(b, t, s) for (b, t), values in samples.items() for s in values]
++    if failed:
++        logger.warning(
++            "DSpark SPS autotune: %d cell measurements timed out: %s",
++            len(failed),
++            sorted(set(failed)),
++        )
++    covered = {(b, t) for (b, t), values in samples.items() if values}
++    lost = sorted(
++        {("batch size", b) for b, _ in cells} - {("batch size", b) for b, _ in covered}
++        | {("tier", t) for _, t in cells} - {("tier", t) for _, t in covered}
++    )
++    if lost:
++        raise RuntimeError(f"no measurement left for {lost}")
++    table, stats = fit_step_cost_table(measured)
++    medians = {
++        (b, t): statistics.median(v) * 1e3 for (b, t), v in samples.items() if v
++    }
++    long_medians = {
++        (b, t): statistics.median(v) * 1e3 for (b, t), v in long_samples.items() if v
++    }
++    far_medians = {
++        (b, t): statistics.median(v) * 1e3 for (b, t), v in far_samples.items() if v
++    }
++    context_fit = None
++    context_delta = long_context + _LONG_SUFFIX_LEN - params.input_len
++    if long_medians and context_delta <= 0:
++        logger.warning(
++            "DSpark SPS autotune: the long context (%d) is not longer than the "
++            "prompts (%d); context term not fitted.",
++            long_context,
++            params.input_len,
++        )
++    elif not set(long_medians) & set(medians):
++        if long_medians:
++            logger.warning(
++                "DSpark SPS autotune: no long-context cell pairs with a short "
++                "one; context term not fitted."
++            )
++    else:
++        try:
++            context_fit = fit_context_seconds(
++                medians,
++                long_medians,
++                context_delta=context_delta,
++                verify_width=int(status["verify_num_draft_tokens"]),
++            )
++        except ValueError as exc:
++            logger.warning("DSpark SPS autotune: context term not fitted (%s).", exc)
++    if context_fit is not None:
++        # The short cells ran at a small but nonzero context; take its cost out
++        # of the baseline, which the planner prices from context zero.
++        reference = reference_context_tokens(params)
++        context_fit["reference_context_tokens"] = reference
++        knee, beyond, step_beyond = 0, 0.0, 0.0
++        far_fit = None
++        if set(far_medians) & set(long_medians) and long_context_far > long_context:
++            # Slope between the two long contexts, used past the first.
++            try:
++                far_fit = fit_context_seconds(
++                    long_medians,
++                    far_medians,
++                    context_delta=long_context_far - long_context,
++                    verify_width=int(status["verify_num_draft_tokens"]),
++                )
++            except ValueError as exc:
++                logger.warning(
++                    "DSpark SPS autotune: far context term not fitted (%s).", exc
++                )
++                far_fit = None
++        if far_fit is not None:
++            knee = long_context + _LONG_SUFFIX_LEN
++            beyond = far_fit["context_seconds"]
++            step_beyond = far_fit["context_step_seconds"]
++            context_fit["far"] = far_fit
++            context_fit["knee_tokens"] = knee
++        table = with_context_term(
++            table,
++            context_seconds=context_fit["context_seconds"],
++            reference_context_tokens=reference,
++            tiers=sorted({t for _, t in cells}),
++            context_knee_tokens=knee,
++            context_seconds_beyond=beyond,
++            context_step_seconds=context_fit["context_step_seconds"],
++            context_step_seconds_beyond=step_beyond,
++        )
++    elapsed = clock() - started
++    fmt = lambda d: {f"{b},{t}": round(v, 4) for (b, t), v in sorted(d.items())}
++    logger.info(
++        "DSpark SPS autotune: measured %d cells x %d passes in %.0f s (%s "
++        "prompts, temperature %.2f, top_p %.2f); fit rms %.3f ms, max residual "
++        "%.3f ms; context %s; step ms by (bs, tier) %s; at %d-token context %s.",
++        len(medians),
++        params.passes,
++        elapsed,
++        "text" if text_ids else "random",
++        params.temperature,
++        params.top_p,
++        stats.rms_ms,
++        stats.max_abs_ms,
++        "not fitted"
++        if context_fit is None
++        else f"{context_fit['context_seconds'] * 1e9:.3f} ns per verify token and "
++        f"{context_fit['context_step_seconds'] * 1e9:.2f} ns per step, per context token"
++        + (
++            f" up to {context_fit['knee_tokens']} tokens, "
++            f"{context_fit['far']['context_seconds'] * 1e9:.3f} and "
++            f"{context_fit['far']['context_step_seconds'] * 1e9:.2f} ns beyond"
++            if "far" in context_fit
++            else ""
++        ),
++        fmt(medians),
++        long_context,
++        fmt(long_medians),
++    )
++    return {
++        "key": status["key"],
++        "table": msgspec.to_builtins(table),
++        "metadata": {
++            "created_unix": int(time.time()),
++            "measure_seconds": round(elapsed, 1),
++            "prompts": "text" if text_ids else "random",
++            "step_ms_by_bs_tier": fmt(medians),
++            "long_context": long_context,
++            "long_step_ms_by_bs_tier": fmt(long_medians),
++            "long_context_far": long_context_far,
++            "far_step_ms_by_bs_tier": fmt(far_medians),
++            "context_fit": context_fit,
++            "failed_cells": [list(c) for c in sorted(set(failed))],
++            "fit": dataclasses.asdict(stats),
++        },
++    }
++
++
++async def run_startup_autotune(
++    tokenizer_manager,
++    *,
++    sleep: Callable[[float], Awaitable] = asyncio.sleep,
++    clock: Callable[[], float] = time.monotonic,
++    rpc_timeout: float = 60.0,
++) -> None:
++    """Server half of ``--speculative-dspark-sps-autotune``: measure and install
++    the table if the schedulers report a pending measurement.
++
++    A failed measurement keeps the configured table. Every outcome ends with
++    one table request (the table, or None to abandon) that unpins the budget
++    and stops recording on every rank; if the schedulers do not confirm it,
++    this raises so the server does not start with a pinned verify budget.
++    """
++    from sglang.srt.runtime_context import get_spec
++
++    spec = get_spec()
++    mode = SpsAutotuneMode.parse(getattr(spec, "speculative_dspark_sps_autotune", None))
++    if (
++        mode is SpsAutotuneMode.OFF
++        or "DSPARK" not in str(spec.speculative_algorithm).upper()
++    ):
++        return
++    client = MeasureClient(tokenizer_manager, rpc_timeout=rpc_timeout)
++    try:
++        pending = [s for s in await client.status() if s.get("pending")]
++    except Exception:
++        logger.exception("DSpark SPS autotune could not read the scheduler state.")
++        return
++    if len(pending) != 1:
++        if pending:
++            logger.warning(
++                "DSpark SPS autotune: %d schedulers report a pending measurement; "
++                "skipped.",
++                len(pending),
++            )
++        return
++    status = pending[0]
++    request = None
++    try:
++        vocab_size = int(tokenizer_manager.model_config.vocab_size)
++        params = status["params"]
++        logger.info(
++            "DSpark SPS autotune: measuring %d (batch size, tier) cells before "
++            "the server is ready (at most %.0f s).",
++            len(status["cells"]),
++            params["max_seconds"],
++        )
++        request = await asyncio.wait_for(
++            run_measurement(
++                client, status, vocab_size=vocab_size, sleep=sleep, clock=clock
++            ),
++            timeout=float(params["max_seconds"]) + 4 * rpc_timeout,
++        )
++    except Exception:
++        logger.exception(
++            "DSpark SPS autotune measurement failed; keeping the configured table."
++        )
++    finally:
++        # Runs on cancellation too, and cannot itself be cancelled half-way.
++        await asyncio.shield(_end_measurement(client, request))
++
++
++async def _end_measurement(client: MeasureClient, request: Optional[dict]) -> None:
++    """Send the terminal table request and confirm no measurement is pending."""
++    payload = None if request is None else json.dumps(request)
++    try:
++        await client.set_state(**{TABLE_KEY: payload})
++        states = await client.status()
++    except Exception as exc:
++        raise RuntimeError(
++            "DSpark SPS autotune could not end its measurement on the schedulers"
++        ) from exc
++    if any(s.get("pending") for s in states):
++        raise RuntimeError("DSpark SPS autotune measurement is still pending")
++    if request is not None and not any(s.get("installed") for s in states):
++        logger.warning("DSpark SPS autotune: the schedulers did not install it.")
+diff --git a/python/sglang/srt/speculative/dspark_components/dspark_verify.py b/python/sglang/srt/speculative/dspark_components/dspark_verify.py
+index 4a1615c5f01fac5b06b9939f299b39baf6fb6e43..61eceb8b14c7750638088504c9f2ea805a379d0c 100644
+--- a/python/sglang/srt/speculative/dspark_components/dspark_verify.py
++++ b/python/sglang/srt/speculative/dspark_components/dspark_verify.py
+@@ -138,6 +138,9 @@ class TargetVerifyExecutor:
+         self._verify_backend_self_adds_seq_lens_cache: Optional[bool] = None
+         self._simulate_acc_len = float(simulate_acc_len)
+         self._simulated_correct_drafts_buf: Optional[torch.Tensor] = None
++        # Set while the SPS autotune measures: every step commits only its
++        # bonus token, whatever the drafts would have accepted.
++        self.bonus_only = False
+ 
+     def accept_and_finalize(
+         self,
+@@ -164,7 +167,7 @@ class TargetVerifyExecutor:
+         if folded_accept:
+             return self.verify_epilogue.read_accept(bs)
+ 
+-        simulate = self._simulate_acc_len > 0
++        simulate = self._simulate_acc_len > 0 or self.bonus_only
+         # Simulated acceptance overwrites correct_len below, so a sampling accept
+         # (draft/target softmax + rejection) would be computed only to be discarded.
+         accept_sampling_info = None if simulate and _is_hip else sampling_info
+@@ -180,9 +183,30 @@ class TargetVerifyExecutor:
+             fused_argmax=self._target_is_dsv41,
+         )
+         if simulate:
++            accepted_len = correct_len
+             correct_len = self._simulated_correct_len(
+                 bs=bs, dtype=correct_len.dtype, device=correct_len.device
+             )
++            if (
++                self.bonus_only
++                and simulate_bonus_sampling_info is None
++                and verify_ids_2d.shape[1] > 1
++            ) and (
++                accept_sampling_info is sampling_info
++                or sampling_info is None
++                or sampling_info.is_all_greedy
++            ):
++                # Commit the token the real accept produced at row 0: the first
++                # draft if it was accepted, otherwise the target's resample there.
++                # Either way it follows the request's own sampling (top-p/top-k
++                # included) and needs no extra sampling pass.
++                bonus = torch.where(
++                    accepted_len.view_as(bonus) > 0,
++                    verify_ids_2d[:, 1].to(bonus.dtype).view_as(bonus),
++                    bonus,
++                )
++            elif self.bonus_only and simulate_bonus_sampling_info is None:
++                simulate_bonus_sampling_info = sampling_info
+             if simulate_bonus_sampling_info is not None:
+                 bonus = sample_simulated_bonus(
+                     target_logits=target_logits,
+@@ -236,6 +260,8 @@ class TargetVerifyExecutor:
+             buf = torch.empty((max(bs, 512),), dtype=dtype, device=device)
+             self._simulated_correct_drafts_buf = buf
+ 
++        if self.bonus_only:
++            return buf[:bs].fill_(0)
+         simulated_acc_len = sample_simulated_acc_len(
+             self._simulate_acc_len, SIMULATE_ACC_METHOD, self.gamma + 1
+         )
+@@ -839,7 +865,8 @@ def sample_simulated_bonus(
+     verify_num_draft_tokens: int,
+ ) -> torch.Tensor:
+     """Temperature-sample every verify row and return the row at the (simulated)
+-    correct_len as the bonus token. Temperature only: callers exclude top-p/top-k/min-p."""
++    correct_len as the bonus token. Temperature only: callers exclude top-p/top-k/min-p.
++    """
+     bonus = simulated_bonus_sample(
+         target_logits=target_logits,
+         correct_len=correct_len,
+diff --git a/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py b/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
+index 96fdc23ed4ba83f9e667189cfb7e8970a3231035..6379ef9f95ae6ba1e729f7e6d63ac370c9911eb9 100644
+--- a/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
++++ b/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
+@@ -160,6 +160,9 @@ class DSparkWorkerV2(BaseSpecWorker):
+         self.page_size = get_schedule().page_size
+         self.device = target_worker.device
+         self._draft_worker = None
++        # --speculative-dspark-sps-autotune: pending measurement / installed source.
++        self._sps_autotune = None
++        self._sps_autotune_installed: Optional[str] = None
+         self.enable_dp_spec_prefill_coordination = (
+             envs.SGLANG_ENABLE_DP_SPEC_PREFILL_COORDINATION.get()
+         )
+@@ -543,6 +546,91 @@ class DSparkWorkerV2(BaseSpecWorker):
+     def clear_cache_pool(self):
+         pass
+ 
++    def post_capture_init(self) -> None:
++        if not self._hosts_draft:
++            return
++        from sglang.srt.speculative.dspark_components.dspark_sps_autotune import (
++            maybe_autotune_sps_table,
++        )
++
++        self._sps_autotune = maybe_autotune_sps_table(
++            planner=self._verify_planner,
++            target_model_runner=self.model_runner,
++            draft_model_runner=self.draft_model_runner,
++            server_args=self.server_args,
++            gamma=self.gamma,
++            verify_num_draft_tokens=self.verify_num_draft_tokens,
++            simulate_acc_len=self._simulate_acc_len,
++            draft_sampler=self._draft_sampler,
++        )
++
++    def sps_autotune_status(self) -> Optional[dict]:
++        """The pending SPS measurement for the server side, or the installed
++        table's source once it is done."""
++        if self._sps_autotune is not None:
++            return self._sps_autotune.status()
++        if self._sps_autotune_installed is not None:
++            return {"pending": False, "installed": self._sps_autotune_installed}
++        return None
++
++    def set_sps_autotune_recording(self, on: bool) -> None:
++        """Record per-step periods and let a pinned budget schedule verify
++        lengths while the SPS measurement runs."""
++        if self._sps_autotune is None:
++            return  # already ended; keep an ended measurement idempotent
++        self._observers.set_sps_recording(on)
++        self._verify_planner.set_sps_measurement(on)
++        self._set_measurement_acceptance(on)
++
++    def _set_measurement_acceptance(self, on: bool) -> None:
++        """While measuring, commit only the bonus token (as
++        dspark_sps_profiler's SGLANG_SIMULATE_ACC_LEN=1.0 does): a cell's step
++        time is then the cost of its verify width, not of the tokens its drafts
++        happen to accept.
++        Work proportional to accepted tokens scales throughput and the planner's
++        expected tokens alike, so it must not be priced into a width."""
++        # The worker forwards unknown attributes; read its own state directly.
++        executor = self.__dict__.get("_verify_executor")
++        if executor is None:
++            return
++        executor.bonus_only = bool(on)
++
++    def install_sps_autotune_table(self, payload: Optional[str]) -> bool:
++        """Install the measured SPS table (``None`` abandons the measurement).
++        Every TP rank runs this in the same scheduler iteration."""
++        from sglang.srt.runtime_context import get_parallel
++        from sglang.srt.speculative.dspark_components.dspark_sps_autotune import (
++            install_measured_table,
++        )
++
++        prepared = self._sps_autotune
++        if prepared is None:
++            return False
++        # Terminal on every rank: unpin, stop recording, leave measurement mode.
++        self._sps_autotune = None
++        self.set_dspark_forced_budget_frac(None)
++        self._observers.set_sps_recording(False)
++        self._verify_planner.set_sps_measurement(False)
++        self._set_measurement_acceptance(False)
++        if payload is None:
++            if get_parallel().tp_rank == 0:
++                logger.warning(
++                    "DSpark SPS autotune abandoned; keeping the configured table."
++                )
++            return False
++        group = get_parallel().tp_group
++        installed = install_measured_table(
++            payload=payload,
++            prepared=prepared,
++            group=group.cpu_group if group.world_size > 1 else None,
++            install=lambda table, source: self._verify_planner.install_sps_table(
++                table, source=source
++            ),
++        )
++        if installed:
++            self._sps_autotune_installed = f"autotune-measured:{prepared.cache_path}"
++        return installed
++
+     def set_dspark_forced_budget_frac(self, frac: Optional[float]) -> None:
+         if not self._hosts_draft:
+             return
+@@ -893,6 +981,7 @@ class DSparkWorkerV2(BaseSpecWorker):
+             confidence=confidence,
+             prefix_lens=prefix_lens,
+             req_pool_indices=batch.req_pool_indices,
++            context_cost=self._verify_planner.batch_context_cost(batch),
+         )
+ 
+         layout = self._verify_planner.schedule_layout(
+@@ -926,6 +1015,9 @@ class DSparkWorkerV2(BaseSpecWorker):
+             and (sampling_info is None or sampling_info.is_all_greedy)
+             and verify_logits_adjustments_are_noop(sampling_info)
+             and self._simulate_acc_len <= 0
++            # The SPS measurement commits bonus tokens only, which the
++            # in-graph accept cannot do.
++            and not self._verify_executor.bonus_only
+             and not batch.has_grammar
+         )
+         prepare_mamba_track_for_verify(batch)
+diff --git a/test/registered/spec/dspark/test_dspark_sps_autotune.py b/test/registered/spec/dspark/test_dspark_sps_autotune.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..4caad21488c0a10c594d0eacd00ff2efd04251be
+--- /dev/null
++++ b/test/registered/spec/dspark/test_dspark_sps_autotune.py
+@@ -0,0 +1,1876 @@
++"""CPU tests for the DSpark SPS startup autotuner: cell design, the robust
++monotone fit, the per-cell step-period reduction, the measurement driver
++against a simulated scheduler, cache keying and atomic writes, rank agreement
++over Gloo, the scheduler-side hooks and the fallback paths."""
++
++import asyncio
++import json
++import multiprocessing
++import os
++import random
++import tempfile
++import unittest
++from datetime import timedelta
++from pathlib import Path
++from types import SimpleNamespace
++from unittest import mock
++
++import msgspec
++import numpy as np
++import torch
++import torch.distributed as dist
++
++from sglang.srt.speculative.dspark_components import dspark_sps_autotune as at
++from sglang.srt.speculative.dspark_components.dspark_planner import (
++    ContextCost,
++    DSparkScheduleConfig,
++    _additive_step_time_tensor,
++    compute_verify_token_budget,
++)
++from sglang.srt.speculative.dspark_components.dspark_sps import (
++    SpsAdditiveCostTable,
++    load_sps_table_from_path,
++)
++from sglang.test.ci.ci_register import register_cpu_ci
++from sglang.test.test_utils import CustomTestCase
++
++register_cpu_ci(est_time=40, suite="base-a-test-cpu")
++
++WIDTH = 6
++GAMMA = WIDTH - 1
++# Captured verify tiers without sub-width tiers: capture bs 1-8, 10, 12, 14, 16.
++TIERS = [WIDTH * b for b in (1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16)]
++BATCH_SIZES = [1, 2, 3, 4, 6, 8, 12, 16]
++
++
++def _tier_of(m, tiers=TIERS):
++    return next(t for t in tiers if t >= m)
++
++
++def _truth_ms(bs, tier):
++    """A step cost shaped like the measured ones: per-batch and per-tier terms
++    (the planner's additive model), both increasing."""
++    return 8.0 + 0.45 * bs + 0.18 * tier + (1.5 if tier > 48 else 0.0)
++
++
++def _cells(noise_ms=0.0, rounds=1, seed=0):
++    rng = np.random.default_rng(seed)
++    cells = at.plan_cells(tiers=TIERS, batch_sizes=BATCH_SIZES, verify_width=WIDTH)
++    return [
++        (b, t, (_truth_ms(b, t) + rng.normal(0, noise_ms)) / 1e3)
++        for b, t in cells
++        for _ in range(rounds)
++    ]
++
++
++class TestCellDesign(CustomTestCase):
++    def test_default_batch_sizes(self):
++        self.assertEqual(at.default_batch_sizes(16), BATCH_SIZES)
++        self.assertEqual(at.default_batch_sizes(1), [1])
++        self.assertEqual(at.default_batch_sizes(10), [1, 2, 3, 4, 6, 8, 10])
++        self.assertEqual(at.default_batch_sizes(48)[-4:], [16, 24, 32, 48])
++
++    def test_cells_cover_every_reachable_tier(self):
++        cells = at.plan_cells(tiers=TIERS, batch_sizes=BATCH_SIZES, verify_width=WIDTH)
++        by_bs = {}
++        for b, t in cells:
++            by_bs.setdefault(b, []).append(t)
++        self.assertEqual(by_bs[1], [6])
++        self.assertEqual(by_bs[8], [12, 18, 24, 30, 36, 42, 48])
++        self.assertEqual(by_bs[16], [18, 24, 30, 36, 42, 48, 60, 72, 84, 96])
++        self.assertEqual(len(cells), 42)
++        # Every M a batch can verify maps to a measured tier.
++        for b in BATCH_SIZES:
++            for m in range(b, b * WIDTH + 1):
++                self.assertIn((b, _tier_of(m)), cells)
++        sub = at.plan_cells(
++            tiers=[1, 2, 3, 4, 5] + TIERS, batch_sizes=[1, 2], verify_width=WIDTH
++        )
++        self.assertEqual(
++            sub,
++            [(1, 1), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6)]
++            + [(2, 2), (2, 3), (2, 4), (2, 5), (2, 6), (2, 12)],
++        )
++
++    def test_forced_budget_frac_pins_the_tier(self):
++        for b, t in at.plan_cells(
++            tiers=TIERS, batch_sizes=list(range(1, 17)), verify_width=WIDTH
++        ):
++            frac = at.forced_budget_frac(bs=b, tier=t, gamma=GAMMA)
++            self.assertTrue(0.0 < frac <= 1.0)
++            # The planner's forced budget, then the tier its M rounds up to.
++            budget = int(frac * b * GAMMA)
++            self.assertEqual(_tier_of(b + budget), t, (b, t, frac))
++
++    def test_cell_step_seconds(self):
++        records = [
++            {
++                "forward_ct": i,
++                "num_running_reqs": 4,
++                "num_verify_tokens": 24,
++                "step_cpu_ms": 10.0 + (i % 3),
++            }
++            for i in range(20)
++        ]
++        records += [  # other shapes and unmeasured steps are ignored
++            {
++                "forward_ct": 100,
++                "num_running_reqs": 3,
++                "num_verify_tokens": 24,
++                "step_cpu_ms": 99.0,
++            },
++            {
++                "forward_ct": 101,
++                "num_running_reqs": 4,
++                "num_verify_tokens": 18,
++                "step_cpu_ms": 99.0,
++            },
++            {
++                "forward_ct": 102,
++                "num_running_reqs": 4,
++                "num_verify_tokens": 24,
++                "step_cpu_ms": None,
++            },
++        ]
++        random.Random(0).shuffle(records)
++        s = at.cell_step_seconds(records, bs=4, tier=24, warmup_steps=5, steady_steps=9)
++        self.assertAlmostEqual(s, 0.011)
++        self.assertIsNone(
++            at.cell_step_seconds(
++                records, bs=4, tier=24, warmup_steps=5, steady_steps=16
++            )
++        )
++
++
++class TestFit(CustomTestCase):
++    def test_recovers_an_additive_tier_model(self):
++        table, stats = at.fit_step_cost_table(_cells())
++        self.assertLess(stats.rms_ms, 1e-6)
++        SpsAdditiveCostTable.from_json(table.to_json())
++        for b in BATCH_SIZES:
++            for m in range(b, b * WIDTH + 1):
++                self.assertAlmostEqual(
++                    table.step_time(num_reqs=b, budget=m - b) * 1e3,
++                    _truth_ms(b, _tier_of(m)),
++                    places=6,
++                )
++            vec = _additive_step_time_tensor(
++                table=table, num_requests=b, num_budgets=b * GAMMA + 1
++            )
++            for budget in range(b * GAMMA + 1):
++                self.assertAlmostEqual(
++                    float(vec[budget]),
++                    table.step_time(num_reqs=b, budget=budget),
++                    places=12,
++                )
++
++    def test_planner_lands_on_tier_edges(self):
++        table, _ = at.fit_step_cost_table(_cells())
++        cfg = DSparkScheduleConfig(gamma=GAMMA)
++        torch.manual_seed(0)
++        for b in BATCH_SIZES:
++            survival = torch.cumprod(
++                torch.rand(b, GAMMA, dtype=torch.float64) * 0.3 + 0.65, dim=1
++            )
++            d = compute_verify_token_budget(
++                history_survival_probs=survival, sps_table=table, cfg=cfg
++            )
++            self.assertIn(b + d.budget, TIERS + [b * WIDTH])
++
++    def test_one_outlier_cell_barely_moves_shared_tiers(self):
++        cells = _cells()
++        idx = next(i for i, c in enumerate(cells) if c[:2] == (4, 24))
++        cells[idx] = (4, 24, cells[idx][2] + 0.004)  # +4 ms on one cell
++        table, _ = at.fit_step_cost_table(cells)
++        for b, t in [(8, 24), (12, 24), (16, 24), (6, 24)]:
++            got = table.step_time(num_reqs=b, budget=t - b) * 1e3
++            self.assertLess(abs(got - _truth_ms(b, t)), 0.35, (b, t, got))
++
++    def test_costs_never_decrease_with_tier_or_batch(self):
++        cells = _cells(noise_ms=1.5, seed=3)
++        table, _ = at.fit_step_cost_table(cells)
++        self.assertEqual(table.theta_seconds, sorted(table.theta_seconds))
++        self.assertEqual(table.alpha_seconds, sorted(table.alpha_seconds))
++        self.assertGreater(table.bias_seconds, 0)
++
++    def test_repeats_reduce_to_the_median(self):
++        cells = [(b, t, s) for b, t, s in _cells()]
++        noisy = cells + [(b, t, s + 0.01) for b, t, s in cells[:3]]
++        noisy += [(b, t, s) for b, t, s in cells[:3]]
++        table, stats = at.fit_step_cost_table(noisy)
++        self.assertLess(stats.rms_ms, 1e-6)
++
++    def test_rejects_unidentifiable_or_invalid_cells(self):
++        with self.assertRaises(ValueError):  # bs 1 and bs 16 share no tier
++            at.fit_step_cost_table([(1, 6, 0.01), (16, 96, 0.04)])
++        with self.assertRaises(ValueError):
++            at.fit_step_cost_table([(1, 6, 0.01)])
++        with self.assertRaises(ValueError):
++            at.fit_step_cost_table([(1, 6, 0.01), (2, 6, float("nan"))])
++        with self.assertRaises(ValueError):
++            at.fit_step_cost_table([(0, 6, 0.01), (2, 6, 0.01)])
++
++    def test_pava(self):
++        self.assertEqual(at._pava([1, 3, 2, 4], [1, 1, 1, 1]), [1, 2.5, 2.5, 4])
++        self.assertEqual(at._pava([5, 1], [3, 1]), [4, 4])
++
++
++class TestCacheKeyAndFile(CustomTestCase):
++    def test_tokenizer_settings_are_part_of_the_key(self):
++        base = SimpleNamespace(**{f: None for f in at._SERVER_ARG_FIELDS})
++        for field, value in (
++            ("tokenizer_path", "/other"),
++            ("tokenizer_mode", "slow"),
++            ("tokenizer_backend", "rust"),
++            ("trust_remote_code", True),
++            ("skip_tokenizer_init", True),
++            ("disable_radix_cache", True),
++        ):
++            changed = SimpleNamespace(**{**vars(base), field: value})
++            self.assertNotEqual(
++                at.cache_key(at.server_arg_material(base)),
++                at.cache_key(at.server_arg_material(changed)),
++                field,
++            )
++
++    def test_key_is_order_independent_and_material_sensitive(self):
++        a = {"device": {"name": "GPU", "cc": [12, 0]}, "tiers": [6, 12]}
++        b = {"tiers": [6, 12], "device": {"cc": [12, 0], "name": "GPU"}}
++        self.assertEqual(at.cache_key(a), at.cache_key(b))
++        for changed in (
++            {**a, "tiers": [6, 12, 18]},
++            {**a, "device": {"name": "GPU", "cc": [12, 1]}},
++            {**a, "power_limit_mw": 300000},
++        ):
++            self.assertNotEqual(at.cache_key(a), at.cache_key(changed))
++
++    def test_env_digest_ignores_per_run_and_location_variables(self):
++        base = {"SGLANG_RAGGED_VERIFY_MODE": "compact", "NCCL_ALGO": "Ring"}
++        digest = at.env_digest(base)
++        for noise in (
++            {"SGLANG_RUN_ID": "abc"},
++            {"SGLANG_CACHE_DIR": "/x"},
++            {"SGLANG_PORT": "30000"},
++            {"SGLANG_DSPARK_SPS_AUTOTUNE_CACHE_DIR": "/y"},
++            {"HOME": "/home/x"},
++        ):
++            self.assertEqual(at.env_digest({**base, **noise}), digest, noise)
++        self.assertNotEqual(
++            at.env_digest({**base, "SGLANG_ENABLE_SM120_MXFP8_SKINNY_GEMM": "0"}),
++            digest,
++        )
++
++    def test_source_digest_tracks_content(self):
++        with tempfile.TemporaryDirectory() as d:
++            root = Path(d) / "srt"
++            root.mkdir()
++            (root / "a.py").write_text("x = 1\n")
++            (root / "notes.txt").write_text("ignored")
++            first = at.source_digest([root, Path(d) / "missing"])
++            (root / "notes.txt").write_text("still ignored")
++            self.assertEqual(at.source_digest([root]), first)
++            (root / "a.py").write_text("x = 2\n")
++            self.assertNotEqual(at.source_digest([root]), first)
++
++    def test_payload_round_trip_and_rejections(self):
++        table, _ = at.fit_step_cost_table(_cells())
++        key = at.cache_key({"k": 1})
++        payload = at.encode_cache_payload(table=table, key=key, metadata={"x": 1})
++        self.assertEqual(at.decode_cache_payload(payload, key=key), table)
++        self.assertIsNone(at.decode_cache_payload(payload, key=at.cache_key({"k": 2})))
++        self.assertIsNone(at.decode_cache_payload("not json", key=key))
++        self.assertIsNone(at.decode_cache_payload("[]", key=key))
++        stale = json.loads(payload)
++        stale[at.METADATA_FIELD]["schema"] = 1  # the graph-replay version
++        self.assertIsNone(at.decode_cache_payload(json.dumps(stale), key=key))
++        broken = json.loads(payload)
++        broken["m_probes"][1] = broken["m_probes"][0]
++        self.assertIsNone(at.decode_cache_payload(json.dumps(broken), key=key))
++
++    def test_cache_file_loads_as_a_configured_table(self):
++        table, _ = at.fit_step_cost_table(_cells())
++        key = at.cache_key({"k": 1})
++        with tempfile.TemporaryDirectory() as d:
++            path = at.cache_path_for(d, key)
++            at.write_cache_atomic(
++                path, at.encode_cache_payload(table=table, key=key, metadata={})
++            )
++            self.assertEqual(load_sps_table_from_path(str(path)), table)
++
++    def test_atomic_write_replaces_and_cleans_up(self):
++        with tempfile.TemporaryDirectory() as d:
++            path = Path(d) / "sub" / "t.json"
++            at.write_cache_atomic(path, "one")
++            at.write_cache_atomic(path, "two")
++            self.assertEqual(path.read_text(), "two")
++            with mock.patch.object(at.os, "replace", side_effect=OSError("boom")):
++                with self.assertRaises(OSError):
++                    at.write_cache_atomic(path, "three")
++            self.assertEqual(path.read_text(), "two")
++            self.assertEqual(sorted(p.name for p in path.parent.iterdir()), ["t.json"])
++
++
++PARAMS = at.AutotuneParams(passes=2, warmup_steps=4, steady_steps=12)
++
++
++def _prepare(material=None, cells=None, params=PARAMS):
++    return lambda: (
++        material
++        or {
++            "gpu": "test",
++            "dspark": {
++                "gamma": GAMMA,
++                "verify_num_draft_tokens": WIDTH,
++                "max_new_tokens": 500,
++            },
++        },
++        cells or at.plan_cells(tiers=TIERS, batch_sizes=[1, 2, 4], verify_width=WIDTH),
++        params,
++    )
++
++
++def _install_payload(prepared, table=None, key=None):
++    table = table or at.fit_step_cost_table(_cells())[0]
++    return json.dumps(
++        {
++            "key": key or prepared.key,
++            "table": json.loads(table.to_json()),
++            "metadata": {"measure_seconds": 1.0},
++        }
++    )
++
++
++class TestStartupAgreementSingleRank(CustomTestCase):
++    def _agree(self, mode, cache_dir, explicit=None, prepare=None):
++        return at.agree_on_startup(
++            mode=mode,
++            explicit_table_path=explicit,
++            cache_dir=cache_dir,
++            group=None,
++            prepare=prepare or _prepare(),
++        )
++
++    def test_off_explicit_skip(self):
++        with tempfile.TemporaryDirectory() as d:
++            self.assertEqual(
++                self._agree(at.SpsAutotuneMode.OFF, d), (None, None, "off")
++            )
++            self.assertEqual(
++                self._agree(at.SpsAutotuneMode.AUTO, d, explicit="/t.json"),
++                (None, None, "explicit-table"),
++            )
++
++            def skip():
++                raise at.SpsAutotuneSkip("static mode")
++
++            self.assertEqual(
++                self._agree(at.SpsAutotuneMode.AUTO, d, prepare=skip),
++                (None, None, "skipped"),
++            )
++
++    def test_miss_is_pending_then_install_caches_and_hit_loads(self):
++        with tempfile.TemporaryDirectory() as d:
++            table, prepared, source = self._agree(at.SpsAutotuneMode.AUTO, d)
++            self.assertEqual((table, source), (None, "pending"))
++            status = prepared.status()
++            self.assertEqual(status["gamma"], GAMMA)
++            self.assertEqual(status["cells"][0], [1, 6])
++            installed = []
++            ok = at.install_measured_table(
++                payload=_install_payload(prepared),
++                prepared=prepared,
++                group=None,
++                install=lambda t, src: installed.append((t, src)),
++            )
++            self.assertTrue(ok)
++            self.assertEqual(len(installed), 1)
++            meta = json.loads(prepared.cache_path.read_text())[at.METADATA_FIELD]
++            self.assertEqual(meta["measure_seconds"], 1.0)
++            self.assertEqual(meta["material"]["gpu"], "test")
++            table, prepared2, source = self._agree(at.SpsAutotuneMode.AUTO, d)
++            self.assertEqual((source, prepared2), ("cache", None))
++            self.assertEqual(table, installed[0][0])
++            # force measures again even with a cache and an explicit table.
++            table, prepared3, source = self._agree(
++                at.SpsAutotuneMode.FORCE, d, explicit="/t.json"
++            )
++            self.assertEqual((table, source), (None, "pending"))
++            # corrupt or undecodable cache files are misses.
++            for corrupt in (b"{", b"\xff\xfe"):
++                prepared.cache_path.write_bytes(corrupt)
++                self.assertEqual(self._agree(at.SpsAutotuneMode.AUTO, d)[2], "pending")
++
++    def test_install_rejects_bad_requests_and_survives_unwritable_cache(self):
++        with tempfile.TemporaryDirectory() as d:
++            _, prepared, _ = self._agree(at.SpsAutotuneMode.AUTO, d)
++            installed = []
++            for payload in (
++                None,
++                "{",
++                _install_payload(prepared, key="other"),
++                json.dumps({"key": prepared.key, "table": {"bias_seconds": 1}}),
++            ):
++                self.assertFalse(
++                    at.install_measured_table(
++                        payload=payload,
++                        prepared=prepared,
++                        group=None,
++                        install=lambda t, s: installed.append(t),
++                    )
++                )
++            self.assertEqual(installed, [])
++            blocker = Path(d) / "file"
++            blocker.write_text("")
++            prepared.cache_path = at.cache_path_for(str(blocker), prepared.key)
++            self.assertTrue(
++                at.install_measured_table(
++                    payload=_install_payload(prepared),
++                    prepared=prepared,
++                    group=None,
++                    install=lambda t, s: installed.append(t),
++                )
++            )
++            self.assertEqual(len(installed), 1)
++
++
++class FakeServer:
++    """A tokenizer-manager stand-in over a simulated DSpark scheduler: one
++    decode step every ``truth(bs, tier)`` seconds of simulated time, the
++    pinned budget deciding the tier, per-step records as the info dumper
++    writes them."""
++
++    def __init__(
++        self,
++        truth,
++        *,
++        pending=True,
++        stall=(),
++        gamma=GAMMA,
++        context_ms_per_ktok=0.0,
++        long_context=0,
++        tokenizer=None,
++        long_context_far=0,
++        context_knee=float("inf"),
++        context_ms_per_ktok_beyond=0.0,
++    ):
++        self.truth, self.gamma, self.stall = truth, gamma, set(stall)
++        # Extra ms per verify token per 1000 context tokens (attention/indexer).
++        self.context_ms_per_ktok = context_ms_per_ktok
++        self.long_context = long_context
++        self.long_context_far = long_context_far
++        # Past the knee each context token costs the "beyond" slope instead.
++        self.context_knee = context_knee
++        self.context_ms_per_ktok_beyond = context_ms_per_ktok_beyond
++        if tokenizer is not None:
++            self.tokenizer = tokenizer
++        self.ctx = 0.0
++        self.steps_since_load = 0
++        self.now = 0.0
++        self.frac = None
++        self.recording = False
++        self.records_list = []
++        self.forward_ct = 0
++        self.bs = 0
++        self.next_step = None
++        self.prefill_steps = 0
++        self.loads = []
++        self.events = []
++        self.table_payload = "unset"
++        self.pending = pending
++        self.kv_tokens = 0
++        self.model_config = SimpleNamespace(vocab_size=129280)
++
++    # simulated time ---------------------------------------------------
++    def clock(self):
++        return self.now
++
++    async def sleep(self, dt):
++        self._advance(self.now + dt)
++        await asyncio.sleep(0)
++
++    def _tier(self):
++        budget = int(self.frac * self.bs * self.gamma) if self.frac else 0
++        return _tier_of(self.bs + budget)
++
++    def _step_ms(self, tier):
++        # Context grows by one committed (bonus) token per step after the prompt.
++        ctx = self.ctx + self.steps_since_load
++        near = min(ctx, self.context_knee)
++        far = max(ctx - self.context_knee, 0.0)
++        per_token = (
++            self.context_ms_per_ktok * near + self.context_ms_per_ktok_beyond * far
++        ) / 1000.0
++        return self.truth(self.bs, tier) + per_token * tier
++
++    def _advance(self, until):
++        while self.bs and self.next_step is not None and self.next_step <= until:
++            tier = self._tier()
++            if (self.bs, tier) in self.stall:
++                self.next_step = None
++                break
++            step_ms = None if self.prefill_steps else self._step_ms(tier)
++            self.prefill_steps = max(0, self.prefill_steps - 1)
++            if self.recording:
++                self.records_list.append(
++                    {
++                        "forward_ct": self.forward_ct,
++                        "num_running_reqs": self.bs,
++                        "num_verify_tokens": tier,
++                        "step_cpu_ms": step_ms,
++                    }
++                )
++            self.next_step += self._step_ms(tier) / 1e3
++            self.forward_ct += 1
++            self.steps_since_load += 1
++        self.now = until
++
++    # tokenizer manager API -------------------------------------------
++    async def get_internal_state(self):
++        state = {}
++        if self.recording:
++            state["dspark_info_record"] = {"records": list(self.records_list)}
++        if self.pending:
++            cells = at.plan_cells(
++                tiers=TIERS, batch_sizes=BATCH_SIZES, verify_width=WIDTH
++            )
++            state[at.STATUS_FIELD] = {
++                "pending": True,
++                "key": "k",
++                "cells": [list(c) for c in cells],
++                "long_context": self.long_context,
++                "long_context_far": self.long_context_far,
++                "long_cells": (
++                    [list(c) for c in at.plan_long_cells(cells)]
++                    if self.long_context
++                    else []
++                ),
++                "gamma": self.gamma,
++                "verify_num_draft_tokens": WIDTH,
++                "max_new_tokens": 777,
++                "kv_tokens": self.kv_tokens,
++                "params": {
++                    **json.loads(json.dumps(PARAMS.__dict__)),
++                    "batch_sizes": [],
++                },
++            }
++        elif self.table_payload not in ("unset", None):
++            state[at.STATUS_FIELD] = {"pending": False, "installed": "x"}
++        return [state]
++
++    async def set_internal_state(self, req):
++        for key, value in req.server_args.items():
++            self.events.append((key, value))
++            if key == "dspark_force_budget_frac":
++                self.frac = value
++            elif key == "dspark_clear_info_records" and value:
++                self.records_list = []
++            elif key == at.RECORD_KEY:
++                self.recording = value
++                self.records_list = []
++            elif key == at.TABLE_KEY:
++                self.table_payload = value
++                self.pending = False
++                self.recording = False
++        return [True]
++
++    def generate_request(self, obj, request):
++        self.loads.append(obj)
++        self.bs = len(obj.input_ids)
++        self.ctx = sum(len(ids) for ids in obj.input_ids) / self.bs
++        self.steps_since_load = 0
++        self.prefill_steps = 2
++        self.next_step = self.now
++        self.aborted = asyncio.Event()
++
++        async def gen():
++            await self.aborted.wait()
++            yield {"meta_info": {"finish_reason": "abort"}}
++
++        return gen()
++
++    def abort_request(self, rid="", abort_all=False):
++        self.bs = 0
++        self.next_step = None
++        self.aborted.set()
++
++    async def flush_cache(self, timeout_s=None):
++        return SimpleNamespace(success=True)
++
++
++def _status(server):
++    return asyncio.run(server.get_internal_state())[0][at.STATUS_FIELD]
++
++
++class TestMeasurement(CustomTestCase):
++    def _run(self, server, status=None):
++        status = status or _status(server)
++
++        async def go():
++            return await at.run_measurement(
++                at.MeasureClient(server),
++                status,
++                vocab_size=129280,
++                sleep=server.sleep,
++                clock=server.clock,
++            )
++
++        return asyncio.run(go())
++
++    def test_measures_every_cell_and_recovers_the_step_costs(self):
++        server = FakeServer(_truth_ms)
++        request = self._run(server)
++        table = SpsAdditiveCostTable(**request["table"])
++        for b in BATCH_SIZES:
++            for m in range(b, b * WIDTH + 1):
++                self.assertAlmostEqual(
++                    table.step_time(num_reqs=b, budget=m - b) * 1e3,
++                    _truth_ms(b, _tier_of(m)),
++                    places=4,
++                )
++        cells = at.plan_cells(tiers=TIERS, batch_sizes=BATCH_SIZES, verify_width=WIDTH)
++        # One warmup load, then every cell once per pass.
++        self.assertEqual(len(server.loads), 1 + 2 * len(cells))
++        self.assertEqual([len(l.input_ids) for l in server.loads[1:4]], [1, 2, 2])
++        self.assertEqual(
++            [len(l.input_ids) for l in server.loads[-3:]], [2, 2, 1]
++        )  # second pass runs backwards
++        params = server.loads[1].sampling_params
++        self.assertTrue(params["ignore_eos"])
++        self.assertEqual(params["max_new_tokens"], 777)
++        self.assertEqual(params["temperature"], 1.0)
++        self.assertEqual(server.events[0], (at.RECORD_KEY, True))
++        self.assertIn(("dspark_force_budget_frac", None), server.events[-2:])
++        self.assertEqual(server.events[-1], (at.RECORD_KEY, False))
++        self.assertEqual(request["metadata"]["failed_cells"], [])
++        self.assertEqual(len(request["metadata"]["step_ms_by_bs_tier"]), len(cells))
++
++    def test_noisy_steps_still_fit_within_noise(self):
++        rng = random.Random(1)
++        server = FakeServer(lambda b, t: _truth_ms(b, t) + rng.gauss(0, 0.8))
++        table = SpsAdditiveCostTable(**self._run(server)["table"])
++        for b, t in [(1, 6), (8, 24), (8, 48), (16, 96)]:
++            got = table.step_time(num_reqs=b, budget=t - b) * 1e3
++            self.assertLess(abs(got - _truth_ms(b, t)), 0.6, (b, t, got))
++
++    def test_a_stalled_cell_times_out_and_the_rest_still_fit(self):
++        server = FakeServer(_truth_ms, stall={(8, 30)})
++        request = self._run(server)
++        self.assertEqual(request["metadata"]["failed_cells"], [[8, 30]])
++        table = SpsAdditiveCostTable(**request["table"])
++        self.assertAlmostEqual(
++            table.step_time(num_reqs=8, budget=22) * 1e3, _truth_ms(8, 30), places=3
++        )
++
++    def test_failures_restore_the_scheduler_and_raise(self):
++        server = FakeServer(_truth_ms)
++        status = _status(server)
++        status["params"] = {**status["params"], "max_seconds": 1.0}
++        with self.assertRaises(TimeoutError):
++            self._run(server, status)
++        self.assertEqual(server.frac, None)
++        self.assertFalse(server.recording)
++
++    def test_requests_are_sized_to_the_kv_pool(self):
++        server = FakeServer(_truth_ms)
++        server.kv_tokens = 10000
++        self._run(server)
++        limits = {
++            len(l.input_ids): l.sampling_params["max_new_tokens"] for l in server.loads
++        }
++        self.assertEqual(limits[1], 777)
++        self.assertEqual(limits[16], 8000 // 16 - PARAMS.input_len)
++        server = FakeServer(_truth_ms)
++        server.kv_tokens = 400  # 12 and 16 requests cannot hold their steady steps
++        with self.assertRaises(RuntimeError):
++            self._run(server)
++
++    def test_timed_out_calls_are_not_cancelled(self):
++        cancelled = []
++
++        async def go():
++            async def slow():
++                try:
++                    await asyncio.sleep(0.2)
++                    return "late"
++                except asyncio.CancelledError:
++                    cancelled.append(True)
++                    raise
++
++            client = at.MeasureClient(None, rpc_timeout=0.01)
++            task_holder = []
++            with self.assertRaises(asyncio.TimeoutError):
++                coro = slow()
++                task_holder.append(coro)
++                await client._call(coro)
++            await asyncio.sleep(0.3)
++
++        asyncio.run(go())
++        self.assertEqual(cancelled, [])
++
++    def test_hung_rpcs_are_bounded(self):
++        spec = SimpleNamespace(
++            speculative_dspark_sps_autotune="auto", speculative_algorithm="DSPARK"
++        )
++
++        class Hung(FakeServer):
++            def __init__(self, hang_records, hang_table):
++                super().__init__(_truth_ms)
++                self.hang_records, self.hang_table = hang_records, hang_table
++
++            async def get_internal_state(self):
++                if self.hang_records and self.recording:
++                    await asyncio.Event().wait()
++                return await super().get_internal_state()
++
++            async def set_internal_state(self, req):
++                if self.hang_table and at.TABLE_KEY in req.server_args:
++                    await asyncio.Event().wait()
++                return await super().set_internal_state(req)
++
++        with mock.patch("sglang.srt.runtime_context.get_spec", return_value=spec):
++            server = Hung(hang_records=True, hang_table=False)
++            asyncio.run(at.run_startup_autotune(server, rpc_timeout=0.05))
++            self.assertIsNone(server.table_payload)  # abandoned, not stuck
++            self.assertFalse(server.recording)
++            server = Hung(hang_records=True, hang_table=True)
++            with self.assertRaises(RuntimeError):
++                asyncio.run(at.run_startup_autotune(server, rpc_timeout=0.05))
++
++    def test_startup_driver_installs_or_abandons(self):
++        spec = SimpleNamespace(
++            speculative_dspark_sps_autotune="auto", speculative_algorithm="DSPARK"
++        )
++        with mock.patch("sglang.srt.runtime_context.get_spec", return_value=spec):
++            server = FakeServer(_truth_ms)
++            asyncio.run(
++                at.run_startup_autotune(server, sleep=server.sleep, clock=server.clock)
++            )
++            request = json.loads(server.table_payload)
++            self.assertEqual(request["key"], "k")
++            SpsAdditiveCostTable(**request["table"])
++
++            server = FakeServer(
++                _truth_ms,
++                stall={
++                    (c[0], c[1])
++                    for c in at.plan_cells(
++                        tiers=TIERS, batch_sizes=[1, 2], verify_width=WIDTH
++                    )
++                },
++            )
++            asyncio.run(
++                at.run_startup_autotune(server, sleep=server.sleep, clock=server.clock)
++            )
++            self.assertIsNone(server.table_payload)  # abandoned: bs 1-2 unlinked
++
++            server = FakeServer(_truth_ms, pending=False)
++            asyncio.run(
++                at.run_startup_autotune(server, sleep=server.sleep, clock=server.clock)
++            )
++            self.assertEqual(server.events, [])
++
++        off = SimpleNamespace(
++            speculative_dspark_sps_autotune="off", speculative_algorithm="DSPARK"
++        )
++        with mock.patch("sglang.srt.runtime_context.get_spec", return_value=off):
++            server = FakeServer(_truth_ms)
++            asyncio.run(at.run_startup_autotune(server))
++            self.assertEqual(server.events, [])
++
++
++class _CharTokenizer:
++    """Deterministic stand-in: one token per character."""
++
++    def encode(self, text, add_special_tokens=False):
++        return [1000 + (ord(c) % 4000) for c in text]
++
++
++def _uniform(table, bs, ctx):
++    return ContextCost(
++        step_seconds=table.context_step_seconds_at(ctx),
++        token_seconds=torch.full(
++            (bs,), table.context_seconds_per_verify_token(ctx), dtype=torch.float64
++        ),
++    )
++
++
++class TestContextTerm(CustomTestCase):
++    def _table(self, context_seconds=0.0, tiers=TIERS):
++        table, _ = at.fit_step_cost_table(_cells())
++        return msgspec.structs.replace(
++            table, context_seconds=context_seconds, verify_tiers=list(tiers)
++        )
++
++    def test_two_segment_context_cost(self):
++        table = msgspec.structs.replace(
++            self._table(2e-9), context_knee_tokens=65536, context_seconds_beyond=1e-9
++        )
++        self.assertAlmostEqual(table.context_seconds_per_verify_token(30_000), 6e-5)
++        self.assertAlmostEqual(
++            table.context_seconds_per_verify_token(400_000),
++            2e-9 * 65536 + 1e-9 * (400_000 - 65536),
++        )
++        vec = _additive_step_time_tensor(
++            table=table,
++            num_requests=4,
++            num_budgets=21,
++            context_cost=table.context_seconds_per_verify_token(400_000),
++        )
++        for budget in range(21):
++            self.assertAlmostEqual(
++                float(vec[budget]),
++                table.step_time(num_reqs=4, budget=budget, context_tokens=400_000),
++                places=12,
++            )
++        # A zero near slope still prices context past the knee.
++        flat_near = msgspec.structs.replace(table, context_seconds=0.0)
++        self.assertTrue(flat_near.prices_context)
++        self.assertAlmostEqual(
++            flat_near.step_time(num_reqs=4, budget=20, context_tokens=100_000)
++            - flat_near.step_time(num_reqs=4, budget=20),
++            1e-9 * (100_000 - 65536) * 24,
++        )
++        vec = _additive_step_time_tensor(
++            table=flat_near,
++            num_requests=4,
++            num_budgets=21,
++            context_cost=flat_near.context_seconds_per_verify_token(100_000),
++        )
++        self.assertAlmostEqual(
++            float(vec[20]),
++            flat_near.step_time(num_reqs=4, budget=20, context_tokens=100_000),
++            places=12,
++        )
++        from sglang.srt.speculative.dspark_components.dspark_planner import (
++            DSparkVerifyPlanner,
++        )
++
++        holder = SimpleNamespace(_budget_planner=SimpleNamespace(sps_table=flat_near))
++        batch = SimpleNamespace(reqs=[SimpleNamespace(seqlen=1000)])
++        got = DSparkVerifyPlanner.batch_context_cost(holder, batch)
++        self.assertAlmostEqual(
++            float(got.token_seconds[0]),
++            flat_near.context_seconds_per_verify_token(1000),
++        )
++        with self.assertRaises(ValueError):
++            msgspec.structs.replace(table, context_seconds_beyond=-1e-9)
++        with self.assertRaises(ValueError):
++            msgspec.structs.replace(table, context_knee_tokens=-1)
++
++    def test_table_prices_context_and_old_tables_load(self):
++        table = self._table(2e-9)
++        base = table.step_time(num_reqs=4, budget=20)
++        self.assertAlmostEqual(
++            table.step_time(num_reqs=4, budget=20, context_tokens=100_000) - base,
++            2e-9 * 24 * 100_000,
++        )
++        # Inside a tier the executed (filled) tier is priced, not the budget.
++        base = table.step_time(num_reqs=4, budget=6)
++        self.assertAlmostEqual(
++            table.step_time(num_reqs=4, budget=6, context_tokens=100_000) - base,
++            2e-9 * 12 * 100_000,
++        )
++        old = msgspec.json.encode(self._table()).decode()
++        old = json.loads(old)
++        old.pop("context_seconds")
++        old.pop("verify_tiers")
++        old.pop("context_knee_tokens")
++        old.pop("context_seconds_beyond")
++        loaded = SpsAdditiveCostTable.from_json(json.dumps(old))
++        self.assertEqual((loaded.context_seconds, loaded.verify_tiers), (0.0, []))
++        with self.assertRaises(ValueError):
++            msgspec.structs.replace(table, context_seconds=-1e-9)
++        with self.assertRaises(ValueError):
++            msgspec.structs.replace(table, verify_tiers=[12, 6])
++        # Two-token tiers: probes 1..8 are contiguous, the tiers stay explicit.
++        narrow = SpsAdditiveCostTable(
++            bias_seconds=0.004,
++            bs_probes=[1],
++            alpha_seconds=[0.0],
++            m_probes=list(range(1, 9)),
++            theta_seconds=[0.001 * (1 + (m - 1) // 2) for m in range(1, 9)],
++            context_seconds=1e-9,
++            verify_tiers=[2, 4, 6, 8],
++        )
++        for m, executed in ((1, 2), (2, 2), (3, 4), (5, 6), (8, 8)):
++            base = narrow.step_time(num_reqs=1, budget=m - 1)
++            got = narrow.step_time(num_reqs=1, budget=m - 1, context_tokens=1e6)
++            self.assertAlmostEqual(got - base, 1e-9 * executed * 1e6)
++            vec = _additive_step_time_tensor(
++                table=narrow,
++                num_requests=1,
++                num_budgets=8,
++                context_cost=narrow.context_seconds_per_verify_token(1e6),
++            )
++            self.assertAlmostEqual(float(vec[m - 1]), got, places=12)
++
++    def test_planner_uses_the_context_term(self):
++        table = self._table(3e-9)
++        for ctx in (0.0, 50_000.0, 400_000.0):
++            vec = _additive_step_time_tensor(
++                table=table,
++                num_requests=4,
++                num_budgets=21,
++                context_cost=table.context_seconds_per_verify_token(ctx),
++            )
++            for budget in range(21):
++                self.assertAlmostEqual(
++                    float(vec[budget]),
++                    table.step_time(num_reqs=4, budget=budget, context_tokens=ctx),
++                    places=12,
++                )
++        survival = torch.full((4, GAMMA), 0.8).cumprod(dim=1)
++        cfg = DSparkScheduleConfig(gamma=GAMMA)
++        short = compute_verify_token_budget(
++            history_survival_probs=survival, sps_table=table, cfg=cfg
++        )
++        long = compute_verify_token_budget(
++            history_survival_probs=survival,
++            sps_table=table,
++            cfg=cfg,
++            context_cost=_uniform(table, 4, 400_000.0),
++        )
++        # Context makes every verify token dearer, so the planner verifies fewer,
++        # and it still lands on a tier's last token count (alignment fills it).
++        self.assertLess(long.budget, short.budget)
++        for ctx in (0.0, 50_000.0, 400_000.0, 2_000_000.0):
++            for p in (0.3, 0.6, 0.8, 0.95):
++                d = compute_verify_token_budget(
++                    history_survival_probs=torch.full((4, GAMMA), p).cumprod(dim=1),
++                    sps_table=table,
++                    cfg=cfg,
++                    context_cost=_uniform(table, 4, ctx),
++                )
++                self.assertIn(4 + d.budget, TIERS, (ctx, p))
++        self.assertAlmostEqual(
++            long.predicted_step_seconds,
++            table.step_time(num_reqs=4, budget=long.budget, context_tokens=400_000.0),
++        )
++
++    def test_fit_context_seconds(self):
++        kappa = 1.3e-9
++        short = {
++            (b, t): _truth_ms(b, t)
++            for b, t in at.plan_long_cells(
++                at.plan_cells(tiers=TIERS, batch_sizes=BATCH_SIZES, verify_width=WIDTH)
++            )
++        }
++        long = {k: v + kappa * 1e3 * k[1] * 30_000 for k, v in short.items()}
++        fit = at.fit_context_seconds(short, long, context_delta=30_000)
++        self.assertAlmostEqual(fit["context_seconds"], kappa, places=15)
++        self.assertAlmostEqual(fit["context_step_seconds"], 0.0, places=15)
++        # A per-step part is separated from the per-token part.
++        both = {k: v + 0.25e-9 * 1e3 * 30_000 for k, v in long.items()}
++        fit = at.fit_context_seconds(short, both, context_delta=30_000)
++        self.assertAlmostEqual(fit["context_seconds"], kappa, places=14)
++        self.assertAlmostEqual(fit["context_step_seconds"], 0.25e-9, places=14)
++        # One wild cell barely moves the Huber-weighted fit.
++        long[(1, 6)] += 5.0
++        fit = at.fit_context_seconds(short, long, context_delta=30_000)
++        self.assertLess(abs(fit["context_seconds"] - kappa), 0.02 * kappa)
++        # Never negative; needs paired cells and a positive context delta.
++        fit = at.fit_context_seconds(
++            short, {k: v - 1.0 for k, v in short.items()}, context_delta=30_000
++        )
++        self.assertEqual(fit["context_seconds"], 0.0)
++        with self.assertRaises(ValueError):
++            at.fit_context_seconds(short, {(99, 6): 1.0}, context_delta=30_000)
++        # One executed width cannot separate the two parts.
++        with self.assertRaises(ValueError):
++            at.fit_context_seconds(
++                {(2, 12): 10.0, (4, 12): 12.0},
++                {(2, 12): 11.0, (4, 12): 13.0},
++                context_delta=30_000,
++            )
++        with self.assertRaises(ValueError):
++            at.fit_context_seconds(short, long, context_delta=0)
++
++    def test_long_cells_are_each_batch_sizes_extreme_tiers(self):
++        cells = at.plan_cells(tiers=TIERS, batch_sizes=BATCH_SIZES, verify_width=WIDTH)
++        long_cells = at.plan_long_cells(cells)
++        self.assertEqual(long_cells[:3], [(1, 6), (2, 6), (2, 12)])
++        self.assertEqual(long_cells[-2:], [(16, 18), (16, 96)])
++        self.assertEqual(len(long_cells), 2 * len(BATCH_SIZES) - 1)
++
++
++class TestContextMeasurement(CustomTestCase):
++    _run = TestMeasurement._run
++
++    def test_long_context_cells_fit_the_context_term(self):
++        server = FakeServer(_truth_ms, context_ms_per_ktok=0.0013, long_context=8192)
++        request = self._run(server)
++        table = SpsAdditiveCostTable(**request["table"])
++        self.assertAlmostEqual(table.context_seconds, 1.3e-9, places=13)
++        cells = at.plan_cells(tiers=TIERS, batch_sizes=BATCH_SIZES, verify_width=WIDTH)
++        long_cells = at.plan_long_cells(cells)
++        # Warmup, every cell twice, one prefix warmup, every long cell twice.
++        self.assertEqual(len(server.loads), 2 + 2 * len(cells) + 2 * len(long_cells))
++        long_loads = server.loads[-(1 + 2 * len(long_cells)) :]
++        prefix = long_loads[0].input_ids[0][:8192]
++        self.assertEqual(len(long_loads[0].input_ids), 1)
++        for load in long_loads:
++            for ids in load.input_ids:
++                self.assertEqual(ids[:8192], prefix)
++                self.assertEqual(len(ids), 8192 + at._LONG_SUFFIX_LEN)
++        # The fitted table, re-based to context zero, reproduces the step costs
++        # at both measured contexts (the timed steps' mean context).
++        ref = at.reference_context_tokens(PARAMS)
++        for b, t in long_cells:
++            for ctx in (ref, ref - PARAMS.input_len + 8192 + at._LONG_SUFFIX_LEN):
++                got = table.step_time(num_reqs=b, budget=t - b, context_tokens=ctx)
++                want = _truth_ms(b, t) + 0.0013 * t * ctx / 1000
++                # Within the few tokens the estimated window midpoint misses.
++                self.assertLess(abs(got * 1e3 - want), 0.0013 * t * 4 / 1000, (b, t))
++        meta = request["metadata"]
++        self.assertEqual(meta["long_context"], 8192)
++        self.assertEqual(len(meta["long_step_ms_by_bs_tier"]), len(long_cells))
++        self.assertEqual(meta["prompts"], "random")
++
++    def test_far_context_fits_the_slope_beyond_the_knee(self):
++        knee = 8192 + at._LONG_SUFFIX_LEN
++        server = FakeServer(
++            _truth_ms,
++            context_ms_per_ktok=0.002,
++            long_context=8192,
++            long_context_far=32768,
++            context_knee=knee,
++            context_ms_per_ktok_beyond=0.0009,
++        )
++        request = self._run(server)
++        table = SpsAdditiveCostTable(**request["table"])
++        # Within 1%: the near cells' decoded tokens run a little past the knee.
++        self.assertLess(abs(table.context_seconds - 2e-9), 2e-11)
++        self.assertLess(abs(table.context_seconds_beyond - 0.9e-9), 0.9e-11)
++        self.assertEqual(table.context_knee_tokens, knee)
++        meta = request["metadata"]
++        self.assertEqual(meta["long_context_far"], 32768)
++        cells = at.plan_cells(tiers=TIERS, batch_sizes=BATCH_SIZES, verify_width=WIDTH)
++        long_cells = at.plan_long_cells(cells)
++        self.assertEqual(len(meta["far_step_ms_by_bs_tier"]), len(long_cells))
++        # Warmup + cells, then a prefix warmup and the long cells per context.
++        self.assertEqual(
++            len(server.loads), 1 + 2 * len(cells) + 2 * (1 + 2 * len(long_cells))
++        )
++        # The table reproduces step costs well past the knee.
++        ref = at.reference_context_tokens(PARAMS)
++        for b, t in long_cells:
++            ctx = 400_000.0
++            got = table.step_time(num_reqs=b, budget=t - b, context_tokens=ctx)
++            want = _truth_ms(b, t) + (0.002 * knee + 0.0009 * (ctx - knee)) / 1000 * t
++            # Within 1% of the context cost (the slopes are fitted to 1%).
++            self.assertLess(
++                abs(got * 1e3 - want), 0.01 * (want - _truth_ms(b, t)), (b, t)
++            )
++        del ref
++
++    def test_unpaired_far_cells_keep_the_near_fit(self):
++        # The far cells all time out: the near fit stays, with no knee.
++        knee = 8192 + at._LONG_SUFFIX_LEN
++        server = FakeServer(
++            _truth_ms,
++            context_ms_per_ktok=0.002,
++            long_context=8192,
++            long_context_far=32768,
++        )
++        far_ctx = 32768 + at._LONG_SUFFIX_LEN
++        orig = server.generate_request
++
++        def gen(obj, request):
++            out = orig(obj, request)
++            if (
++                len(obj.input_ids[0]) == far_ctx
++                and obj.sampling_params["max_new_tokens"] > 1
++            ):
++                server.stall = set(
++                    at.plan_long_cells(
++                        at.plan_cells(
++                            tiers=TIERS, batch_sizes=BATCH_SIZES, verify_width=WIDTH
++                        )
++                    )
++                )
++            else:
++                server.stall = set()
++            return out
++
++        server.generate_request = gen
++        status = _status(server)
++        status["params"] = {**status["params"], "cell_timeout_seconds": 10.0}
++        request = self._run(server, status)
++        table = SpsAdditiveCostTable(**request["table"])
++        self.assertLess(abs(table.context_seconds - 2e-9), 2e-11)
++        self.assertEqual(table.context_knee_tokens, 0)
++        self.assertNotIn("far", request["metadata"]["context_fit"])
++        del knee
++
++    def test_unpaired_near_cells_keep_the_short_fit(self):
++        # Short (2, 6) times out, and only (2, 6) succeeds at long context: no
++        # pair, so no context term, while the short fit stays.
++        server = FakeServer(_truth_ms, context_ms_per_ktok=0.002, long_context=8192)
++        cells = at.plan_cells(tiers=TIERS, batch_sizes=BATCH_SIZES, verify_width=WIDTH)
++        long_cells = set(at.plan_long_cells(cells))
++        orig = server.generate_request
++
++        def gen(obj, request):
++            out = orig(obj, request)
++            is_long = len(obj.input_ids[0]) > PARAMS.input_len
++            server.stall = (long_cells - {(2, 6)}) if is_long else {(2, 6)}
++            return out
++
++        server.generate_request = gen
++        status = _status(server)
++        status["params"] = {**status["params"], "cell_timeout_seconds": 10.0}
++        request = self._run(server, status)
++        table = SpsAdditiveCostTable(**request["table"])
++        self.assertFalse(table.prices_context)
++        self.assertIsNone(request["metadata"]["context_fit"])
++
++    def test_text_prompts_and_sampling(self):
++        tokenizer = _CharTokenizer()
++        server = FakeServer(_truth_ms, tokenizer=tokenizer)
++        status = _status(server)
++        status["params"] = {**status["params"], "top_p": 0.95}
++        request = self._run(server, status)
++        self.assertEqual(request["metadata"]["prompts"], "text")
++        ids = at.source_text_token_ids(tokenizer, 64 * PARAMS.input_len)
++        index = {}
++        for i in range(len(ids) - 7):
++            index.setdefault(tuple(ids[i : i + 8]), []).append(i)
++        for load in server.loads:
++            self.assertEqual(load.sampling_params["top_p"], 0.95)
++            for window in load.input_ids:
++                self.assertEqual(len(window), PARAMS.input_len)
++                starts = index.get(tuple(window[:8]), [])
++                self.assertTrue(any(ids[i : i + len(window)] == window for i in starts))
++        # top_p 1.0 (the default) leaves it out.
++        server = FakeServer(_truth_ms)
++        self._run(server)
++        self.assertNotIn("top_p", server.loads[1].sampling_params)
++
++    def test_text_prompts_required_when_promised(self):
++        server = FakeServer(_truth_ms)  # no tokenizer
++        status = {**_status(server), "prompt_source": "text"}
++        with self.assertRaises(RuntimeError):
++            self._run(server, status)
++        self.assertEqual(server.frac, None)
++        self.assertFalse(server.recording)
++
++    def test_long_context_sizing(self):
++        kw = dict(context_len=1 << 20, kv_tokens=0, max_bs=16, max_new_tokens=720)
++        self.assertEqual(at.long_context_tokens(32768, prefix_cache=True, **kw), 32768)
++        # No prefix cache: the requests could not share the prefix.
++        self.assertEqual(at.long_context_tokens(32768, prefix_cache=False, **kw), 0)
++        self.assertEqual(at.long_context_tokens(0, prefix_cache=True, **kw), 0)
++        # Capped by the KV pool (one shared prefix plus each request's own).
++        own = at._LONG_SUFFIX_LEN + 720
++        kw["kv_tokens"] = 40000
++        self.assertEqual(
++            at.long_context_tokens(32768, prefix_cache=True, **kw),
++            int(0.8 * 40000) - 16 * own,
++        )
++        kw["kv_tokens"] = 16000  # too little room left: skipped
++        self.assertEqual(at.long_context_tokens(32768, prefix_cache=True, **kw), 0)
++        # Capped by the context window.
++        kw.update(kv_tokens=0, context_len=20000)
++        self.assertEqual(
++            at.long_context_tokens(32768, prefix_cache=True, **kw), 20000 - own - 1
++        )
++        # It must exceed the short cells' prompts by enough to fit the term.
++        kw.update(context_len=1 << 20)
++        self.assertEqual(
++            at.long_context_tokens(8192, prefix_cache=True, input_len=8192, **kw), 0
++        )
++        self.assertEqual(
++            at.long_context_tokens(16384, prefix_cache=True, input_len=8192, **kw),
++            16384,
++        )
++
++    def test_unusable_long_context_keeps_the_short_fit(self):
++        server = FakeServer(_truth_ms, long_context=8192)
++        status = _status(server)
++        status["params"] = {**status["params"], "input_len": 9000}
++        request = self._run(server, status)
++        self.assertIsNone(request["metadata"]["context_fit"])
++        self.assertEqual(SpsAdditiveCostTable(**request["table"]).context_seconds, 0.0)
++
++    def test_planner_reads_context_from_request_state(self):
++        from sglang.srt.speculative.dspark_components.dspark_planner import (
++            DSparkVerifyPlanner,
++        )
++
++        table = SpsAdditiveCostTable(
++            bias_seconds=0.004,
++            bs_probes=[1],
++            alpha_seconds=[0.0],
++            m_probes=[6],
++            theta_seconds=[0.001],
++            context_seconds=0.0,
++            context_knee_tokens=32768,
++            context_seconds_beyond=1e-9,
++            verify_tiers=[6],
++        )
++        batch = SimpleNamespace(
++            reqs=[SimpleNamespace(seqlen=1000), SimpleNamespace(seqlen=64000)]
++        )
++        holder = SimpleNamespace(_budget_planner=SimpleNamespace(sps_table=table))
++        fn = DSparkVerifyPlanner.batch_context_cost
++        # Each request is priced at its own context: the mean context (32.5K)
++        # sits below the knee, but the 64K request still costs past it.
++        got = fn(holder, batch)
++        self.assertEqual(float(got.token_seconds[0]), 0.0)
++        self.assertAlmostEqual(float(got.token_seconds[1]), 1e-9 * (64000 - 32768))
++        unpriced = SimpleNamespace(
++            _budget_planner=SimpleNamespace(
++                sps_table=msgspec.structs.replace(table, context_seconds_beyond=0.0)
++            )
++        )
++        self.assertIsNone(fn(unpriced, batch))  # no read without the term
++        self.assertIsNone(fn(holder, None))
++        self.assertIsNone(fn(holder, SimpleNamespace(reqs=[])))
++        self.assertIsNone(fn(SimpleNamespace(_budget_planner=None), batch))
++
++    def test_context_order_follows_the_allocator_on_ties(self):
++        # Fresh requests: every survival is 1, so the allocator breaks ties by
++        # position, then request; the context of the k-th draft follows that.
++        from sglang.kernels.ops.speculative.dspark.dspark_schedule import (
++            schedule_verify_lens_topk_from_survival,
++        )
++
++        table = msgspec.structs.replace(
++            at.fit_step_cost_table(_cells())[0],
++            context_seconds=2e-9,
++            verify_tiers=list(TIERS),
++        )
++        lens = [2_000, 2_000, 400_000, 400_000]
++        cost = ContextCost(
++            step_seconds=0.0,
++            token_seconds=torch.tensor(
++                [table.context_seconds_per_verify_token(n) for n in lens],
++                dtype=torch.float64,
++            ),
++        )
++        survival = torch.ones(4, GAMMA)
++        cfg = DSparkScheduleConfig(gamma=GAMMA)
++        d = compute_verify_token_budget(
++            history_survival_probs=survival, sps_table=table, cfg=cfg, context_cost=cost
++        )
++        executed = next(t for t in TIERS if t >= 4 + d.budget)
++        lens_alloc = schedule_verify_lens_topk_from_survival(
++            survival_probs=survival, budget=executed - 4, cfg=cfg
++        ).to(torch.float64)
++        expected_ctx = float((lens_alloc * cost.token_seconds).sum())
++        self.assertAlmostEqual(
++            d.predicted_step_seconds,
++            table.step_time(num_reqs=4, budget=d.budget) + expected_ctx,
++            places=12,
++        )
++
++    def test_drafts_under_the_cutoff_read_no_context(self):
++        table = msgspec.structs.replace(
++            at.fit_step_cost_table(_cells())[0],
++            context_seconds=2e-9,
++            verify_tiers=list(TIERS),
++        )
++        survival = torch.tensor([[0.9] * GAMMA, [0.6, 0.6, 0.01, 0.0001, 0.1]]).cumprod(
++            dim=1
++        )
++        lens = [2_000, 400_000]
++        cost = ContextCost(
++            step_seconds=0.0,
++            token_seconds=torch.tensor(
++                [table.context_seconds_per_verify_token(n) for n in lens],
++                dtype=torch.float64,
++            ),
++        )
++        cfg = DSparkScheduleConfig(gamma=GAMMA, survival_eps=1e-3)
++        d = compute_verify_token_budget(
++            history_survival_probs=survival, sps_table=table, cfg=cfg, context_cost=cost
++        )
++        from sglang.kernels.ops.speculative.dspark.dspark_schedule import (
++            schedule_verify_lens_topk_from_survival,
++        )
++
++        executed = next(t for t in TIERS if t >= 2 + d.budget)
++        alloc = schedule_verify_lens_topk_from_survival(
++            survival_probs=survival, budget=executed - 2, cfg=cfg
++        ).to(torch.float64)
++        self.assertAlmostEqual(
++            d.predicted_step_seconds,
++            table.step_time(num_reqs=2, budget=d.budget)
++            + float((alloc * cost.token_seconds).sum()),
++            places=12,
++        )
++
++    def test_mixed_contexts_price_the_requests_that_get_tokens(self):
++        # One long-context request with confident drafts and three short ones
++        # with weak drafts: extra tokens go to the long request, so they cost
++        # its context, not the batch mean.
++        table = msgspec.structs.replace(
++            at.fit_step_cost_table(_cells())[0],
++            context_seconds=2e-9,
++            verify_tiers=list(TIERS),
++        )
++        survival = torch.tensor(
++            [[0.95] * GAMMA, [0.2] * GAMMA, [0.2] * GAMMA, [0.2] * GAMMA]
++        ).cumprod(dim=1)
++        lens = [400_000, 2_000, 2_000, 2_000]
++        cost = ContextCost(
++            step_seconds=0.0,
++            token_seconds=torch.tensor(
++                [table.context_seconds_per_verify_token(n) for n in lens],
++                dtype=torch.float64,
++            ),
++        )
++        cfg = DSparkScheduleConfig(gamma=GAMMA)
++        d = compute_verify_token_budget(
++            history_survival_probs=survival, sps_table=table, cfg=cfg, context_cost=cost
++        )
++        executed = next(t for t in TIERS if t >= 4 + d.budget)
++        order = torch.argsort(survival.flatten(), descending=True)
++        rows = torch.arange(4).repeat_interleave(GAMMA)[order][: executed - 4]
++        expected_ctx = float(cost.token_seconds.sum() + cost.token_seconds[rows].sum())
++        self.assertAlmostEqual(
++            d.predicted_step_seconds,
++            table.step_time(num_reqs=4, budget=d.budget) + expected_ctx,
++            places=12,
++        )
++
++    def test_filled_tiers_are_capped_by_the_drafts(self):
++        # 9 requests x width 6 fill a 60-token tier with at most 54 tokens.
++        table = msgspec.structs.replace(
++            at.fit_step_cost_table(_cells())[0],
++            context_seconds=1e-9,
++            verify_tiers=list(TIERS),
++        )
++        cost = table.context_seconds_per_verify_token(100_000)
++        vec = _additive_step_time_tensor(
++            table=table,
++            num_requests=9,
++            num_budgets=9 * GAMMA + 1,
++            context_cost=cost,
++            verify_width=WIDTH,
++        )
++        base = _additive_step_time_tensor(
++            table=table, num_requests=9, num_budgets=9 * GAMMA + 1
++        )
++        self.assertAlmostEqual(float(vec[-1] - base[-1]), cost * 54)
++        self.assertAlmostEqual(
++            float(vec[-1]),
++            table.step_time(
++                num_reqs=9, budget=9 * GAMMA, context_tokens=100_000, verify_width=WIDTH
++            ),
++            places=12,
++        )
++        short = {(9, 60): 30.0, (9, 12): 20.0}
++        long = {
++            (9, 60): 30.0 + 1e-9 * 1e3 * 54 * 50_000,
++            (9, 12): 20.0 + 1e-9 * 1e3 * 12 * 50_000,
++        }
++        fit = at.fit_context_seconds(
++            short, long, context_delta=50_000, verify_width=WIDTH
++        )
++        self.assertAlmostEqual(fit["context_seconds"], 1e-9, places=15)
++
++    def test_context_counts_padding_only_when_tiers_are_filled(self):
++        table = msgspec.structs.replace(
++            at.fit_step_cost_table(_cells())[0],
++            context_seconds=1e-9,
++            verify_tiers=list(TIERS),
++        )
++        cost = table.context_seconds_per_verify_token(200_000)
++        filled = _additive_step_time_tensor(
++            table=table, num_requests=4, num_budgets=21, context_cost=cost
++        )
++        unfilled = _additive_step_time_tensor(
++            table=table,
++            num_requests=4,
++            num_budgets=21,
++            context_cost=cost,
++            fill_tiers=False,
++        )
++        # Budget 0 runs 4 real tokens in a 6-token tier.
++        self.assertAlmostEqual(float(filled[0] - unfilled[0]), cost * 2)
++        self.assertAlmostEqual(
++            float(unfilled[0]),
++            table.step_time(
++                num_reqs=4, budget=0, context_tokens=200_000, fill_tiers=False
++            ),
++            places=12,
++        )
++
++
++def _context(
++    mode, explicit=None, *, dp=False, dp_size=1, pp=1, elastic=None, tokenizers=1
++):
++    spec = SimpleNamespace(
++        speculative_dspark_sps_autotune=mode,
++        speculative_dspark_sps_table_path=explicit,
++    )
++    parallel = SimpleNamespace(
++        tp_group=SimpleNamespace(rank_in_group=0, world_size=1, cpu_group=None),
++        attn_dp_enabled=dp,
++        dp_size=dp_size,
++        pp_size=pp,
++    )
++    exec_ = SimpleNamespace(moe=SimpleNamespace(elastic_ep_backend=elastic))
++    serving = SimpleNamespace(tokenizer_worker_num=tokenizers)
++    return (
++        mock.patch("sglang.srt.runtime_context.get_spec", return_value=spec),
++        mock.patch("sglang.srt.runtime_context.get_parallel", return_value=parallel),
++        mock.patch("sglang.srt.runtime_context.get_exec", return_value=exec_),
++        mock.patch("sglang.srt.runtime_context.get_serving", return_value=serving),
++    )
++
++
++class TestSchedulerEntryPoint(CustomTestCase):
++    def _call(self, mode, explicit=None, **layout):
++        planner = mock.Mock()
++        patches = _context(mode, explicit, **layout)
++        with (
++            patches[0],
++            patches[1],
++            patches[2],
++            patches[3],
++            mock.patch.object(at, "agree_on_startup") as agree,
++        ):
++            agree.return_value = (at.fit_step_cost_table(_cells())[0], None, "cache")
++            out = at.maybe_autotune_sps_table(
++                planner=planner,
++                target_model_runner=None,
++                draft_model_runner=None,
++                server_args=None,
++                gamma=GAMMA,
++                verify_num_draft_tokens=WIDTH,
++                simulate_acc_len=0.0,
++            )
++        return planner, agree, out
++
++    def test_off_explicit_and_unsupported_layouts_do_nothing(self):
++        for args, layout in (
++            (("off",), {}),
++            (("auto", "/t.json"), {}),
++            (("auto",), dict(dp=True)),
++            (("auto",), dict(dp_size=2)),
++            (("force",), dict(pp=2)),
++            (("auto",), dict(elastic="nixl")),
++            (("auto",), dict(tokenizers=2)),
++        ):
++            with self.subTest(args=args, layout=layout):
++                planner, agree, out = self._call(*args, **layout)
++                agree.assert_not_called()
++                planner.install_sps_table.assert_not_called()
++                self.assertIsNone(out)
++
++    def test_cached_table_is_installed(self):
++        planner, agree, out = self._call("auto")
++        agree.assert_called_once()
++        planner.install_sps_table.assert_called_once()
++        self.assertIsNone(out)
++
++    def test_material_rejects_ineligible_configs(self):
++        for compact, simulate, env in (
++            (False, 0.0, {}),
++            (True, 1.0, {}),
++            (True, 0.0, {"SGLANG_DSPARK_SPS_AUTOTUNE_PASSES": "0"}),
++        ):
++            with self.subTest(compact=compact, simulate=simulate, env=env):
++                planner = mock.Mock(
++                    schedules_verify_budget=True, is_compact_mode=compact
++                )
++                with (
++                    mock.patch.dict(os.environ, env),
++                    self.assertRaises(at.SpsAutotuneSkip),
++                ):
++                    at.build_startup_material(
++                        planner=planner,
++                        target_model_runner=None,
++                        draft_model_runner=None,
++                        server_args=None,
++                        gamma=GAMMA,
++                        verify_num_draft_tokens=WIDTH,
++                        simulate_acc_len=simulate,
++                    )
++
++    def test_params_from_env(self):
++        env = {
++            "SGLANG_DSPARK_SPS_AUTOTUNE_PASSES": "3",
++            "SGLANG_DSPARK_SPS_AUTOTUNE_BATCH_SIZES": "16, 1,4",
++        }
++        with mock.patch.dict(os.environ, env):
++            params = at.AutotuneParams.from_env()
++        self.assertEqual((params.passes, params.batch_sizes), (3, (1, 4, 16)))
++
++
++class TestWorkerAndPlannerHooks(CustomTestCase):
++    def _worker(self, prepared):
++        from sglang.srt.speculative.dspark_components.dspark_worker_v2 import (
++            DSparkWorkerV2,
++        )
++
++        worker = DSparkWorkerV2.__new__(DSparkWorkerV2)
++        worker._hosts_draft = True
++        worker._forced_budget_frac = 0.5
++        worker._sps_autotune = prepared
++        worker._sps_autotune_installed = None
++        worker._observers = mock.Mock()
++        worker._verify_planner = mock.Mock()
++        worker._verify_executor = SimpleNamespace(bonus_only=False)
++        return worker
++
++    def _prepared(self, d):
++        return at.agree_on_startup(
++            mode=at.SpsAutotuneMode.AUTO,
++            explicit_table_path=None,
++            cache_dir=d,
++            group=None,
++            prepare=_prepare(),
++        )[1]
++
++    def test_worker_status_recording_install_and_abandon(self):
++        group = SimpleNamespace(world_size=1, cpu_group=None, rank_in_group=0)
++        parallel = SimpleNamespace(tp_rank=0, tp_group=group)
++        with (
++            tempfile.TemporaryDirectory() as d,
++            mock.patch(
++                "sglang.srt.runtime_context.get_parallel", return_value=parallel
++            ),
++        ):
++            prepared = self._prepared(d)
++            worker = self._worker(prepared)
++            self.assertTrue(worker.sps_autotune_status()["pending"])
++            worker.set_sps_autotune_recording(True)
++            worker._observers.set_sps_recording.assert_called_with(True)
++            worker._verify_planner.set_sps_measurement.assert_called_with(True)
++            # Measurement commits only the bonus token; the end restores it.
++            self.assertTrue(worker._verify_executor.bonus_only)
++            worker.set_sps_autotune_recording(True)
++            self.assertTrue(worker._verify_executor.bonus_only)
++            self.assertTrue(
++                worker.install_sps_autotune_table(_install_payload(prepared))
++            )
++            worker._verify_planner.install_sps_table.assert_called_once()
++            worker._verify_planner.set_sps_measurement.assert_called_with(False)
++            self.assertFalse(worker._verify_executor.bonus_only)
++            self.assertEqual(worker.sps_autotune_status()["pending"], False)
++            self.assertTrue(prepared.cache_path.is_file())
++            # Terminal: unpinned; later recording requests are no-ops.
++            worker._verify_planner.set_forced_budget_frac.assert_called_with(None)
++            self.assertIsNone(worker._forced_budget_frac)
++            worker._observers.reset_mock()
++            worker.set_sps_autotune_recording(True)
++            worker._observers.set_sps_recording.assert_not_called()
++
++            worker = self._worker(self._prepared(d + "/other"))
++            self.assertFalse(worker.install_sps_autotune_table(None))
++            worker._verify_planner.install_sps_table.assert_not_called()
++            worker._verify_planner.set_forced_budget_frac.assert_called_with(None)
++            worker._observers.set_sps_recording.assert_called_with(False)
++            self.assertIsNone(worker.sps_autotune_status())
++
++    def test_combined_terminal_update_through_the_real_controller(self):
++        from sglang.srt.managers.io_struct import SetInternalStateReq
++        from sglang.srt.managers.scheduler_components.internal_state import (
++            SchedulerInternalStateController,
++        )
++
++        group = SimpleNamespace(world_size=1, cpu_group=None, rank_in_group=0)
++        parallel = SimpleNamespace(tp_rank=0, tp_group=group)
++        with (
++            tempfile.TemporaryDirectory() as d,
++            mock.patch(
++                "sglang.srt.runtime_context.get_parallel", return_value=parallel
++            ),
++        ):
++            worker = self._worker(self._prepared(d))
++            scheduler = SimpleNamespace(
++                spec_algorithm=SimpleNamespace(is_dspark=lambda: True),
++                draft_worker=worker,
++            )
++            controller = SchedulerInternalStateController(scheduler, False)
++            out = controller.set_internal_state(
++                SetInternalStateReq(
++                    server_args={at.TABLE_KEY: None, at.RECORD_KEY: False}
++                )
++            )
++            self.assertTrue(out.updated)
++            self.assertIsNone(worker.sps_autotune_status())
++            out = controller.set_internal_state(
++                SetInternalStateReq(server_args={at.RECORD_KEY: True})
++            )
++            self.assertFalse(out.updated)  # nothing pending any more
++
++    def _bonus_only_accept(self, sampling_info, accepted_lens, accept_bonus):
++        from sglang.srt.speculative.dspark_components import dspark_verify as dv
++
++        bs, width = len(accepted_lens), WIDTH
++        candidates = torch.arange(bs * width, dtype=torch.int64).view(bs, width) + 100
++        executor = dv.TargetVerifyExecutor.__new__(dv.TargetVerifyExecutor)
++        executor._simulate_acc_len = 0.0
++        executor._simulated_correct_drafts_buf = None
++        executor._target_is_dsv41 = False
++        executor.gamma, executor.verify_num_draft_tokens = GAMMA, width
++        executor._tp_sync = mock.Mock()
++        executor.bonus_only = True
++        accepted = (
++            torch.tensor(accepted_lens, dtype=torch.int32),
++            torch.tensor(accept_bonus, dtype=torch.int64),
++            torch.zeros(bs, dtype=torch.int32),
++        )
++        passthrough = SimpleNamespace(
++            execute=lambda **kw: SimpleNamespace(
++                cap_trim_lens=kw.get("cap_trim_lens"),
++                commit_lens=kw.get("correct_len"),
++                new_seq_lens=None,
++            )
++        )
++        resample = mock.Mock(side_effect=AssertionError("no extra sampling pass"))
++        with (
++            mock.patch.object(dv, "accept_draft_tokens", lambda **_: accepted),
++            mock.patch.object(dv, "sample_simulated_bonus", resample),
++            mock.patch.object(dv, "FinalizeAcceptLens", passthrough),
++            mock.patch.object(
++                dv, "BuildOutTokens", SimpleNamespace(execute=lambda **_: None)
++            ),
++        ):
++            out = executor.accept_and_finalize(
++                folded_accept=False,
++                bs=bs,
++                verify_ids_2d=candidates,
++                target_logits=torch.zeros(bs * width, 11),
++                draft_block=None,
++                sampling_info=sampling_info,
++                draft_input=None,
++                layout=None,
++                prefix_lens=None,
++                draft_tokens=None,
++            )
++        return candidates, out
++
++    def test_bonus_only_commits_the_row_zero_bonus(self):
++        # Greedy and sampled (top-p) batches alike: no draft is committed, and the
++        # bonus is the real accept's token at row 0 (the first draft when it was
++        # accepted, else the accept's own resample there), not the token after the
++        # drafts that would have been accepted.
++        for sampling_info in (None, SimpleNamespace(is_all_greedy=False)):
++            candidates, out = self._bonus_only_accept(
++                sampling_info, accepted_lens=[3, 0, 1], accept_bonus=[7, 8, 9]
++            )
++            self.assertTrue(
++                torch.equal(out.correct_len, torch.zeros(3, dtype=torch.int32))
++            )
++            want = torch.tensor(
++                [candidates[0, 1], 8, candidates[2, 1]], dtype=torch.int64
++            )
++            self.assertTrue(torch.equal(out.bonus, want))
++
++    def test_planner_measurement_mode_and_install(self):
++        from sglang.srt.speculative.dspark_components import dspark_planner as dp
++
++        planner = dp.DSparkVerifyPlanner.__new__(dp.DSparkVerifyPlanner)
++        planner._budget_planner = SimpleNamespace(sps_table=None, last_decision=1)
++        planner._is_verify_all = True
++        planner._uniform_layout_cache = {(1, None): object()}
++        planner._schedule_cfg = SimpleNamespace(survival_eps=1e-6)
++        planner.set_sps_measurement(True)
++        self.assertFalse(planner.is_verify_all)
++        # Every draft can fill the pinned tier while measuring.
++        self.assertEqual(planner._schedule_cfg.survival_eps, 0.0)
++        planner.set_sps_measurement(True)
++        planner.set_sps_measurement(False)
++        self.assertTrue(planner.is_verify_all)
++        self.assertEqual(planner._schedule_cfg.survival_eps, 1e-6)
++        table, _ = at.fit_step_cost_table(_cells())
++        with mock.patch.object(
++            dp, "get_parallel", return_value=SimpleNamespace(tp_rank=0)
++        ):
++            planner.set_sps_measurement(True)
++            planner.install_sps_table(table, source="test")
++            planner.set_sps_measurement(False)
++        self.assertIs(planner._budget_planner.sps_table, table)
++        self.assertFalse(planner.is_verify_all)
++        self.assertEqual(planner._uniform_layout_cache, {})
++        planner._budget_planner = None
++        with self.assertRaises(RuntimeError):
++            planner.install_sps_table(table, source="test")
++
++    def test_info_dumper_runtime_recording(self):
++        from sglang.srt.speculative.dspark_components.dspark_observability import (
++            DsparkInfoDumper,
++            InfoComponent,
++        )
++
++        for rank, enabled in ((0, True), (1, False)):
++            dumper = DsparkInfoDumper(
++                components=set(),
++                gamma=GAMMA,
++                verify_num_draft_tokens=WIDTH,
++                attn_tp_rank=rank,
++                device="cpu",
++                mode_value="compact",
++            )
++            self.assertFalse(dumper.enabled)
++            dumper.set_runtime_components(
++                {InfoComponent.CORE, InfoComponent.STEP_CPU_TIME}
++            )
++            self.assertEqual(dumper.enabled, enabled)
++            dumper.set_runtime_components(set())
++            self.assertFalse(dumper.enabled)
++            self.assertIsNone(dumper.dump())
++
++
++class TestInternalStateHandlers(CustomTestCase):
++    def _controller(self, status):
++        from sglang.srt.managers.scheduler_components.internal_state import (
++            SchedulerInternalStateController,
++        )
++
++        worker = mock.Mock()
++        worker.sps_autotune_status.return_value = status
++        scheduler = SimpleNamespace(
++            spec_algorithm=SimpleNamespace(is_dspark=lambda: True), draft_worker=worker
++        )
++        return SchedulerInternalStateController(scheduler, False), worker
++
++    def _set(self, controller, **values):
++        from sglang.srt.managers.io_struct import SetInternalStateReq
++
++        return controller.set_internal_state(SetInternalStateReq(server_args=values))
++
++    def test_handlers_require_a_pending_measurement(self):
++        controller, worker = self._controller({"pending": True})
++        self.assertTrue(self._set(controller, **{at.RECORD_KEY: True}).updated)
++        worker.set_sps_autotune_recording.assert_called_with(True)
++        self.assertTrue(self._set(controller, **{at.TABLE_KEY: "{}"}).updated)
++        worker.install_sps_autotune_table.assert_called_with("{}")
++        self.assertFalse(self._set(controller, **{at.RECORD_KEY: "yes"}).updated)
++        self.assertFalse(self._set(controller, **{at.TABLE_KEY: 3}).updated)
++        controller, worker = self._controller({"pending": False, "installed": "x"})
++        self.assertFalse(self._set(controller, **{at.TABLE_KEY: None}).updated)
++        worker.install_sps_autotune_table.assert_not_called()
++
++
++# --- Rank agreement over Gloo ----------------------------------------------
++
++_SCENARIOS = ("agree", "skip_on_rank1", "params_mismatch", "install", "bad_install")
++
++
++def _rank_worker(rank, rendezvous, cache_dir, scenario, out_dir):
++    dist.init_process_group(
++        "gloo",
++        init_method=f"file://{rendezvous}",
++        rank=rank,
++        world_size=2,
++        timeout=timedelta(seconds=30),
++    )
++    try:
++        group = dist.group.WORLD
++        material = {
++            "rank": rank,
++            "dspark": {
++                "gamma": GAMMA,
++                "verify_num_draft_tokens": WIDTH,
++                "max_new_tokens": 500,
++            },
++        }
++        prepare = _prepare(material=material)
++        if scenario == "skip_on_rank1" and rank == 1:
++
++            def prepare():
++                raise at.SpsAutotuneSkip("no graphs on this rank")
++
++        if scenario == "params_mismatch" and rank == 1:
++            prepare = _prepare(material=material, params=at.AutotuneParams(passes=3))
++        table, prepared, source = at.agree_on_startup(
++            mode=at.SpsAutotuneMode.AUTO,
++            explicit_table_path=None,
++            cache_dir=cache_dir if rank == 0 else cache_dir + "-rank1",
++            group=group,
++            prepare=prepare,
++        )
++        result = {
++            "source": source,
++            "table": None if table is None else table.to_json(),
++            "key": None if prepared is None else prepared.key,
++        }
++        if scenario in ("install", "bad_install") and prepared is not None:
++            payload = _install_payload(prepared)
++            if scenario == "bad_install" and rank == 1:
++                payload = "{"
++            installed = []
++            result["installed"] = at.install_measured_table(
++                payload=payload,
++                prepared=prepared,
++                group=group,
++                install=lambda t, s: installed.append(t.to_json()),
++            )
++            result["install_calls"] = len(installed)
++        Path(out_dir, f"rank{rank}.json").write_text(json.dumps(result))
++    finally:
++        dist.destroy_process_group()
++
++
++@unittest.skipUnless(dist.is_gloo_available(), "requires Gloo")
++class TestRankAgreement(CustomTestCase):
++    def _spawn(self, scenario, cache_dir):
++        context = multiprocessing.get_context("spawn")
++        with tempfile.TemporaryDirectory() as d:
++            out_dir = Path(d) / "out"
++            out_dir.mkdir()
++            processes = [
++                context.Process(
++                    target=_rank_worker,
++                    args=(rank, str(Path(d) / "rv"), cache_dir, scenario, str(out_dir)),
++                )
++                for rank in range(2)
++            ]
++            try:
++                for process in processes:
++                    process.start()
++                for process in processes:
++                    process.join(timeout=120)
++                self.assertEqual([p.exitcode for p in processes], [0, 0])
++            finally:
++                for process in processes:
++                    if process.is_alive():
++                        process.terminate()
++                        process.join(timeout=5)
++            return [
++                json.loads((out_dir / f"rank{r}.json").read_text()) for r in range(2)
++            ]
++
++    def test_pending_install_then_cache_hit(self):
++        with tempfile.TemporaryDirectory() as d:
++            cache = str(Path(d) / "cache")
++            first = self._spawn("install", cache)
++            self.assertEqual([r["source"] for r in first], ["pending", "pending"])
++            self.assertEqual(first[0]["key"], first[1]["key"])
++            self.assertEqual([r["installed"] for r in first], [True, True])
++            self.assertEqual([r["install_calls"] for r in first], [1, 1])
++            self.assertEqual(len(os.listdir(cache)), 1)
++            self.assertFalse(os.path.isdir(cache + "-rank1"))
++            second = self._spawn("agree", cache)
++            self.assertEqual([r["source"] for r in second], ["cache", "cache"])
++            self.assertEqual(second[0]["table"], second[1]["table"])
++            # An undecodable rank-0 cache is a miss on both ranks, not a hang.
++            path = Path(cache) / os.listdir(cache)[0]
++            path.write_bytes(b"\xff\xfe\x00")
++            third = self._spawn("agree", cache)
++            self.assertEqual([r["source"] for r in third], ["pending", "pending"])
++
++    def test_one_rank_failing_falls_back_on_both(self):
++        with tempfile.TemporaryDirectory() as d:
++            cache = str(Path(d) / "cache")
++            for scenario, source in (
++                ("skip_on_rank1", "skipped"),
++                ("params_mismatch", "skipped"),
++            ):
++                with self.subTest(scenario=scenario):
++                    results = self._spawn(scenario, cache)
++                    self.assertEqual([r["source"] for r in results], [source, source])
++            results = self._spawn("bad_install", cache)
++            self.assertEqual([r["installed"] for r in results], [False, False])
++            self.assertEqual([r["install_calls"] for r in results], [0, 0])
++            self.assertFalse(os.path.isdir(cache) and os.listdir(cache))
++
++
++if __name__ == "__main__":
++    unittest.main()

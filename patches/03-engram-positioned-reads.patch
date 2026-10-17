@@ -1,0 +1,426 @@
+diff --git a/python/sglang/srt/layers/engram.py b/python/sglang/srt/layers/engram.py
+index 68c12993362399be78961f5ae2262d957ce98e2c..585fc5c61f29c02cc8d19f00c8985e52758c2073 100644
+--- a/python/sglang/srt/layers/engram.py
++++ b/python/sglang/srt/layers/engram.py
+@@ -780,11 +780,20 @@ class EngramEmbedding(nn.Module):
+         return self._host_table_ptrs
+ 
+     def _load_rows(self, param: nn.Parameter, loaded_weight: torch.Tensor):
++        from sglang.srt.model_loader.weight_utils import SafetensorsRowSource
++
+         rows = slice(self.row_start, self.row_start + self.rows)
+-        if self._shared:
+-            param.data[rows].copy_(loaded_weight[rows])
++        dst = param.data[rows] if self._shared else param.data
++        if isinstance(loaded_weight, SafetensorsRowSource):
++            # Page-cache eviction was measured with the per-rank layout only.
++            loaded_weight.read_rows_into(
++                dst,
++                self.row_start,
++                drop_page_cache=self.host_table is not None
++                and self.host_table.layout == "per_rank",
++            )
+         else:
+-            param.data.copy_(loaded_weight[rows])
++            dst.copy_(loaded_weight[rows])
+         if self.host_table is not None:
+             self.host_table.dirty = True
+ 
+diff --git a/python/sglang/srt/model_loader/loader.py b/python/sglang/srt/model_loader/loader.py
+index 2493b0702e22d24a486a43bbcf403e3091c9e749..67bfddbd5ea11eb6b22bfb44f40ba5c7d97753f6 100644
+--- a/python/sglang/srt/model_loader/loader.py
++++ b/python/sglang/srt/model_loader/loader.py
+@@ -119,6 +119,7 @@ from sglang.srt.model_loader.weight_utils import (
+     get_gguf_extra_tensor_names,
+     get_quant_config,
+     gguf_quant_weights_iterator,
++    host_resident_weights_iterator,
+     initialize_capture_safe_weights,
+     initialize_dummy_weights,
+     instanttensor_weights_iterator,
+@@ -457,8 +458,9 @@ class DefaultModelLoader(BaseModelLoader):
+         host_resident_weight_patterns: Optional[Tuple[str, ...]] = None
+         """Substrings of checkpoint tensor names the model keeps in host memory.
+ 
+-        Device-direct loaders (InstantTensor) load the files containing them
+-        through the CPU safetensors path instead."""
++        Device-direct loaders (InstantTensor) load the files containing them on
++        the host and yield matching tensors as ``SafetensorsRowSource``, which
++        the parameters' weight loaders must accept."""
+ 
+         @classmethod
+         def init_new(cls, model_config: ModelConfig, model):
+@@ -700,13 +702,11 @@ class DefaultModelLoader(BaseModelLoader):
+             if host_files:
+                 logger.info(
+                     "Loading %d checkpoint file(s) with host-resident weights "
+-                    "through the safetensors path.",
++                    "through positioned reads.",
+                     len(host_files),
+                 )
+-                host_weights = buffered_multi_thread_safetensors_weights_iterator(
+-                    host_files,
+-                    max_workers=self.DEFAULT_NUM_THREADS,
+-                    disable_mmap=get_model().weight_loader_disable_mmap,
++                host_weights = host_resident_weights_iterator(
++                    host_files, source.host_resident_weight_patterns
+                 )
+                 weights_iterator = itertools.chain(
+                     weights_iterator,
+diff --git a/python/sglang/srt/model_loader/weight_utils.py b/python/sglang/srt/model_loader/weight_utils.py
+index 66cda9522a51af5eee40697a58c8d45acbea3a88..bff52dfeda6db4fb8c2a6b73da8a668e115f9f6f 100644
+--- a/python/sglang/srt/model_loader/weight_utils.py
++++ b/python/sglang/srt/model_loader/weight_utils.py
+@@ -12,6 +12,7 @@ import hashlib
+ import itertools
+ import json
+ import logging
++import math
+ import os
+ import re
+ import struct
+@@ -1180,6 +1181,100 @@ def get_pp_stage_load_group() -> LoadGroup:
+     return parallel.tp_group if parallel.pp_size > 1 else _DEFAULT_LOAD_GROUP
+ 
+ 
++class SafetensorsRowSource:
++    """A row-major safetensors tensor that is read by row range on demand.
++
++    A rank's rows are one contiguous byte range of the file, so a row-sharded
++    host-resident weight can fill its own destination with positioned reads
++    instead of copying out of a memory map page by page.
++    """
++
++    def __init__(
++        self, path: str, offset: int, shape: Tuple[int, ...], dtype: torch.dtype
++    ):
++        self.path = path
++        self.offset = offset
++        self.shape = tuple(shape)
++        self.dtype = dtype
++        self.row_bytes = math.prod(self.shape[1:]) * dtype.itemsize
++
++    def read_rows_into(
++        self,
++        dst: torch.Tensor,
++        row_start: int,
++        drop_page_cache: bool = False,
++        num_threads: int = 8,
++        chunk_bytes: int = 64 << 20,
++    ) -> None:
++        """Read rows ``[row_start, row_start + len(dst))`` into ``dst``.
++
++        With ``drop_page_cache``, ask the kernel to evict each range once read.
++        """
++        rows = dst.shape[0]
++        if dst.device.type != "cpu" or not dst.is_contiguous():
++            raise ValueError("SafetensorsRowSource reads into contiguous CPU tensors")
++        if (
++            dst.dtype != self.dtype
++            or tuple(dst.shape[1:]) != self.shape[1:]
++            or row_start < 0
++            or row_start + rows > self.shape[0]
++        ):
++            raise ValueError(
++                f"rows {row_start}:{row_start + rows} of {self.dtype} {self.shape} "
++                f"do not fit {dst.dtype} {tuple(dst.shape)}"
++            )
++        total = rows * self.row_bytes
++        if total == 0:
++            return
++        view = memoryview(dst.view(-1).view(torch.uint8).numpy())
++        base = self.offset + row_start * self.row_bytes
++        fd = os.open(self.path, os.O_RDONLY)
++        try:
++
++            def read(start: int) -> None:
++                end = min(start + chunk_bytes, total)
++                done = start
++                while done < end:
++                    n = os.preadv(fd, [view[done:end]], base + done)
++                    if n <= 0:
++                        raise EOFError(f"short read from {self.path} at {base + done}")
++                    done += n
++                # The bytes now live in dst; ask the kernel to drop the cached copy.
++                if drop_page_cache and hasattr(os, "posix_fadvise"):
++                    try:
++                        os.posix_fadvise(
++                            fd, base + start, end - start, os.POSIX_FADV_DONTNEED
++                        )
++                    except OSError as e:
++                        logger.debug("posix_fadvise failed for %s: %s", self.path, e)
++
++            with concurrent.futures.ThreadPoolExecutor(num_threads) as pool:
++                list(pool.map(read, range(0, total, chunk_bytes)))
++        finally:
++            os.close(fd)
++
++
++def host_resident_weights_iterator(
++    hf_weights_files: List[str], patterns: Tuple[str, ...]
++) -> Generator[Tuple[str, Union[torch.Tensor, SafetensorsRowSource]], None, None]:
++    """Iterate over safetensors weights, yielding a SafetensorsRowSource
++    instead of a tensor for names that contain one of ``patterns``."""
++    for path in hf_weights_files:
++        with open(path, "rb") as f:
++            (header_len,) = struct.unpack("<Q", f.read(8))
++            header = json.loads(f.read(header_len))
++        with safetensors.safe_open(path, framework="pt", device="cpu") as f:
++            for name in f.keys():
++                # A memory-mapped view: no data is read here.
++                tensor = f.get_tensor(name)
++                if any(p in name for p in patterns):
++                    begin, _ = header[name]["data_offsets"]
++                    tensor = SafetensorsRowSource(
++                        path, 8 + header_len + begin, tensor.shape, tensor.dtype
++                    )
++                yield name, tensor
++
++
+ def instanttensor_weights_iterator(
+     hf_weights_files: List[str],
+     extra_config: Optional[dict] = None,
+diff --git a/test/registered/unit/model_loader/test_host_resident_rows.py b/test/registered/unit/model_loader/test_host_resident_rows.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..bc2418b91362d3ca1959eb51dbdda5c643469aee
+--- /dev/null
++++ b/test/registered/unit/model_loader/test_host_resident_rows.py
+@@ -0,0 +1,208 @@
++"""Positioned row reads of host-resident safetensors weights."""
++
++import errno
++import os
++import random
++import shutil
++import tempfile
++import unittest
++from types import SimpleNamespace
++from unittest.mock import patch
++
++import torch
++from safetensors.torch import safe_open, save_file
++
++import sglang.srt.layers.engram as engram
++import sglang.srt.model_loader.weight_utils as weight_utils
++from sglang.srt.environ import envs
++from sglang.srt.model_loader.weight_utils import (
++    SafetensorsRowSource,
++    host_resident_weights_iterator,
++)
++from sglang.test.ci.ci_register import register_cpu_ci
++from sglang.test.test_utils import CustomTestCase
++
++register_cpu_ci(est_time=5, suite="base-a-test-cpu")
++
++NUM_ROWS, DIM = 37, 64  # 37 rows split unevenly over 2, 3 and 4 ranks.
++WEIGHT = "layers.1.engram.embed.weight"
++SCALE = "layers.1.engram.embed.scale"
++FP32_TABLE = "layers.1.engram.embed.fp32"
++OTHER = "layers.1.engram.wkv.weight"
++HOST_RESIDENT = (WEIGHT, SCALE, FP32_TABLE)
++SENTINEL = 0xA5
++
++
++class _FakeHostTable:
++    """_HostTable without the memfd, the huge pages and cudaHostRegister."""
++
++    def __init__(self, layout, nbytes, name, group):
++        self.layout = layout
++        self.dirty = False
++        self.bytes = torch.full((nbytes,), SENTINEL, dtype=torch.uint8)
++        self.device_ptr = self.bytes.data_ptr()
++
++
++def _random_bytes(shape, dtype, generator):
++    raw = torch.randint(0, 256, shape, dtype=torch.uint8, generator=generator)
++    return raw.view(dtype)
++
++
++class TestHostResidentRows(CustomTestCase):
++    def setUp(self):
++        super().setUp()
++        folder = tempfile.TemporaryDirectory()
++        self.addCleanup(folder.cleanup)
++        self.path = os.path.join(folder.name, "model-00002.safetensors")
++        g = torch.Generator().manual_seed(0)
++        self.tensors = {
++            WEIGHT: _random_bytes((NUM_ROWS, DIM), torch.float8_e4m3fn, g),
++            SCALE: _random_bytes(
++                (NUM_ROWS, DIM // engram.FP8_BLOCK_SIZE), torch.float8_e8m0fnu, g
++            ),
++            # Multi-byte elements, so small chunks split elements across reads.
++            FP32_TABLE: torch.randn(NUM_ROWS, 5, generator=g),
++            OTHER: torch.randn(8, 16, generator=g),
++        }
++        save_file(self.tensors, self.path)
++        self.items = dict(host_resident_weights_iterator([self.path], (".embed.",)))
++        with safe_open(self.path, framework="pt") as f:
++            self.mmap = {name: f.get_tensor(name) for name in self.tensors}
++
++    def assertBytesEqual(self, actual, expected, msg=None):
++        self.assertEqual(actual.dtype, expected.dtype, msg)
++        self.assertTrue(
++            torch.equal(actual.view(torch.uint8), expected.view(torch.uint8)), msg
++        )
++
++    def test_iterator_yields_row_sources_for_matching_names(self):
++        self.assertCountEqual(self.items, self.tensors)
++        for name in HOST_RESIDENT:
++            source = self.items[name]
++            self.assertIsInstance(source, SafetensorsRowSource)
++            self.assertEqual(source.shape, tuple(self.tensors[name].shape))
++            self.assertEqual(source.dtype, self.tensors[name].dtype)
++        self.assertBytesEqual(self.items[OTHER], self.tensors[OTHER])
++
++    def test_random_row_ranges_match_mmap(self):
++        rng = random.Random(0)
++        for name in HOST_RESIDENT:
++            full = self.mmap[name]
++            for _ in range(30):
++                start = rng.randrange(NUM_ROWS + 1)
++                rows = rng.randrange(NUM_ROWS - start + 1)
++                chunk_bytes = rng.choice([1, 3, 8, 77, 1 << 20])
++                num_threads = rng.choice([1, 3, 8])
++                dst = torch.empty((rows, *full.shape[1:]), dtype=full.dtype)
++                self.items[name].read_rows_into(
++                    dst, start, num_threads=num_threads, chunk_bytes=chunk_bytes
++                )
++                self.assertBytesEqual(
++                    dst,
++                    full[start : start + rows],
++                    f"{name} rows {start}:{start + rows}, chunk {chunk_bytes}",
++                )
++
++    def test_short_reads_and_failed_cache_advice(self):
++        real_preadv = os.preadv
++
++        def short_preadv(fd, buffers, offset):
++            return real_preadv(fd, [buffers[0][:5]], offset)
++
++        def failing_fadvise(*_args):
++            raise OSError(errno.ENOSYS, "posix_fadvise")
++
++        dst = torch.empty(10, 5)
++        with (
++            patch.object(weight_utils.os, "preadv", short_preadv),
++            patch.object(
++                weight_utils.os, "posix_fadvise", failing_fadvise, create=True
++            ),
++            patch.object(weight_utils.os, "POSIX_FADV_DONTNEED", 4, create=True),
++        ):
++            self.items[FP32_TABLE].read_rows_into(
++                dst, 3, drop_page_cache=True, num_threads=3, chunk_bytes=64
++            )
++        self.assertBytesEqual(dst, self.mmap[FP32_TABLE][3:13])
++
++    def test_page_cache_eviction_only_for_per_rank_tables(self):
++        for layout, expected in ((None, False), ("per_rank", True), ("shared", False)):
++            calls = []
++            with (
++                patch.object(
++                    weight_utils.os,
++                    "posix_fadvise",
++                    lambda *args: calls.append(args),
++                    create=True,
++                ),
++                patch.object(weight_utils.os, "POSIX_FADV_DONTNEED", 4, create=True),
++            ):
++                self._load_engram(2, 1, layout, self.items)
++            self.assertEqual(bool(calls), expected, layout)
++
++    def test_truncated_file_raises(self):
++        path = self.path + ".copy"
++        shutil.copyfile(self.path, path)
++        source = dict(host_resident_weights_iterator([path], (".embed.",)))[WEIGHT]
++        os.truncate(path, source.offset + 2 * source.row_bytes)
++
++        dst = torch.empty(2, DIM, dtype=torch.float8_e4m3fn)
++        source.read_rows_into(dst, 0)
++        self.assertBytesEqual(dst, self.tensors[WEIGHT][:2])
++        with self.assertRaises(EOFError):
++            source.read_rows_into(torch.empty_like(dst), 1)
++
++    def _load_engram(self, tp_size, tp_rank, layout, weights):
++        """Load WEIGHT and SCALE into one rank's EngramEmbedding."""
++        parallel = SimpleNamespace(tp_size=tp_size, tp_rank=tp_rank, tp_group=None)
++        with (
++            patch.object(engram, "get_parallel", return_value=parallel),
++            patch.object(engram, "_HostTable", _FakeHostTable),
++            envs.SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE.override(layout is not None),
++            envs.SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT.override(layout or "shared"),
++        ):
++            embed = engram.EngramEmbedding(NUM_ROWS, DIM, layer_id=1)
++        for param, name in ((embed.weight, WEIGHT), (embed.scale, SCALE)):
++            param.weight_loader(param, weights[name])
++        return embed
++
++    def test_engram_shards_match_mmap_path(self):
++        # Device rows, and both host-table layouts with weight and scale
++        # carved out of one host buffer.
++        for layout in (None, "per_rank", "shared"):
++            for tp_size in (1, 2, 3, 4):
++                for tp_rank in range(tp_size):
++                    msg = f"{layout=} {tp_size=} {tp_rank=}"
++                    via_mmap = self._load_engram(tp_size, tp_rank, layout, self.mmap)
++                    via_rows = self._load_engram(tp_size, tp_rank, layout, self.items)
++                    rows = slice(via_rows.row_start, via_rows.row_start + via_rows.rows)
++                    for name in ("weight", "scale"):
++                        actual = getattr(via_rows, name).data
++                        self.assertBytesEqual(actual, getattr(via_mmap, name).data, msg)
++                        own = actual[rows] if layout == "shared" else actual
++                        expected = self.tensors[WEIGHT if name == "weight" else SCALE]
++                        self.assertBytesEqual(own, expected[rows], msg)
++                        if layout == "shared":
++                            # Other ranks' rows are left untouched.
++                            others = torch.ones(NUM_ROWS, dtype=torch.bool)
++                            others[rows] = False
++                            untouched = actual[others].view(torch.uint8) == SENTINEL
++                            self.assertTrue(untouched.all(), msg)
++                    if layout is not None:
++                        self.assertTrue(via_rows.host_table.dirty, msg)
++
++    def test_rejects_mismatched_destinations(self):
++        source = self.items[WEIGHT]
++        for dst, row_start in (
++            (torch.empty(3, DIM, dtype=torch.float8_e5m2), 0),  # same size, wrong dtype
++            (torch.empty(3, DIM - 1, dtype=torch.float8_e4m3fn), 0),
++            (torch.empty(4, DIM, dtype=torch.float8_e4m3fn), NUM_ROWS - 3),
++            (torch.empty(DIM, 3, dtype=torch.float8_e4m3fn).t(), 0),
++        ):
++            with self.subTest(shape=tuple(dst.shape), row_start=row_start):
++                with self.assertRaises(ValueError):
++                    source.read_rows_into(dst, row_start)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/test/registered/unit/model_loader/test_instanttensor_loader.py b/test/registered/unit/model_loader/test_instanttensor_loader.py
+index 98bafba570c5b1daabcf32a060a05a36f6c4e9d8..60011dc686f047c63c3d22a0f301eb6feb1b0023 100644
+--- a/test/registered/unit/model_loader/test_instanttensor_loader.py
++++ b/test/registered/unit/model_loader/test_instanttensor_loader.py
+@@ -385,6 +385,9 @@ class TestInstantTensorHostResidentWeights(CustomTestCase):
+         self.assertCountEqual([name for name, _ in result], self.expected)
+         on_host = set()
+         for name, tensor in result:
++            if isinstance(tensor, weight_utils.SafetensorsRowSource):
++                rows, tensor = tensor, torch.empty(tensor.shape, dtype=tensor.dtype)
++                rows.read_rows_into(tensor, 0)
+             expected = self.expected[name]
+             self.assertEqual(
+                 (tensor.shape, tensor.dtype), (expected.shape, expected.dtype)
+@@ -397,6 +400,15 @@ class TestInstantTensorHostResidentWeights(CustomTestCase):
+ 
+     def test_engram_tables_stay_on_host(self):
+         result = self._load(self._dsv4_source(host_table=True))
++        row_sources = {
++            name
++            for name, tensor in result
++            if isinstance(tensor, weight_utils.SafetensorsRowSource)
++        }
++        self.assertEqual(
++            row_sources,
++            {"layers.1.engram.embed.weight", "layers.1.engram.embed.scale"},
++        )
+ 
+         self.assertEqual(self.instanttensor_calls, [[self.files[0], self.files[2]]])
+         # The Engram file's other tensor is read on the host but placed on the

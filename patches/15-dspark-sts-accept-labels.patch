@@ -1,0 +1,427 @@
+diff --git a/python/sglang/benchmark/dspark_sts_fit.py b/python/sglang/benchmark/dspark_sts_fit.py
+index ec8f094311a122de1fbd8dd595838b3a00c52e71..ecafc9f5e885883b6e23a9fc89a0727f1b05636f 100644
+--- a/python/sglang/benchmark/dspark_sts_fit.py
++++ b/python/sglang/benchmark/dspark_sts_fit.py
+@@ -51,12 +51,16 @@ def fit_sts_temperatures(
+     prefix_mask: torch.Tensor,
+     grid: torch.Tensor,
+     num_bins: int = 15,
++    observed_mask: Optional[torch.Tensor] = None,
+ ) -> dict[str, list[float]]:
+     logits = logits.to(torch.float64)
+     prefix_mask = prefix_mask.to(torch.float64)
+     num_samples, gamma = logits.shape
+     if num_samples == 0:
+         raise ValueError("fit_sts_temperatures requires at least one sample.")
++    if observed_mask is None:
++        observed_mask = torch.ones_like(prefix_mask)
++    observed_mask = observed_mask.bool()
+     grid_values = grid.to(torch.float64).tolist()
+ 
+     temperatures: list[float] = []
+@@ -67,12 +71,18 @@ def fit_sts_temperatures(
+     survival_fitted = torch.ones(num_samples, dtype=torch.float64)
+     for position in range(gamma):
+         position_logits = logits[:, position]
+-        position_target = prefix_mask[:, position]
++        # Score only samples whose prefix outcome at this position was observed.
++        observed = observed_mask[:, position]
++        if not bool(observed.any()):
++            raise ValueError(
++                f"No observed acceptance outcome at draft position {position}."
++            )
++        position_target = prefix_mask[observed, position]
+ 
+         survival_at_one = survival_at_one * torch.sigmoid(position_logits)
+         ece_before.append(
+             expected_calibration_error(
+-                probs=survival_at_one,
++                probs=survival_at_one[observed],
+                 targets=position_target,
+                 num_bins=num_bins,
+             )
+@@ -83,14 +93,16 @@ def fit_sts_temperatures(
+             position_logits / best_temperature
+         )
+         best_ece = expected_calibration_error(
+-            probs=best_survival, targets=position_target, num_bins=num_bins
++            probs=best_survival[observed],
++            targets=position_target,
++            num_bins=num_bins,
+         )
+         for temperature in grid_values[1:]:
+             candidate_survival = survival_fitted * torch.sigmoid(
+                 position_logits / temperature
+             )
+             candidate_ece = expected_calibration_error(
+-                probs=candidate_survival,
++                probs=candidate_survival[observed],
+                 targets=position_target,
+                 num_bins=num_bins,
+             )
+@@ -110,22 +122,33 @@ def fit_sts_temperatures(
+     }
+ 
+ 
+-def load_collected_shards(*, data_glob: str) -> tuple[torch.Tensor, torch.Tensor]:
++def load_collected_shards(
++    *, data_glob: str
++) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+     shard_paths = sorted(glob.glob(data_glob))
+     if not shard_paths:
+         raise ValueError(f"No STS data shards matched {data_glob!r}.")
+ 
+     logits_shards: list[torch.Tensor] = []
+     prefix_mask_shards: list[torch.Tensor] = []
++    observed_mask_shards: list[torch.Tensor] = []
+     shard_gamma: Optional[int] = None
+     for shard_path in shard_paths:
+         shard = torch.load(shard_path, map_location="cpu")
+         shard_logits = shard["logits"]
+         shard_prefix_mask = shard["prefix_mask"]
+-        if shard_logits.shape != shard_prefix_mask.shape:
++        # Shards without a mask are treated as fully observed.
++        shard_observed_mask = shard.get("observed_mask")
++        if shard_observed_mask is None:
++            shard_observed_mask = torch.ones_like(shard_prefix_mask)
++        if not (
++            shard_logits.shape == shard_prefix_mask.shape == shard_observed_mask.shape
++        ):
+             raise ValueError(
+-                f"Shard {shard_path!r} logits / prefix_mask shape mismatch: "
+-                f"{tuple(shard_logits.shape)} vs {tuple(shard_prefix_mask.shape)}."
++                f"Shard {shard_path!r} logits / prefix_mask / observed_mask shape "
++                f"mismatch: {tuple(shard_logits.shape)} vs "
++                f"{tuple(shard_prefix_mask.shape)} vs "
++                f"{tuple(shard_observed_mask.shape)}."
+             )
+         if shard_gamma is None:
+             shard_gamma = int(shard_logits.shape[1])
+@@ -136,8 +159,13 @@ def load_collected_shards(*, data_glob: str) -> tuple[torch.Tensor, torch.Tensor
+             )
+         logits_shards.append(shard_logits)
+         prefix_mask_shards.append(shard_prefix_mask)
++        observed_mask_shards.append(shard_observed_mask)
+ 
+-    return torch.cat(logits_shards, dim=0), torch.cat(prefix_mask_shards, dim=0)
++    return (
++        torch.cat(logits_shards, dim=0),
++        torch.cat(prefix_mask_shards, dim=0),
++        torch.cat(observed_mask_shards, dim=0),
++    )
+ 
+ 
+ def fit(
+@@ -147,7 +175,7 @@ def fit(
+     num_bins: int = 15,
+     gamma: Optional[int] = None,
+ ) -> None:
+-    logits, prefix_mask = load_collected_shards(data_glob=data_glob)
++    logits, prefix_mask, observed_mask = load_collected_shards(data_glob=data_glob)
+     resolved_gamma = int(logits.shape[1])
+     if gamma is not None and gamma != resolved_gamma:
+         raise ValueError(
+@@ -160,6 +188,7 @@ def fit(
+         prefix_mask=prefix_mask,
+         grid=default_temperature_grid(),
+         num_bins=num_bins,
++        observed_mask=observed_mask,
+     )
+     calibration = DSparkStsCalibration(
+         temperatures=result["temperatures"],
+@@ -193,7 +222,7 @@ def main() -> None:
+         "--data-glob",
+         required=True,
+         help="Glob of collected .pt shards, each a dict with [n, gamma] "
+-        "'logits' and 'prefix_mask' tensors.",
++        "'logits', 'prefix_mask' and (optional) 'observed_mask' tensors.",
+     )
+     parser.add_argument(
+         "--out",
+diff --git a/python/sglang/srt/speculative/dspark_components/dspark_observability.py b/python/sglang/srt/speculative/dspark_components/dspark_observability.py
+index 0a1c026f55ca5703f8eb4e06edeb0f167595b31c..bb9754c1d7f20291f7492751ed4ce0babda559a3 100644
+--- a/python/sglang/srt/speculative/dspark_components/dspark_observability.py
++++ b/python/sglang/srt/speculative/dspark_components/dspark_observability.py
+@@ -766,7 +766,14 @@ class DsparkStepObservers:
+                 "SGLANG_SIMULATE_ACC_LEN (simulated correct_len breaks the "
+                 "accept-probability bookkeeping of the estimator)."
+             )
+-        self._sts_collect_path = envs.SGLANG_DSPARK_STS_COLLECT_PATH.get()
++        self._sts_collect_path = (
++            envs.SGLANG_DSPARK_STS_COLLECT_PATH.get() if tp_rank == 0 else ""
++        )
++        if self._simulate_acc_len > 0 and self._sts_collect_path:
++            raise ValueError(
++                "SGLANG_DSPARK_STS_COLLECT_PATH cannot be combined with "
++                "SGLANG_SIMULATE_ACC_LEN (STS labels come from correct_len)."
++            )
+         self._sts_recorder: Optional[StsDataRecorder] = None
+ 
+     # --- step lifecycle -------------------------------------------------
+@@ -839,11 +846,7 @@ class DsparkStepObservers:
+     ) -> None:
+         planner = self._planner
+         if not proposal_folded:
+-            self._maybe_record_sts_collect(
+-                verify_ids_2d=verify_ids_2d,
+-                target_logits=target_logits,
+-                bs=bs,
+-            )
++            self._maybe_record_sts_collect(correct_len=correct_len, layout=layout)
+             self._confidence_probe.maybe_observe(
+                 carries_confidence=planner.carries_confidence,
+                 is_compact_mode=planner.is_compact_mode,
+@@ -926,13 +929,7 @@ class DsparkStepObservers:
+                 )
+             )
+ 
+-    def _maybe_record_sts_collect(
+-        self,
+-        *,
+-        verify_ids_2d: torch.Tensor,
+-        target_logits: Optional[torch.Tensor],
+-        bs: int,
+-    ) -> None:
++    def _maybe_record_sts_collect(self, *, correct_len: torch.Tensor, layout) -> None:
+         if not self._sts_collect_path:
+             return
+         if not self._planner.carries_confidence:
+@@ -946,14 +943,10 @@ class DsparkStepObservers:
+                 gamma=self._gamma,
+                 flush_every=_STS_COLLECT_FLUSH_EVERY,
+             )
+-        target_predict = torch.argmax(target_logits, dim=-1).view(
+-            bs, self._verify_num_draft_tokens
+-        )
+-        num_correct_drafts, _ = compute_dflash_correct_drafts_and_bonus(
+-            candidates=verify_ids_2d,
+-            target_predict=target_predict,
+-        )
++        # Label with the step's actual acceptance (greedy or rejection
++        # sampling), capped at the compact verify window.
+         self._sts_recorder.record(
+             confidence_raw=confidence_raw,
+-            num_correct_drafts=num_correct_drafts,
++            num_correct_drafts=correct_len,
++            verify_lens=None if layout is None else layout.verify_lens,
+         )
+diff --git a/python/sglang/srt/speculative/dspark_components/dspark_sts.py b/python/sglang/srt/speculative/dspark_components/dspark_sts.py
+index 01d1a884267a97ffabbc73a8dc7c464fb0cdc58d..db2872c12b47c06952b445451def56fbdbb12b3e 100644
+--- a/python/sglang/srt/speculative/dspark_components/dspark_sts.py
++++ b/python/sglang/srt/speculative/dspark_components/dspark_sts.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ from pathlib import Path
++from typing import Optional
+ 
+ import msgspec
+ import torch
+@@ -43,10 +44,15 @@ class StsDataRecorder:
+         self.flush_every = int(flush_every)
+         self._logits_buffer: list[torch.Tensor] = []
+         self._prefix_mask_buffer: list[torch.Tensor] = []
++        self._observed_mask_buffer: list[torch.Tensor] = []
+         self._shard_ct = 0
+ 
+     def record(
+-        self, *, confidence_raw: torch.Tensor, num_correct_drafts: torch.Tensor
++        self,
++        *,
++        confidence_raw: torch.Tensor,
++        num_correct_drafts: torch.Tensor,
++        verify_lens: Optional[torch.Tensor] = None,
+     ) -> None:
+         logits = confidence_raw.detach().to(device="cpu", dtype=torch.float32)
+         positions = torch.arange(self.gamma).view(1, -1)
+@@ -54,8 +60,19 @@ class StsDataRecorder:
+             num_correct_drafts.detach().to(device="cpu", dtype=torch.int64).view(-1, 1)
+         )
+         prefix_mask = (positions < counts).to(torch.float32)
++        if verify_lens is None:
++            observed_mask = torch.ones_like(prefix_mask)
++        else:
++            # A verify window of length L checks only its first L - 1 drafts.
++            # Later positions are unobserved for every row: keeping only rows
++            # rejected inside the window would bias them toward rejection.
++            caps = (
++                verify_lens.detach().to(device="cpu", dtype=torch.int64).view(-1, 1) - 1
++            )
++            observed_mask = (positions < caps).to(torch.float32)
+         self._logits_buffer.append(logits)
+         self._prefix_mask_buffer.append(prefix_mask)
++        self._observed_mask_buffer.append(observed_mask)
+         if len(self._logits_buffer) >= self.flush_every:
+             self.flush()
+ 
+@@ -68,9 +85,11 @@ class StsDataRecorder:
+             {
+                 "logits": torch.cat(self._logits_buffer, dim=0),
+                 "prefix_mask": torch.cat(self._prefix_mask_buffer, dim=0),
++                "observed_mask": torch.cat(self._observed_mask_buffer, dim=0),
+             },
+             shard_path,
+         )
+         self._logits_buffer.clear()
+         self._prefix_mask_buffer.clear()
++        self._observed_mask_buffer.clear()
+         self._shard_ct += 1
+diff --git a/test/registered/spec/dspark/test_dspark_sts.py b/test/registered/spec/dspark/test_dspark_sts.py
+index b7b890c65bca0e08e1fefd8c21eafc48e4778776..ddb82134ef0c5f31eb2398b8dd2c93615eb43068 100644
+--- a/test/registered/spec/dspark/test_dspark_sts.py
++++ b/test/registered/spec/dspark/test_dspark_sts.py
+@@ -1,15 +1,22 @@
++import contextlib
++import io
+ import tempfile
+ import unittest
+ from pathlib import Path
++from types import SimpleNamespace
+ 
+ import torch
+ 
+ from sglang.benchmark.dspark_sts_fit import (
+     default_temperature_grid,
+     expected_calibration_error,
++    fit,
+     fit_sts_temperatures,
+ )
+ from sglang.srt.models.dspark import DSparkConfidenceHead
++from sglang.srt.speculative.dspark_components.dspark_observability import (
++    DsparkStepObservers,
++)
+ from sglang.srt.speculative.dspark_components.dspark_sts import (
+     DSparkStsCalibration,
+     StsDataRecorder,
+@@ -115,6 +122,41 @@ class TestFitStsTemperatures(CustomTestCase):
+         mean_after = sum(result["ece_after"]) / gamma
+         self.assertLess(mean_after, 0.25 * mean_before)
+ 
++    def test_compact_verify_censoring_is_masked(self):
++        # Compact verify checks only the first verify_len - 1 drafts; positions
++        # past that cap must be masked, not counted as rejections.
++        torch.manual_seed(0)
++        num_samples, gamma, scale = 60000, 4, 2.5
++        base_logit = torch.tensor([2.0, 1.2, 0.8, 0.4])
++        true_logit = base_logit[None, :] + torch.randn(num_samples, gamma) * 0.5
++        accept = torch.rand(num_samples, gamma) < torch.sigmoid(true_logit)
++        caps = torch.randint(1, gamma + 1, (num_samples, 1))
++        num_correct = torch.minimum(
++            accept.cumprod(dim=1).sum(dim=1, keepdim=True), caps
++        )
++        positions = torch.arange(gamma)[None, :]
++
++        shard = {
++            "logits": (true_logit * scale).to(torch.float32),
++            "prefix_mask": (positions < num_correct).to(torch.float32),
++        }
++
++        def fit_shard(shard):
++            with tempfile.TemporaryDirectory() as tmp:
++                torch.save(shard, Path(tmp) / "sts.0.pt")
++                out = Path(tmp) / "sts.json"
++                with contextlib.redirect_stdout(io.StringIO()):
++                    fit(data_glob=str(Path(tmp) / "sts.*.pt"), out=out)
++                return DSparkStsCalibration.from_json(out.read_text()).temperatures
++
++        observed_mask = (positions < caps).to(torch.float32)
++        for temperature in fit_shard({**shard, "observed_mask": observed_mask}):
++            self.assertGreater(temperature, scale / 1.5)
++            self.assertLess(temperature, scale * 1.5)
++        # Without the mask, capped positions count as rejections and the fitted
++        # temperatures inflate.
++        self.assertGreater(fit_shard(shard)[-1], scale * 1.5)
++
+ 
+ class TestStsDataRecorder(CustomTestCase):
+     def test_builds_prefix_mask_and_writes_shard(self):
+@@ -136,6 +178,89 @@ class TestStsDataRecorder(CustomTestCase):
+             shard = torch.load(f"{stem}.0.pt")
+         self.assertTrue(torch.equal(shard["prefix_mask"], expected_prefix_mask))
+         self.assertTrue(torch.equal(shard["logits"], confidence_raw.to(torch.float32)))
++        self.assertTrue(torch.equal(shard["observed_mask"], torch.ones(4, gamma)))
++
++    def test_masks_positions_past_the_verify_window(self):
++        gamma = 4
++        with tempfile.TemporaryDirectory() as tmp:
++            stem = str(Path(tmp) / "shard")
++            recorder = StsDataRecorder(path_stem=stem, gamma=gamma, flush_every=10)
++            recorder.record(
++                confidence_raw=torch.randn(4, gamma),
++                num_correct_drafts=torch.tensor([0, 2, 2, 1]),
++                verify_lens=torch.tensor([3, 3, 5, 2], dtype=torch.int32),
++            )
++            recorder.flush()
++            shard = torch.load(f"{stem}.0.pt")
++        expected_prefix_mask = torch.tensor(
++            [[0, 0, 0, 0], [1, 1, 0, 0], [1, 1, 0, 0], [1, 0, 0, 0]],
++            dtype=torch.float32,
++        )
++        expected_observed_mask = torch.tensor(
++            [[1, 1, 0, 0], [1, 1, 0, 0], [1, 1, 1, 1], [1, 0, 0, 0]],
++            dtype=torch.float32,
++        )
++        self.assertTrue(torch.equal(shard["prefix_mask"], expected_prefix_mask))
++        self.assertTrue(torch.equal(shard["observed_mask"], expected_observed_mask))
++
++
++class TestStsCollectLabels(CustomTestCase):
++    def test_labels_come_from_the_step_acceptance(self):
++        # Greedy argmax accepts every draft, but the step accepted fewer
++        # (rejection sampling); compact verify checked only verify_len - 1.
++        gamma, bs = 3, 2
++        width = gamma + 1
++        drafts = torch.tensor([[11, 12, 13], [21, 22, 23]])
++        verify_ids_2d = torch.cat([torch.tensor([[1], [2]]), drafts], dim=1)
++        target_predict = torch.cat([drafts, torch.zeros(bs, 1, dtype=torch.int64)], 1)
++        target_logits = torch.nn.functional.one_hot(target_predict, 32).float()
++        confidence_raw = torch.randn(bs, gamma)
++
++        observers = object.__new__(DsparkStepObservers)
++        observers._gamma = gamma
++        observers._verify_num_draft_tokens = width
++        observers._planner = SimpleNamespace(
++            carries_confidence=True,
++            last_confidence_raw=confidence_raw,
++            is_compact_mode=True,
++        )
++        observers._confidence_probe = SimpleNamespace(maybe_observe=lambda **_: None)
++        observers._block_accept_recorder = None
++        observers._info_dumper = SimpleNamespace(enabled=False)
++        observers._sts_recorder = None
++        with tempfile.TemporaryDirectory() as tmp:
++            observers._sts_collect_path = str(Path(tmp) / "shard")
++            observers.observe_verify_step(
++                forward_ct=0,
++                reqs=[],
++                bs=bs,
++                proposal_folded=False,
++                verify_ids_2d=verify_ids_2d,
++                target_logits=target_logits.view(bs * width, -1),
++                layout=SimpleNamespace(verify_lens=torch.tensor([4, 2])),
++                confidence=None,
++                prefix_lens=None,
++                draft_tokens=drafts,
++                draft_block=None,
++                sampling_info=None,
++                correct_len=torch.tensor([1, 0]),
++                cap_trim_lens=None,
++                bonus=None,
++                commit_lens=None,
++                verify_token_budget=None,
++                req_pool_indices=None,
++                verify_tier_num_tokens=bs * width,
++                dp_tier_num_tokens=None,
++            )
++            observers._sts_recorder.flush()
++            shard = torch.load(str(Path(tmp) / "shard.0.pt"))
++        self.assertTrue(torch.equal(shard["logits"], confidence_raw))
++        self.assertTrue(
++            torch.equal(shard["prefix_mask"], torch.tensor([[1.0, 0, 0], [0, 0, 0]]))
++        )
++        self.assertTrue(
++            torch.equal(shard["observed_mask"], torch.tensor([[1.0, 1, 1], [1, 0, 0]]))
++        )
+ 
+ 
+ if __name__ == "__main__":

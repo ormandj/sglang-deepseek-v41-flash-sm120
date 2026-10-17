@@ -1,0 +1,166 @@
+diff --git a/python/sglang/kernels/ops/attention/flash_mla_sm120.py b/python/sglang/kernels/ops/attention/flash_mla_sm120.py
+index c57194d3c5bad15dd76c908860a715021add1fcd..846796bf72b322778b764c3f4c5ced8dbb32f0d9 100644
+--- a/python/sglang/kernels/ops/attention/flash_mla_sm120.py
++++ b/python/sglang/kernels/ops/attention/flash_mla_sm120.py
+@@ -498,24 +498,25 @@ def _split_kv_pages_to_64(
+ 
+     from sglang.srt.runtime_context import get_resources
+ 
+-    # Pre-allocated grow-only buffer for page-split output per device.
++    # The output buffer and page mask are keyed by their size and never
++    # replaced: captured CUDA graphs keep writing to their addresses. Pools of
++    # different sizes (a target and a draft model's) each get their own.
+     dev = kv_u8.device
+     buffers = get_resources().buffers
+-    key = f"flash_mla_sm120_split:{dev}"
+-    buf = buffers.get(key)
+-    if buf is None or buf.shape[0] < num_dst_pages:
++    key = f"flash_mla_sm120_split:{dev}:{num_dst_pages}"
++    out = buffers.get(key)
++    if out is None:
+         # The first allocation can happen under inference mode (autotune), but
+         # the buffer is written again during CUDA graph capture outside
+         # inference mode, where an inference tensor cannot be mutated.
+         with torch.inference_mode(False):
+-            buf = torch.empty(
++            out = torch.empty(
+                 num_dst_pages,
+                 _BYTES_PER_DST_PAGE_PADDED,
+                 dtype=torch.uint8,
+                 device=dev,
+             )
+-        buffers[key] = buf
+-    out = buf[:num_dst_pages]
++        buffers[key] = out
+ 
+     # Get raw 2D view of source
+     src_2d = kv_u8
+@@ -528,19 +529,18 @@ def _split_kv_pages_to_64(
+     use_mask = touched_indices is not None and touched_indices.numel() > 0
+     mask_ptr = src_2d  # dummy, never dereferenced when HAS_MASK is False
+     if use_mask:
+-        # Persistent per-device int8 mask, zeroed each call (cheap memset,
++        # Persistent int8 mask, zeroed each call (cheap memset,
+         # captured cleanly by CUDA graph). 1 = page is referenced this step.
+-        mkey = f"flash_mla_sm120_mask:{dev}"
+-        mbuf = buffers.get(mkey)
+-        if mbuf is None or mbuf.shape[0] < N:
++        mkey = f"flash_mla_sm120_mask:{dev}:{N}"
++        mask = buffers.get(mkey)
++        if mask is None:
+             # The first allocation can happen under inference mode (autotune),
+             # but the buffer is zeroed again later during CUDA graph capture
+             # outside inference mode -- an inference tensor cannot be mutated
+             # there, so force a normal tensor.
+             with torch.inference_mode(False):
+-                mbuf = torch.empty(N, dtype=torch.int8, device=dev)
+-            buffers[mkey] = mbuf
+-        mask = mbuf[:N]
++                mask = torch.empty(N, dtype=torch.int8, device=dev)
++            buffers[mkey] = mask
+         mask.zero_()
+         idx_flat = touched_indices.reshape(-1).contiguous()
+         if idx_flat.dtype != torch.int32:
+diff --git a/test/registered/kernels/ops/attention/test_flash_mla_backends.py b/test/registered/kernels/ops/attention/test_flash_mla_backends.py
+index d105bdfc77a500caaeaf016e6a5fd89d74040d99..ab981df341191fdb9e62f60e2db9d3a637614005 100644
+--- a/test/registered/kernels/ops/attention/test_flash_mla_backends.py
++++ b/test/registered/kernels/ops/attention/test_flash_mla_backends.py
+@@ -619,8 +619,8 @@ class TestTouchedPageSplit(CustomTestCase):
+         # bytes below are the ones the kernel writes into.
+         dev = k_cache.device
+         buffers = get_resources().buffers
+-        split_key = f"flash_mla_sm120_split:{dev}"
+-        mask_key = f"flash_mla_sm120_mask:{dev}"
++        split_key = f"flash_mla_sm120_split:{dev}:{num_pages * ratio}"
++        mask_key = f"flash_mla_sm120_mask:{dev}:{num_pages}"
+         missing = object()
+         for key in (split_key, mask_key):
+             old = buffers.get(key, missing)
+@@ -709,6 +709,87 @@ class TestTouchedPageSplit(CustomTestCase):
+         )
+ 
+ 
++class TestPageSplitGraphBuffers(CustomTestCase):
++    """A graph captured on one SWA pool keeps its page-split buffers.
++
++    A target and a draft model split pools of different sizes. A graph
++    captured on the smaller one keeps writing the buffers it captured, so a
++    later eager split of a larger pool must not replace them: replays would
++    write freed memory while eager readers got buffers the graph never updates.
++    """
++
++    @classmethod
++    def setUpClass(cls):
++        if not torch.cuda.is_available():
++            raise unittest.SkipTest("CUDA required")
++        cls.device = torch.device("cuda")
++
++    def test_larger_pool_keeps_captured_buffers(self):
++        buffers = get_resources().buffers
++        saved = {k: v for k, v in buffers.items() if k.startswith("flash_mla_sm120_")}
++        for key in saved:
++            del buffers[key]
++        try:
++            self._check_larger_pool_keeps_captured_buffers(buffers)
++        finally:
++            for key in [k for k in buffers if k.startswith("flash_mla_sm120_")]:
++                del buffers[key]
++            buffers.update(saved)
++
++    def _check_larger_pool_keeps_captured_buffers(self, buffers):
++        ratio = _PBS_SRC // _PBS_DST
++        small, _ = _build_kvcache(2, _PBS_SRC, device=self.device, seed=3)
++        large, _ = _build_kvcache(5, _PBS_SRC, device=self.device, seed=4)
++        small_u8, large_u8 = small.view(torch.uint8), large.view(torch.uint8)
++        small_ids = torch.tensor(
++            [_PBS_SRC + 7, -1], dtype=torch.int32, device=self.device
++        )
++        large_ids = torch.tensor(
++            [0, 4 * _PBS_SRC], dtype=torch.int32, device=self.device
++        )
++
++        def split_small():
++            return _split_kv_pages_to_64(small_u8, _PBS_SRC, touched_indices=small_ids)
++
++        stream = torch.cuda.Stream()
++        stream.wait_stream(torch.cuda.current_stream())
++        with torch.cuda.stream(stream):
++            split_small()
++        torch.cuda.current_stream().wait_stream(stream)
++        graph = torch.cuda.CUDAGraph()
++        with torch.cuda.graph(graph):
++            split_small()
++        captured = {k: v.data_ptr() for k, v in buffers.items()}
++
++        _split_kv_pages_to_64(large_u8, _PBS_SRC, touched_indices=large_ids)
++        for key, ptr in captured.items():
++            self.assertEqual(buffers[key].data_ptr(), ptr, f"{key} was replaced")
++
++        # Replay with a different touched page and new contents: the captured
++        # mask must select it and the captured output must receive it.
++        out = split_small()
++        small_ids[0] = 5
++        small_u8[0].copy_(large_u8[3])
++        graph.replay()
++        torch.cuda.synchronize()
++
++        src = large_u8[3].reshape(-1)
++        dst = out.reshape(out.shape[0], -1)
++        data_per_sub = _PBS_DST * _NOPE_ROPE_STRIDE
++        scale_per_sub = _PBS_DST * _SCALE_STRIDE
++        for sub in range(ratio):
++            scale_off = _PBS_SRC * _NOPE_ROPE_STRIDE + sub * scale_per_sub
++            expected = torch.cat(
++                [
++                    src[sub * data_per_sub : (sub + 1) * data_per_sub],
++                    src[scale_off : scale_off + scale_per_sub],
++                ]
++            )
++            torch.testing.assert_close(
++                dst[sub, :_BYTES_PER_DST_PAGE], expected, atol=0, rtol=0
++            )
++
++
+ if __name__ == "__main__":
+     import sys
+ 

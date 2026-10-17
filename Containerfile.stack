@@ -1,0 +1,30 @@
+# DeepSeek V4.1 Flash on SM120, stack image. The vendor base supplies CUDA
+# and PyTorch; FlashInfer with its cubin bundle, DeepGEMM and Triton are rebuilt
+# from the sources and series in stack.json (written by scripts/stack-key.sh from
+# stack.lock.json). Candidates build FROM this image (Containerfile) and reuse it
+# while its inputs are unchanged.
+ARG BASE_IMAGE=docker.io/lmsysorg/sglang@sha256:055d68852fce159435637a7e62b0f5bec0231fb24d595d981a4157ea98150dce
+FROM ${BASE_IMAGE} AS stack
+ARG FLASHINFER_KEY
+# libdw-dev: DeepJIT includes elfutils/libdwfl.h for native backtraces.
+# jq: candidates recompute the stack key against their lock.
+RUN apt-get update && apt-get install -y --no-install-recommends libdw-dev jq \
+    && rm -rf /var/lib/apt/lists/*
+COPY stack.json /opt/dsv41-platform/stack.json
+COPY build /opt/dsv41-platform/scripts
+COPY patches/fi-*.patch patches/tr-*.patch /opt/dsv41-platform/patches/
+# JIT targets SM120 only; FlashInfer must use the bundled cubins, never download.
+# Its JIT objects live in a cache directory keyed by base image, FlashInfer tree
+# and target architectures (stack.json flashinfer_key): a candidate on the same
+# FlashInfer reuses them, a FlashInfer change starts a fresh directory.
+# The vendor's build-identity variables describe a different image; clear them.
+ENV FLASHINFER_CUDA_ARCH_LIST=12.0f \
+    TVM_FFI_CUDA_ARCH_LIST=12.0 \
+    FLASHINFER_NO_DOWNLOAD=1 \
+    FLASHINFER_WORKSPACE_BASE=/root/.cache/sglang/flashinfer-${FLASHINFER_KEY} \
+    FLASHINFER_VERSION= \
+    SGLANG_BUILD_COMMIT= \
+    SGLANG_BUILD_URL= \
+    SGLANG_IMAGE_TAG=
+RUN test -n "${FLASHINFER_KEY}" && test "${FLASHINFER_KEY}" = "$(jq -r .flashinfer_key /opt/dsv41-platform/stack.json)" \
+    && bash /opt/dsv41-platform/scripts/build-base.sh

@@ -1,0 +1,791 @@
+diff --git a/python/sglang/kernels/ops/gemm/__init__.py b/python/sglang/kernels/ops/gemm/__init__.py
+index b7c826d8aacf6ae737bf5c789fa9dac607d1cfe7..77e7e84b4e43a0df8291e9e42510f923a62db33b 100644
+--- a/python/sglang/kernels/ops/gemm/__init__.py
++++ b/python/sglang/kernels/ops/gemm/__init__.py
+@@ -507,6 +507,21 @@ register_kernel(
+         ),
+     )
+ )
++register_kernel(
++    KernelSpec(
++        op="gemm.sm120_mxfp8_skinny_gemm",
++        backend=KernelBackend.TRITON,
++        target="sglang.kernels.ops.gemm.sm120_mxfp8_skinny_gemm:mxfp8_skinny_gemm",
++        capabilities=_SM120,
++        format_signature=FormatSignature(
++            supported_dtypes=("float8_e4m3fn", "bfloat16", "float16", "float32"),
++            description=(
++                "split-K MXFP8 [m, k] @ [n, k].T for m <= 128 with 32x32 "
++                "power-of-two weight block scales"
++            ),
++        ),
++    )
++)
+ register_kernel(
+     KernelSpec(
+         op="gemm.gptq_marlin_gemm",
+diff --git a/python/sglang/kernels/ops/gemm/sm120_mxfp8_skinny_gemm.py b/python/sglang/kernels/ops/gemm/sm120_mxfp8_skinny_gemm.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..9889db9fc1a1984722cbf4bea4f61feb6b3e08ca
+--- /dev/null
++++ b/python/sglang/kernels/ops/gemm/sm120_mxfp8_skinny_gemm.py
+@@ -0,0 +1,219 @@
++"""Split-K MXFP8 GEMM for decode-sized M on SM120.
++
++FlashInfer's SM120 MXFP8 CUTLASS GEMM has no split-K, so decode-sized GEMMs
++with small N run on few CTAs. This kernel can split K across CTAs and reduces
++the partial sums deterministically (the last CTA of each N tile adds them in
++split order). BN and SPLIT depend only on (N, K), so a row's result
++does not depend on the batch size.
++
++The MMA is the native block-scaled one (tl.dot_scaled, E4M3 operands with UE8M0
++scales per 32-wide K block, FP32 accumulate).
++
++The weight keeps its block-FP8 checkpoint layout: E4M3 [N, K] with FP32
++power-of-two block scales [ceil(N / 32), K / 32] (32x32 blocks). The activation
++is either BF16/FP16/FP32, quantized in-kernel bit-identically to FlashInfer's
++mxfp8_quantize (CuTe-DSL backend), or an already quantized E4M3 tensor with
++UE8M0 scales in FlashInfer's 128x4 swizzled layout.
++"""
++
++from typing import Optional, Tuple
++
++import torch
++import triton
++import triton.language as tl
++
++from sglang.kernels.ops.layernorm.mxfp8_epilogue import ue8m0_scale
++
++# Linear layers dispatch rows up to this count to the kernel.
++MAX_M = 16
++
++
++@triton.jit
++def _mxfp8_skinny_gemm_kernel(
++    a_ptr,
++    a_sf_ptr,
++    w_ptr,
++    w_s_ptr,
++    out_ptr,
++    ws_ptr,
++    cnt_ptr,
++    M,
++    N,
++    K,
++    stride_am,
++    stride_om,
++    sf_k_tiles,
++    stride_wsn,
++    BM: tl.constexpr,
++    BN: tl.constexpr,
++    BK: tl.constexpr,
++    SPLIT: tl.constexpr,
++    K_PER_SPLIT: tl.constexpr,
++    FUSE_QUANT: tl.constexpr,
++):
++    pid_n = tl.program_id(0)
++    pid_k = tl.program_id(1)
++    offs_m = tl.arange(0, BM)
++    offs_n = pid_n * BN + tl.arange(0, BN)
++    m_mask = offs_m < M
++    n_mask = offs_n < N
++    acc = tl.zeros((BM, BN), dtype=tl.float32)
++    k0 = pid_k * K_PER_SPLIT
++    w_rows = w_ptr + offs_n[:, None] * K
++    w_s_rows = w_s_ptr + (offs_n // 32) * stride_wsn
++    a_rows = a_ptr + offs_m[:, None] * stride_am
++    # FlashInfer 128x4 swizzled UE8M0 layout: row part of the offset.
++    sf_row = (
++        (offs_m // 128) * (sf_k_tiles * 512)
++        + (offs_m % 32) * 16
++        + ((offs_m % 128) // 32) * 4
++    )
++    KB: tl.constexpr = BK // 32
++    for kk in range(k0, k0 + K_PER_SPLIT, BK):
++        offs_k = kk + tl.arange(0, BK)
++        offs_kb = kk // 32 + tl.arange(0, KB)
++        w = tl.load(w_rows + offs_k[None, :], mask=n_mask[:, None], other=0.0)
++        # FP32 power-of-two block scale -> its UE8M0 exponent byte.
++        w_bits = tl.load(
++            w_s_rows[:, None] + offs_kb[None, :], mask=n_mask[:, None], other=1.0
++        ).to(tl.int32, bitcast=True)
++        w_e = ((w_bits >> 23) & 0xFF).to(tl.uint8)
++        if FUSE_QUANT:
++            x = tl.load(a_rows + offs_k[None, :], mask=m_mask[:, None], other=0.0).to(
++                tl.float32
++            )
++            x3 = tl.reshape(x, (BM, KB, 32))
++            sf, inv = ue8m0_scale(tl.max(tl.abs(x3), axis=2))
++            q = tl.minimum(tl.maximum(x3 * inv[:, :, None], -448.0), 448.0)
++            a = tl.reshape(q.to(tl.float8e4nv), (BM, BK))
++            a_e = sf.to(tl.uint8)
++        else:
++            a = tl.load(a_rows + offs_k[None, :], mask=m_mask[:, None], other=0.0)
++            kb = offs_kb[None, :]
++            a_e = tl.load(
++                a_sf_ptr + sf_row[:, None] + (kb // 4) * 512 + (kb % 4),
++                mask=m_mask[:, None],
++                other=0,
++            )
++        acc = tl.dot_scaled(a, a_e, "e4m3", tl.trans(w), w_e, "e4m3", acc)
++
++    out_offs = offs_m[:, None] * stride_om + offs_n[None, :]
++    out_mask = m_mask[:, None] & n_mask[None, :]
++    if SPLIT == 1:
++        tl.store(out_ptr + out_offs, acc.to(out_ptr.dtype.element_ty), mask=out_mask)
++    else:
++        ws_offs = offs_m[:, None] * N + offs_n[None, :]
++        tl.store(ws_ptr + pid_k * M * N + ws_offs, acc, mask=out_mask)
++        tl.debug_barrier()
++        prev = tl.atomic_add(cnt_ptr + pid_n, 1, sem="acq_rel", scope="gpu")
++        if prev == SPLIT - 1:
++            # Last CTA of this N tile: add the partials in split order.
++            total = tl.zeros((BM, BN), dtype=tl.float32)
++            for s in range(SPLIT):
++                total += tl.load(
++                    ws_ptr + s * M * N + ws_offs,
++                    mask=out_mask,
++                    other=0.0,
++                    cache_modifier=".cg",
++                )
++            tl.store(
++                out_ptr + out_offs, total.to(out_ptr.dtype.element_ty), mask=out_mask
++            )
++            tl.atomic_xchg(cnt_ptr + pid_n, 0, sem="relaxed", scope="gpu")
++
++
++# (N, K) -> (BN, SPLIT, BK), measured on RTX PRO 6000 Blackwell (188 SMs) with
++# cold weights for M = 6..16. Only these shapes are dispatched from linear layers.
++# The DeepSeek-V4 shared expert stays on CUTLASS: it overlaps the routed MoE on
++# a side stream, where a many-CTA kernel slowed decode.
++_TUNED = {
++    (1792, 5120): (32, 8, 64),  # DeepSeek-V4.1-Flash wqkv_a
++    (8192, 1280): (64, 1, 128),  # DeepSeek-V4.1-Flash TP4 wq_b
++    (5120, 2048): (32, 1, 256),  # DeepSeek-V4.1-Flash TP4 wo_b
++    (25600, 6144): (64, 1, 128),  # DeepSeek-V4.1-Flash Engram wkv
++    (1280, 5120): (32, 8, 128),  # DeepSeek-V4.1-Flash DSpark draft wq_a
++    (512, 5120): (32, 10, 128),  # DeepSeek-V4.1-Flash DSpark draft wkv
++    (5120, 15360): (64, 4, 128),  # DeepSeek-V4.1-Flash DSpark draft main_proj
++}
++
++
++def tuned_config(n: int, k: int) -> Optional[Tuple[int, int, int]]:
++    """(BN, SPLIT, BK) for a tuned (N, K), else None."""
++    return _TUNED.get((n, k))
++
++
++def mxfp8_skinny_gemm(
++    a: torch.Tensor,
++    weight: torch.Tensor,
++    weight_block_scale: torch.Tensor,
++    counters: Optional[torch.Tensor] = None,
++    a_sf: Optional[torch.Tensor] = None,
++    out_dtype: torch.dtype = torch.bfloat16,
++) -> torch.Tensor:
++    """out[M, N] = mxfp8(a) @ mxfp8(weight).T for a tuned (N, K) and M <= 128.
++
++    a: BF16/FP16/FP32 [M, K] (quantized in-kernel) or E4M3 [M, K] with `a_sf`
++    (UE8M0, FlashInfer 128x4 swizzled). weight: E4M3 [N, K].
++    weight_block_scale: FP32 power-of-two scales [ceil(N / 32), K / 32].
++    counters: only for shapes that split K; a contiguous int32 tensor of at
++    least ceil(N / BN) zeros on the device of `a`, used by one stream at a
++    time; the kernel leaves them zero.
++    """
++    m, k = a.shape
++    n = weight.shape[0]
++    assert 0 < m <= 128 and weight.shape[1] == k
++    assert weight_block_scale.dtype == torch.float32
++    assert weight_block_scale.shape == (triton.cdiv(n, 32), k // 32)
++    assert weight_block_scale.stride(1) == 1
++    fuse_quant = a_sf is None
++    if fuse_quant:
++        assert a.dtype in (torch.bfloat16, torch.float16, torch.float32)
++    else:
++        assert a.dtype == torch.float8_e4m3fn and a_sf.dtype == torch.uint8
++        assert a_sf.is_contiguous()
++    assert a.stride(1) == 1 and weight.is_contiguous()
++    bn, split, bk = _TUNED[(n, k)]
++    bm = 16 if m <= 16 else 32 if m <= 32 else 64 if m <= 64 else 128
++    tiles_n = triton.cdiv(n, bn)
++    if split > 1 and (
++        counters is None
++        or counters.dtype != torch.int32
++        or counters.device != a.device
++        or not counters.is_contiguous()
++        or counters.numel() < tiles_n
++    ):
++        raise ValueError(
++            f"(N, K) = ({n}, {k}) splits K, so counters must be a contiguous int32 "
++            f"tensor of at least {tiles_n} zeros on {a.device}"
++        )
++    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
++    ws = (
++        torch.empty((split, m, n), dtype=torch.float32, device=a.device)
++        if split > 1
++        else out
++    )
++    _mxfp8_skinny_gemm_kernel[(tiles_n, split)](
++        a,
++        a_sf if a_sf is not None else a,
++        weight,
++        weight_block_scale,
++        out,
++        ws,
++        counters if split > 1 else out,
++        m,
++        n,
++        k,
++        a.stride(0),
++        out.stride(0),
++        triton.cdiv(k // 32, 4),
++        weight_block_scale.stride(0),
++        BM=bm,
++        BN=bn,
++        BK=bk,
++        SPLIT=split,
++        K_PER_SPLIT=k // split,
++        FUSE_QUANT=fuse_quant,
++        num_warps=4,
++        num_stages=3,
++    )
++    return out
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index db80063997a32d295e7486ab57c1ff3939a9c5eb..46d30c9fbc34e41b4319753d95064090f8262011 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -1060,6 +1060,11 @@ class Envs:
+     # kernels/ops/gemm/configs/ (currently L40S), so it is a no-op on
+     # any other GPU / untuned shape even when enabled.
+     SGLANG_ENABLE_FP8_GEMM_CONFIG_TUNE = EnvBool(True)
++    # SM120: block-FP8 (32x32, UE8M0) linears served as MXFP8 (needs
++    # --fp8-gemm-backend flashinfer_cutlass or flashinfer_cutedsl) run their
++    # tuned decode shapes at up to 16 rows on a split-K Triton GEMM instead of
++    # FlashInfer. Set 0 to keep every row count on FlashInfer.
++    SGLANG_ENABLE_SM120_MXFP8_SKINNY_GEMM = EnvBool(True)
+ 
+     # ===================================================================
+     # Humming quantization
+diff --git a/python/sglang/srt/layers/quantization/fp8.py b/python/sglang/srt/layers/quantization/fp8.py
+index 3d62fd5e1eb2801ec3dc024cfe5d4cd510edbf6d..bdf48f9d1289db8012eee57a6f4e7eeb345ac527 100644
+--- a/python/sglang/srt/layers/quantization/fp8.py
++++ b/python/sglang/srt/layers/quantization/fp8.py
+@@ -5,7 +5,7 @@
+ from __future__ import annotations
+ 
+ import logging
+-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
++from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+ 
+ import torch
+ import torch.nn.functional as F
+@@ -104,6 +104,7 @@ from sglang.srt.utils import (
+     is_hip,
+     is_musa,
+     is_npu,
++    is_sm120,
+     is_xpu,
+     log_info_on_rank0,
+     mxfp8_block_convert_required,
+@@ -477,6 +478,25 @@ class Fp8Config(QuantizationConfig):
+             )
+ 
+ 
++def _refill_in_place(
++    old: Optional[torch.Tensor], new: Optional[torch.Tensor]
++) -> Optional[torch.Tensor]:
++    """`new`'s values in `old`'s storage when shape, dtype and device match, so
++    CUDA graphs captured before a weight reload keep valid pointers."""
++    if new is None:
++        return None
++    if (
++        old is not None
++        and old.shape == new.shape
++        and old.dtype == new.dtype
++        and old.device == new.device
++        and old.is_contiguous()
++    ):
++        old.copy_(new)
++        return old
++    return new
++
++
+ class Fp8LinearMethod(LinearMethodBase):
+     """Linear method for FP8.
+ 
+@@ -932,6 +952,91 @@ class Fp8LinearMethod(LinearMethodBase):
+         # the swizzled copy is stored separately.
+         self._process_mxfp8_linear_weight_scale(layer, scale_u8=scale_u8)
+         layer.block_fp8_mxfp8_ready = True
++        self._prepare_mxfp8_skinny(layer)
++
++    def _prepare_mxfp8_skinny(self, layer: Module) -> None:
++        """On SM120, decode-sized rows of a tuned shape run a small-M MXFP8 GEMM
++        that reads the 32x32 block scales directly. Reached only when the layer
++        is served as MXFP8, which on SM120 needs --fp8-gemm-backend
++        flashinfer_cutlass or flashinfer_cutedsl (auto resolves to cutlass).
++
++        A weight reload reruns this without recapturing CUDA graphs, so buffers
++        from an earlier call are refilled in place: captured launches keep valid
++        pointers, see the new scales, and start from zeroed counters."""
++        scale, counters = self._mxfp8_skinny_buffers(layer)
++        layer.mxfp8_skinny_scale = _refill_in_place(
++            getattr(layer, "mxfp8_skinny_scale", None), scale
++        )
++        layer.mxfp8_skinny_counters = _refill_in_place(
++            getattr(layer, "mxfp8_skinny_counters", None), counters
++        )
++
++    def _mxfp8_skinny_buffers(
++        self, layer: Module
++    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
++        """(FP32 block scales, zeroed split-K counters or None), or (None, None)
++        when the layer does not use the kernel."""
++        if not (is_sm120() and envs.SGLANG_ENABLE_SM120_MXFP8_SKINNY_GEMM.get()):
++            return None, None
++        if list(self.weight_block_size) != [32, 32] or not layer.weight.is_contiguous():
++            return None, None
++        from sglang.kernels.ops.gemm.sm120_mxfp8_skinny_gemm import tuned_config
++        from sglang.srt.runtime_context import get_exec
++
++        n, k = layer.weight.shape
++        config = tuned_config(n, k)
++        if config is None:
++            return None, None
++        if get_exec().deterministic.enable_deterministic_inference:
++            # The two kernels reduce in different orders, so a row's result
++            # would depend on which side of MAX_M its batch falls.
++            return None, None
++        scale = layer.weight_scale_inv.data.float().contiguous()
++        bn, split, _ = config
++        counters = None
++        if split > 1:
++            counters = torch.zeros(
++                (n + bn - 1) // bn, dtype=torch.int32, device=layer.weight.device
++            )
++        return scale, counters
++
++    @staticmethod
++    def _apply_mxfp8_skinny(layer: Module, x) -> Optional[torch.Tensor]:
++        scale = getattr(layer, "mxfp8_skinny_scale", None)
++        if scale is None:
++            return None
++        from sglang.kernels.ops.gemm.sm120_mxfp8_skinny_gemm import (
++            MAX_M,
++            mxfp8_skinny_gemm,
++        )
++
++        if isinstance(x, Mxfp8SwizzledInput):
++            data, a_sf = x.data, x.scales
++            if data.dim() != 2:
++                return None
++        elif isinstance(x, torch.Tensor) and x.dtype in (
++            torch.bfloat16,
++            torch.float16,
++        ):
++            # The activation dtypes the FlashInfer MXFP8 path accepts.
++            data, a_sf = x, None
++        else:
++            return None
++        if data.stride(-1) != 1:
++            return None
++        k = data.shape[-1]
++        rows = data.numel() // k
++        if rows == 0 or rows > MAX_M:
++            return None
++        out = mxfp8_skinny_gemm(
++            data.reshape(rows, k),
++            layer.weight,
++            scale,
++            layer.mxfp8_skinny_counters,
++            a_sf=a_sf,
++            out_dtype=data.dtype if a_sf is None else torch.bfloat16,
++        )
++        return out.view(*data.shape[:-1], out.shape[-1])
+ 
+     def _process_mxfp8_linear_weight_scale(
+         self, layer: Module, scale_u8: Optional[torch.Tensor] = None
+@@ -1225,6 +1330,10 @@ class Fp8LinearMethod(LinearMethodBase):
+         elif self.block_fp8_as_mxfp8 and isinstance(x, tuple):
+             # A legacy (q, scale) block-fp8 pair keeps the block kernel.
+             mxfp8_view = False
++        if mxfp8_view and bias is None:
++            out = self._apply_mxfp8_skinny(layer, x)
++            if out is not None:
++                return out
+         if mxfp8_view:
+             backend = self.mxfp8_dense_backend
+             extra_kwargs = {}
+diff --git a/test/registered/kernels/ops/gemm/test_sm120_mxfp8_skinny_gemm.py b/test/registered/kernels/ops/gemm/test_sm120_mxfp8_skinny_gemm.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..be9e7b5f6ff2fa1c47890bbe546cb9146a38a946
+--- /dev/null
++++ b/test/registered/kernels/ops/gemm/test_sm120_mxfp8_skinny_gemm.py
+@@ -0,0 +1,368 @@
++"""SM120 small-M MXFP8 GEMM: FP64 reference, bit-identity with FlashInfer's
++activation quantization, determinism, batch invariance, CUDA-graph replay,
++split-K counter validation, and dispatch through Fp8LinearMethod.apply."""
++
++from types import SimpleNamespace
++
++import pytest
++import torch
++
++from sglang.test.ci.ci_register import register_cuda_ci
++
++register_cuda_ci(est_time=60, stage="base-b-kernel-unit", runner_config="1-gpu-small")
++
++if not (torch.cuda.is_available() and torch.cuda.get_device_capability() == (12, 0)):
++    pytest.skip("SM120 MXFP8 skinny GEMM requires SM 12.0.", allow_module_level=True)
++
++from sglang.kernels.ops.gemm.sm120_mxfp8_skinny_gemm import (  # noqa: E402
++    MAX_M,
++    mxfp8_skinny_gemm,
++    tuned_config,
++)
++
++# The tuned configs: split-K (BN 32), BN 64, BK 256. Engram wkv (25600 x 6144)
++# shares the BN 64 config and is left out for memory.
++SHAPES = [
++    (1792, 5120),
++    (8192, 1280),
++    (5120, 2048),
++    (1280, 5120),
++    (512, 5120),
++    (5120, 15360),
++]
++
++
++def _weight(n, k):
++    w = torch.randn(n, k, device="cuda", dtype=torch.bfloat16).mul_(0.02)
++    w = w.to(torch.float8_e4m3fn)
++    e = torch.randint(-12, -4, ((n + 31) // 32, k // 32), device="cuda").float()
++    return w, torch.pow(2.0, e)
++
++
++def _counters(n, k):
++    bn, split, _ = tuned_config(n, k)
++    if split == 1:
++        return None
++    return torch.zeros((n + bn - 1) // bn, dtype=torch.int32, device="cuda")
++
++
++def _dequant_x(x):
++    """MXFP8 round trip: scale = amax / 448 rounded up to a power of two."""
++    m, k = x.shape
++    xb = x.float().view(m, k // 32, 32)
++    amax = xb.abs().amax(dim=-1, keepdim=True)
++    e = torch.ceil(torch.log2(amax / 448.0)).clamp(min=-127)
++    e = torch.where(amax > 0, e, torch.full_like(e, -127))
++    q = (xb * torch.pow(2.0, -e)).to(torch.float8_e4m3fn)
++    return (q.double() * torch.pow(2.0, e).double()).view(m, k)
++
++
++def _reference(x, w, s, chunk=256):
++    """FP64 product of the dequantized MXFP8 operands, N in chunks of 32-row blocks."""
++    xd = _dequant_x(x)
++    out = []
++    for n0 in range(0, w.shape[0], chunk):
++        wc = w[n0 : n0 + chunk].double()
++        sc = s[n0 // 32 : (n0 + chunk) // 32].double().repeat_interleave(32, 0)
++        sc = sc.repeat_interleave(32, 1)[: wc.shape[0]]
++        out.append(xd @ (wc * sc).t())
++    return torch.cat(out, dim=1)
++
++
++@pytest.mark.parametrize("n,k", SHAPES)
++@pytest.mark.parametrize("m", [1, 6, 16, 48])
++def test_matches_reference(n, k, m):
++    torch.manual_seed(m * 7 + n)
++    w, s = _weight(n, k)
++    x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
++    counters = _counters(n, k)
++    out = mxfp8_skinny_gemm(x, w, s, counters)
++    ref = _reference(x, w, s)
++    err = (out.double() - ref).abs().max() / ref.abs().max()
++    assert err < 8e-3, err
++    if counters is not None:
++        assert not counters.any(), "split-K counters must return to zero"
++
++
++@pytest.mark.parametrize("n,k", [(1792, 5120), (5120, 2048)])  # split-K, BK 256
++@pytest.mark.parametrize("m", [1, MAX_M])
++@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
++def test_input_dtypes(n, k, m, dtype):
++    torch.manual_seed(m * 7 + n)
++    w, s = _weight(n, k)
++    x = torch.randn(m, k, device="cuda", dtype=dtype)
++    out = mxfp8_skinny_gemm(x, w, s, _counters(n, k), out_dtype=dtype)
++    assert out.dtype == dtype
++    ref = _reference(x, w, s)
++    err = (out.double() - ref).abs().max() / ref.abs().max()
++    assert err < 8e-3, err
++
++
++@pytest.mark.parametrize(
++    "case", ["missing", "strided view", "int64", "too few", "on CPU"]
++)
++def test_split_k_counters_validated(case):
++    n, k = 1792, 5120
++    bn, split, _ = tuned_config(n, k)
++    assert split > 1
++    tiles = (n + bn - 1) // bn
++    counters = {
++        "missing": lambda: None,
++        "strided view": lambda: torch.zeros(
++            2 * tiles, dtype=torch.int32, device="cuda"
++        )[::2],
++        "int64": lambda: torch.zeros(tiles, dtype=torch.int64, device="cuda"),
++        "too few": lambda: torch.zeros(tiles - 1, dtype=torch.int32, device="cuda"),
++        "on CPU": lambda: torch.zeros(tiles, dtype=torch.int32),
++    }[case]()
++    w, s = _weight(n, k)
++    x = torch.randn(6, k, device="cuda", dtype=torch.bfloat16)
++    with pytest.raises(ValueError, match="counters"):
++        mxfp8_skinny_gemm(x, w, s, counters)
++
++
++def _cute_dsl_available():
++    from flashinfer.cute_dsl import is_cute_dsl_available
++
++    return is_cute_dsl_available()
++
++
++@pytest.mark.parametrize("backend", ["cute-dsl", "cuda"])
++@pytest.mark.parametrize("m", [1, 6, 16, 48, 128])
++def test_fused_quant_matches_flashinfer(m, backend):
++    flashinfer = pytest.importorskip("flashinfer")
++    if backend == "cute-dsl" and not _cute_dsl_available():
++        pytest.skip("FlashInfer CuTe-DSL is not installed")
++    n, k = 8192, 1280
++    # FlashInfer's CUDA backend flushes BF16 subnormal inputs to zero; the
++    # CuTe-DSL backend (the one SGLang calls) and this kernel keep them.
++    lo = -120 if backend == "cute-dsl" else -100
++    x = torch.randn(m, k, device="cuda")
++    x *= torch.logspace(lo, 30, m, base=2.0, device="cuda")[:, None]
++    x = x.bfloat16()
++    x[0, 0:32] = 0
++    x[0, 32:64] = 3.5  # amax / 448 is exactly 2^-7
++    x[0, 64:96] = 448.0 * 2.0**-127  # amax / 448 at the smallest UE8M0 scale
++    q, sf = flashinfer.mxfp8_quantize(x, True, 32, backend=backend)
++    q_lin, sf_lin = flashinfer.mxfp8_quantize(x, False, 32, backend=backend)
++    # Selector weight (row j picks activation j) with block scale 2^64:
++    # out[:, :K] is the activation as the GEMM saw it, exact in FP32 for every
++    # BF16 input, so this compares operands.
++    w = torch.zeros(n, k, device="cuda")
++    w[:k] = torch.eye(k, device="cuda")
++    w = w.to(torch.float8_e4m3fn)
++    s = torch.full((n // 32, k // 32), 2.0**64, device="cuda")
++    fused = mxfp8_skinny_gemm(x, w, s, out_dtype=torch.float32)[:, :k]
++    prequant = mxfp8_skinny_gemm(q, w, s, a_sf=sf, out_dtype=torch.float32)[:, :k]
++    sf_lin = sf_lin.view(m, k // 32)[:, :, None].float()
++    expect = q_lin.float().view(m, k // 32, 32) * torch.exp2(sf_lin - 127 + 64)
++    assert torch.equal(prequant, expect.view(m, k))
++    assert torch.equal(fused, prequant)
++
++
++@pytest.mark.parametrize("n,k", SHAPES)
++def test_deterministic_and_batch_invariant(n, k):
++    w, s = _weight(n, k)
++    x = torch.randn(MAX_M, k, device="cuda", dtype=torch.bfloat16)
++    counters = _counters(n, k)
++    first = mxfp8_skinny_gemm(x, w, s, counters)
++    for _ in range(50):
++        assert torch.equal(mxfp8_skinny_gemm(x, w, s, counters), first)
++    for m in range(1, MAX_M):
++        assert torch.equal(mxfp8_skinny_gemm(x[:m], w, s, counters), first[:m]), m
++
++
++def test_cuda_graph_replay():
++    n, k, m = 1792, 5120, 6
++    assert tuned_config(n, k)[1] > 1, "exercise the split-K reduction"
++    w, s = _weight(n, k)
++    counters = _counters(n, k)
++    x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
++    mxfp8_skinny_gemm(x, w, s, counters)  # compile outside capture
++    torch.cuda.synchronize()
++    graph = torch.cuda.CUDAGraph()
++    with torch.cuda.graph(graph):
++        out = mxfp8_skinny_gemm(x, w, s, counters)
++    for _ in range(3):
++        x.copy_(torch.randn_like(x))
++        graph.replay()
++        assert torch.equal(out, mxfp8_skinny_gemm(x, w, s, counters))
++    assert not counters.any()
++
++
++@pytest.fixture
++def build_linear(monkeypatch):
++    """A real block-FP8 (32x32, UE8M0) ColumnParallelLinear served as MXFP8."""
++    from sglang.srt import runtime_context
++    from sglang.srt.layers.linear import ColumnParallelLinear
++    from sglang.srt.layers.quantization import fp8_utils
++    from sglang.srt.layers.quantization.fp8 import Fp8Config
++    from sglang.test.layer_ut_utils import (
++        init_single_process_dist,
++        load_linear_weights,
++    )
++
++    init_single_process_dist()
++    monkeypatch.setattr(
++        fp8_utils,
++        "FP8_GEMM_RUNNER_BACKEND",
++        fp8_utils.Fp8GemmRunnerBackend.FLASHINFER_CUTLASS,
++    )
++
++    def build(n, k, deterministic=False, block_n=32, bias=False):
++        cfg = SimpleNamespace(
++            deterministic=SimpleNamespace(enable_deterministic_inference=deterministic)
++        )
++        monkeypatch.setattr(runtime_context, "get_exec", lambda: cfg)
++        quant_config = Fp8Config(
++            is_checkpoint_fp8_serialized=True,
++            activation_scheme="dynamic",
++            weight_block_size=[block_n, 32],
++            scale_fmt="ue8m0",
++        )
++        layer = ColumnParallelLinear(
++            input_size=k,
++            output_size=n,
++            bias=bias,
++            params_dtype=torch.bfloat16,
++            quant_config=quant_config,
++            prefix="model.layers.0.mlp.up_proj",
++            tp_rank=0,
++            tp_size=1,
++            skip_block_quant_check=True,
++        ).cuda()
++        w, s = _weight(n, k)
++        s = s[:: block_n // 32].contiguous()
++        load_linear_weights(
++            layer, weight=w, weight_scale_inv=s.to(torch.float8_e8m0fnu)
++        )
++        layer.quant_method.process_weights_after_loading(layer)
++        assert layer.block_fp8_mxfp8_ready
++        return layer, s
++
++    return build
++
++
++@pytest.fixture
++def skinny_rows(monkeypatch):
++    """Row counts of the calls that reach the skinny kernel."""
++    from sglang.kernels.ops.gemm import sm120_mxfp8_skinny_gemm as module
++
++    rows = []
++
++    def counted(a, *args, **kwargs):
++        rows.append(a.shape[0])
++        return mxfp8_skinny_gemm(a, *args, **kwargs)
++
++    monkeypatch.setattr(module, "mxfp8_skinny_gemm", counted)
++    return rows
++
++
++@pytest.mark.parametrize("n,k", [(1792, 5120), (8192, 1280)])
++@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
++def test_linear_apply(build_linear, skinny_rows, n, k, dtype):
++    flashinfer = pytest.importorskip("flashinfer")
++    from sglang.srt.layers.quantization.mxfp8_input import Mxfp8SwizzledInput
++
++    layer, s = build_linear(n, k)
++    split = tuned_config(n, k)[1]
++    assert (layer.mxfp8_skinny_counters is not None) == (split > 1)
++    x = torch.randn(MAX_M + 1, k, device="cuda", dtype=dtype)
++    cutlass = layer(x)[0]  # above MAX_M: the existing CUTLASS path
++    assert skinny_rows == []
++    for m in (1, 6, MAX_M):
++        out = layer(x[:m])[0]
++        assert out.dtype == dtype
++        direct = mxfp8_skinny_gemm(
++            x[:m], layer.weight, s.float(), _counters(n, k), out_dtype=dtype
++        )
++        assert torch.equal(out, direct)
++        err = (
++            out.float() - cutlass[:m].float()
++        ).abs().max() / cutlass.float().abs().max()
++        assert err < 1e-2, (m, err)
++    out_3d = layer(x[:6].view(2, 3, k))[0]
++    assert torch.equal(out_3d.view(6, n), layer(x[:6])[0])
++    if dtype != torch.bfloat16:
++        assert skinny_rows == [1, 6, MAX_M, 6, 6]
++        return
++    q, sf = flashinfer.mxfp8_quantize(x[:6], True, 32)
++    out_q = layer.quant_method.apply(layer, Mxfp8SwizzledInput(q, sf))
++    assert torch.equal(out_q, layer(x[:6])[0])
++    assert skinny_rows == [1, 6, MAX_M, 6, 6, 6, 6]
++
++
++def test_linear_bias_and_fp32_keep_existing_path(build_linear, skinny_rows):
++    n, k = 5120, 2048
++    layer, s = build_linear(n, k, bias=True)
++    assert layer.mxfp8_skinny_scale is not None
++    x = torch.randn(6, k, device="cuda", dtype=torch.bfloat16)
++    no_bias = mxfp8_skinny_gemm(x, layer.weight, s.float()).float()
++    bias = torch.randn(n, device="cuda") * no_bias.abs().max()
++    layer.bias.data.copy_(bias)
++    out = layer(x)[0]
++    assert skinny_rows == []
++    ref = no_bias + layer.bias.float()
++    err = (out.float() - ref).abs().max() / ref.abs().max()
++    assert err < 1e-2, err
++    # FP32 activations stay off the kernel, as FlashInfer's MXFP8 path takes
++    # only BF16 and FP16.
++    assert layer.quant_method._apply_mxfp8_skinny(layer, x.float()) is None
++    assert skinny_rows == []
++
++
++def test_weight_reload_keeps_captured_buffers(build_linear):
++    """A weight reload reruns postprocessing without recapturing CUDA graphs, so
++    the kernel's scale and counter buffers must keep their storage, take the new
++    scales, and start from zeroed counters."""
++    from sglang.test.layer_ut_utils import load_linear_weights
++
++    n, k = 1792, 5120
++    layer, _ = build_linear(n, k)
++    scale, counters = layer.mxfp8_skinny_scale, layer.mxfp8_skinny_counters
++    assert counters is not None, "exercise the split-K counters"
++    x = torch.randn(6, k, device="cuda", dtype=torch.bfloat16)
++    layer(x)  # compile outside capture
++    torch.cuda.synchronize()
++    graph = torch.cuda.CUDAGraph()
++    with torch.cuda.graph(graph):
++        out = layer(x)[0]
++    counters.fill_(1)  # stale arrivals the reload must clear
++    w, s = _weight(n, k)
++    load_linear_weights(layer, weight=w, weight_scale_inv=s.to(torch.float8_e8m0fnu))
++    layer.quant_method.process_weights_after_loading(layer)
++    assert layer.mxfp8_skinny_scale is scale
++    assert layer.mxfp8_skinny_counters is counters
++    assert torch.equal(scale, s)
++    assert not counters.any()
++    # Same-size allocations that would take over buffers freed by the reload.
++    taken = [torch.full_like(counters, 7), torch.full_like(scale, 3.0)]
++    graph.replay()
++    assert torch.equal(out, layer(x)[0])
++    assert not counters.any()
++    del taken
++
++
++def test_linear_gates(build_linear, skinny_rows):
++    from sglang.srt.environ import envs
++
++    x = torch.randn(6, 2048, device="cuda", dtype=torch.bfloat16)
++    # (N, block N, deterministic inference, env switch): untuned shape, 128x32
++    # blocks, the two off switches, then the tuned shape with all gates open.
++    for n, block_n, deterministic, enabled in (
++        (1024, 32, False, True),
++        (5120, 128, False, True),
++        (5120, 32, True, True),
++        (5120, 32, False, False),
++        (5120, 32, False, True),
++    ):
++        with envs.SGLANG_ENABLE_SM120_MXFP8_SKINNY_GEMM.override(enabled):
++            layer, _ = build_linear(n, 2048, deterministic, block_n)
++        layer(x)
++    assert skinny_rows == [6]
++
++
++if __name__ == "__main__":
++    import sys
++
++    sys.exit(pytest.main([__file__]))

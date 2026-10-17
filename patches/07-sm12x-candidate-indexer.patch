@@ -1,0 +1,118 @@
+diff --git a/python/sglang/srt/layers/attention/dsv4/v41_indexer/__init__.py b/python/sglang/srt/layers/attention/dsv4/v41_indexer/__init__.py
+index 548977a58082ce04dd13a187a072b921391191e6..96ae8aee3e56dbad4a3d94371597d55d1b202472 100644
+--- a/python/sglang/srt/layers/attention/dsv4/v41_indexer/__init__.py
++++ b/python/sglang/srt/layers/attention/dsv4/v41_indexer/__init__.py
+@@ -91,7 +91,7 @@ def make_candidate_indexer(
+     candidate_topk_blocks: int,
+     candidate_block_size: int,
+ ) -> Tuple[PrefillCandidates, DecodeCandidates]:
+-    from sglang.srt.runtime_context import get_parallel
++    from sglang.srt.runtime_context import get_parallel, get_platform
+ 
+     from .dense_blocks import DenseBlocksBackend
+ 
+@@ -112,6 +112,10 @@ def make_candidate_indexer(
+     )
+ 
+     if not DEEPGEMM_PAGED_SPARSE_MQA_LOGITS:
++        # DeepGEMM's paged sparse MQA logits are SM100-only; SM12x decodes the
++        # dense-blocks scheme from the Triton paged scores, as Hopper does.
++        if get_platform().is_sm120:
++            return dense_blocks, dense_blocks
+         raise RuntimeError(
+             "the candidate indexer needs DeepGEMM's paged sparse MQA logits "
+             "(sgl-deep-gemm >= 0.2.0 with SGLANG_ENABLE_JIT_DEEPGEMM on)"
+diff --git a/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py b/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py
+index ea90f9a5cd09f2a2820da5f3cd2d48f98bf619df..9cd90ac0a234c359b5a4fa0c8a96e94f3215e96c 100644
+--- a/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py
++++ b/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py
+@@ -383,7 +383,7 @@ def decode_scores(
+     ratio = inputs.compress_ratio
+     indexer = inputs.indexer
+     req, pos = inputs.req_rows, inputs.positions
+-    paged = get_platform().is_sm90
++    paged = get_platform().is_sm90 or get_platform().is_sm120
+     bs = req.shape[0]
+     assert pos.shape[0] == bs, (
+         f"decode expects one token per request, {pos.shape=} {bs=}"
+diff --git a/test/registered/kernels/ops/attention/test_fp4_indexer.py b/test/registered/kernels/ops/attention/test_fp4_indexer.py
+index edd355f1e2af8502da28ea91500fdb26fd64fa8b..310bb35160491d780f9f39133d4fa8c495612602 100644
+--- a/test/registered/kernels/ops/attention/test_fp4_indexer.py
++++ b/test/registered/kernels/ops/attention/test_fp4_indexer.py
+@@ -591,11 +591,12 @@ def test_fp4_paged_logits_replay(batch, ratio, width, masked):
+ 
+ 
+ @pytest.mark.skipif(
+-    not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 9,
+-    reason="Hopper paged indexer dispatch",
++    not torch.cuda.is_available()
++    or torch.cuda.get_device_capability()[0] not in (9, 12),
++    reason="Paged indexer dispatch of SM90 and SM12x",
+ )
+ @pytest.mark.parametrize("ratio", [1, 2])
+-def test_hopper_indexer_backends_replay(ratio):
++def test_paged_indexer_backends_replay(ratio):
+     from sglang.srt.layers.attention.dsv4.v41_indexer import scoring
+     from sglang.srt.layers.attention.dsv4.v41_indexer.dense_blocks import (
+         DenseBlocksBackend,
+diff --git a/test/registered/unit/layers/test_dsv41_candidate_blocks.py b/test/registered/unit/layers/test_dsv41_candidate_blocks.py
+index 39d023876f88fb982d2628c4d39eb72d53146fa1..9ccbed26f0664eb3475d9869a2ac78fdd78a3bac 100644
+--- a/test/registered/unit/layers/test_dsv41_candidate_blocks.py
++++ b/test/registered/unit/layers/test_dsv41_candidate_blocks.py
+@@ -1,4 +1,5 @@
+ import unittest
++from unittest.mock import patch
+ 
+ import torch
+ 
+@@ -6,8 +7,14 @@ from sglang.kernels.ops.attention.dsv4.candidate_blocks import (
+     select_candidate_block_ids,
+     topk_among_blocks,
+ )
+-from sglang.srt.layers.attention.dsv4.v41_indexer.dense_blocks import BlockIds
++from sglang.srt.layers.attention.dsv4 import v41_indexer
++from sglang.srt.layers.attention.dsv4.v41_indexer.dense_blocks import (
++    BlockIds,
++    DenseBlocksBackend,
++)
+ from sglang.srt.layers.attention.dsv4.v41_indexer.types import get_tail_row_indices
++from sglang.srt.layers.deep_gemm_wrapper import configurer
++from sglang.srt.runtime_context import override_platform
+ from sglang.test.ci.ci_register import register_cpu_ci
+ from sglang.test.test_utils import CustomTestCase
+ 
+@@ -116,5 +123,34 @@ class TestBlockIdsTail(CustomTestCase):
+         )
+ 
+ 
++class TestCandidateIndexerGating(CustomTestCase):
++    """SM12x has no DeepGEMM paged sparse MQA logits; backend init must give it
++    the dense-blocks scheme, not fail, while SM100 without them still fails."""
++
++    def _make_without_sparse_logits(self, **platform):
++        with (
++            patch.object(v41_indexer, "is_sm100_or_newer", return_value=True),
++            patch.object(v41_indexer, "_use_deep_gemm_prefill", return_value=True),
++            patch.object(configurer, "DEEPGEMM_PAGED_SPARSE_MQA_LOGITS", False),
++            override_platform(**platform),
++        ):
++            return v41_indexer.make_candidate_indexer(
++                token_to_kv_pool=None,
++                req_to_token=None,
++                page_size=64,
++                candidate_topk_blocks=4,
++                candidate_block_size=8,
++            )
++
++    def test_sm12x_takes_dense_blocks(self):
++        prefill, decode = self._make_without_sparse_logits(is_sm120=True)
++        self.assertIsInstance(decode, DenseBlocksBackend)
++        self.assertIs(prefill, decode)
++
++    def test_sm100_still_requires_sparse_logits(self):
++        with self.assertRaisesRegex(RuntimeError, "paged sparse MQA logits"):
++            self._make_without_sparse_logits(is_sm120=False)
++
++
+ if __name__ == "__main__":
+     unittest.main()
