@@ -37,7 +37,7 @@ jq -e --arg dg "$(jq -r '.sources.deepgemm.commit[:8]' "$lock")" '. as {sources:
   (.packaging.sgl_deep_gemm | endswith("+git" + $dg)) and
   ([.patches[].id] | length == (unique | length)) and
   all(.patches[]; (.head | sha40) and ((has("diff_base") | not) or (.diff_base | sha40)) and
-    (if .ab_candidate then .kind == "branch" and .upstream_pr == "none - A/B per RUNBOOK 6c"
+    (if .ab_candidate then .kind == "branch" and .upstream_pr == "none - A/B candidate"
      elif .kind == "pr" then .upstream_pr == ("https://github.com/sgl-project/sglang/pull/" + (.pr | tostring))
      elif .kind == "branch" then (.upstream_pr == "TBD" or (.upstream_pr | pr_url) or
          (.upstream_pr == "pending" and (.reason | type == "string" and length > 0))) and
