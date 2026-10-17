@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.3.0-rc.1
+## v0.3.0 (stable; 2026-10-17)
 
 The 0.2.1 image for `deepseek-ai/DeepSeek-V4.1-Flash-1017` (revision `1bae0e1088993b9b82de08f59de5be5a34e42170`), DeepSeek's update to V4.1-Flash with the same architecture, configuration and tokenizer.
 
@@ -9,6 +9,32 @@ The 0.2.1 image for `deepseek-ai/DeepSeek-V4.1-Flash-1017` (revision `1bae0e1088
 - The model is `deepseek-ai/DeepSeek-V4.1-Flash-1017`. Download it into a new directory; the earlier checkpoint is not modified.
 - Prompt encoding follows the 1017 release's `encoding/encoding.py` (backport of sgl-project/sglang#44751): a message that only returns tool results no longer starts a new user turn, so reasoning from earlier in the current turn is kept across tool calls; tool and user content given as a list of blocks is accepted; images in tool results follow the tool results' call order.
 - Sources, the other 33 patches and the runtime configuration are unchanged from 0.2.1.
+
+### Upgrade
+
+Download `deepseek-ai/DeepSeek-V4.1-Flash-1017` at the pinned revision into a new directory, point `MODEL_DIR` at it and start the `v0.3.0` image with the same settings as 0.2.1. The 0.2.1 kernel cache can be reused: FlashInfer, DeepGEMM and Triton are rebuilt from the same locked sources.
+
+### Measurements
+
+Validation runs on four RTX PRO 6000 Blackwell Max-Q GPUs at 250 W each, with the privately built image of this candidate, three repetitions per cell, compared with 0.2.1 on the earlier checkpoint.
+
+| Concurrency | C1 | C2 | C4 | C8 | C16 |
+|---|---|---|---|---|---|
+| Decode output tok/s | 186 | 318 | 498 | 667 | 1,020 |
+| Accepted tokens per step | 2.25 | 2.15 | 2.18 | 2.03 | 2.13 |
+
+- The engine runs at the same speed as 0.2.1: decode steps per second at 2 to 16 running requests and at 0, 32K and 128K tokens of context are within run-to-run variation. Output tok/s is lower at low concurrency because the 1017 model's speculative acceptance is lower (2.25 against 2.58 accepted tokens per step at C1).
+- The 1017 model writes shorter answers: on the same sampled prompts its mean completion was 13% shorter at C4 and 30% shorter at C16, so a typical answer finishes sooner even where tok/s is lower.
+- Cold prefill: about 10.0K, 12.6K and 12.9K prompt tok/s at 8K, 32K and 128K tokens, unchanged from 0.2.1.
+- Device KV pool: 2,078,208 tokens across requests; one request may use up to 1,048,576.
+- Ten minutes at C8: 321 requests, no errors or runaway outputs. A 54K-token prompt evicted from the GPU cache is served back from host RAM.
+
+These are controlled measurements and do not necessarily represent real-world performance. Output rates include reasoning tokens and depend on speculative acceptance.
+
+### Known limitations
+
+- DeepSeek's 1017 reference rounds the attention output to FP8 before the WO-A projection; this image computes it in BF16, as 0.2.1 did and as upstream SGLang does for V4.1 checkpoints. Output quality checks pass; matching the reference numerics is planned work.
+- The 1017 model card recommends `top_p` 1.0; the startup speculative cost table is measured with `top_p` 0.95 (`SGLANG_DSPARK_SPS_AUTOTUNE_TOP_P`).
 
 ## v0.2.1 (stable; 2026-10-16)
 

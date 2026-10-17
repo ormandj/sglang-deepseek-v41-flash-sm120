@@ -2,11 +2,11 @@
 
 An SGLang image, built from pinned sources, for [`deepseek-ai/DeepSeek-V4.1-Flash-1017`](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017) on four RTX PRO 6000 Blackwell (SM120) GPUs over PCIe: tensor parallelism 4 with expert parallelism 2, FP8 KV cache, DSpark speculative decoding, a 1,048,576-token context, image input and a host-RAM prefix cache.
 
-The current published stable image is `v0.2.1`.
+The current published stable image is `v0.3.0`.
 
 | | |
 |---|---|
-| Image | `ghcr.io/ormandj/sglang-deepseek-v41-flash-sm120:v0.2.1` |
+| Image | `ghcr.io/ormandj/sglang-deepseek-v41-flash-sm120:v0.3.0` |
 | Model | `deepseek-ai/DeepSeek-V4.1-Flash-1017` at revision `1bae0e1088993b9b82de08f59de5be5a34e42170` |
 | GPUs | four 96 GB RTX PRO 6000 Blackwell (SM120) with working PCIe peer-to-peer; no NVLink needed |
 | Host RAM | about 250 GiB in use while serving (189 GiB of Engram tables plus the HiCache host tier); 384 GB or more recommended |
@@ -34,15 +34,16 @@ The first start compiles kernels and measures the speculative-decoding cost tabl
 
 ## Measured
 
-Validation runs on four RTX PRO 6000 Blackwell Max-Q GPUs at 250 W each, with a separately built image from the same pinned sources and patches, three repetitions per cell:
+Validation runs on four RTX PRO 6000 Blackwell Max-Q GPUs at 250 W each, with the privately built image from the same pinned sources and patches, three repetitions per cell:
 
 | Concurrency | C1 | C2 | C4 | C8 | C16 |
 |---|---|---|---|---|---|
-| Decode output tok/s | 220 | 326 | 515 | 697 | 1,009 |
+| Decode output tok/s | 186 | 318 | 498 | 667 | 1,020 |
 
-- Cold prefill: about 10.1K, 12.7K and 12.9K prompt tok/s at 8K, 32K and 128K tokens.
+- Cold prefill: about 10.0K, 12.6K and 12.9K prompt tok/s at 8K, 32K and 128K tokens.
 - Device KV pool: 2,078,208 tokens across requests; one request may use up to 1,048,576.
-- Ten minutes at C8: 309 requests, no errors or runaway outputs.
+- Ten minutes at C8: 321 requests, no errors or runaway outputs.
+- The 1017 model writes shorter answers than the earlier V4.1-Flash checkpoint (13% to 30% fewer completion tokens on the same prompts), so answers finish sooner even where output tok/s is lower than 0.2.1's.
 
 These are controlled measurements and do not necessarily represent real-world performance. Output rates include reasoning tokens and depend on speculative acceptance. Details and the benchmark scope are in [CHANGELOG.md](CHANGELOG.md).
 
