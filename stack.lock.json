@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "lineage": "dsv41-platform",
-  "candidate_tag": "v0.4.0-rc.1",
+  "candidate_tag": "v0.4.0-rc.2",
   "platform": "linux/amd64",
   "base": {
     "tag": "docker.io/lmsysorg/sglang:nightly-dev-cu13-20261016-a93f16f0",
@@ -479,7 +479,8 @@
       "The package `cosmos-guardrail` requires `imageio>=2.37.0`, but `2.36.0` is installed",
       "The package `cosmos-guardrail` requires `opencv-python>=4.10.0.84`, but it's not installed",
       "The package `retinaface-py` requires `opencv-python`, but it's not installed",
-      "The package `nixl` requires `nixl-cu12==1.5.0`, but it's not installed"
+      "The package `nixl` requires `nixl-cu12==1.5.0`, but it's not installed",
+      "The package `ai-dynamo-runtime` requires `pydantic>=2.10.6,<=2.13.5`, but `2.14.1` is installed"
     ],
     "required": {
       "nixl-cu13": "==1.5.0",
@@ -492,7 +493,7 @@
       "nixl-cu12",
       "moviepy"
     ],
-    "rationale": "The vendor base deliberately substitutes headless OpenCV, CUDA 13 NIXL and NCCL 2.30.7, and SGLang's diffusion extra pins imageio 2.36.0. Every other `uv pip check` result fails the build."
+    "rationale": "The vendor base deliberately substitutes headless OpenCV, CUDA 13 NIXL and NCCL 2.30.7, and SGLang's diffusion extra pins imageio 2.36.0. The 20261016 vendor base ships ai-dynamo-runtime (NVIDIA Dynamo, never imported by SGLang) with pydantic 2.14.1; this build changes neither package. Every other `uv pip check` result fails the build."
   },
   "added_dependencies": [
     {

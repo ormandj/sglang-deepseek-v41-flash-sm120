@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.4.0-rc.1
+## v0.4.0-rc.2
 
 The 0.3.0 image rebuilt on current upstream sources for `deepseek-ai/DeepSeek-V4.1-Flash-1017` (revision `1bae0e1088993b9b82de08f59de5be5a34e42170`, unchanged). The runtime configuration is unchanged.
 
