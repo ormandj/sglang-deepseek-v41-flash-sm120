@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "lineage": "dsv41-platform",
-  "candidate_tag": "v0.4.0-rc.2",
+  "candidate_tag": "v0.4.0-rc.3",
   "platform": "linux/amd64",
   "base": {
     "tag": "docker.io/lmsysorg/sglang:nightly-dev-cu13-20261016-a93f16f0",
@@ -27,7 +27,7 @@
       "ref": "refs/heads/main",
       "commit": "4eb606b2aee8a9165e16352fd4c08d998ba37990",
       "tree": "3aad2bbca943086354e1d9e826be7ca3702e5e29",
-      "effective_tree": "90cfc37b5f7bec25e5056903df6eff4f7e7a73cf"
+      "effective_tree": "e307153f8094639e066a55adc377315bbc5154c9"
     },
     "triton": {
       "repository": "https://github.com/triton-lang/triton.git",
@@ -444,18 +444,22 @@
     },
     {
       "id": "dspark-read-accept-no-alias",
-      "kind": "pr",
+      "kind": "branch",
+      "branch": "up/dspark-read-accept-no-alias",
+      "head": "621aeac1fbceafa1d116029eb0ab030147b410d2",
       "pr": 42812,
-      "head": "7a8f74963c9db8e21c98ac72cb65ba7b189e6f9c",
       "upstream_pr": "https://github.com/sgl-project/sglang/pull/42812",
-      "purpose": "DSpark read_accept returns copies, not views of the buffers the next verify replay rewrites, so TP ranks commit the same token counts under the overlap scheduler with HiCache.",
-      "base": "264d1c20153cadc921670b982e6531d9800353e6",
+      "purpose": "DSpark read_accept returns copies, not views of the buffers the next verify replay rewrites, so TP ranks commit the same token counts under the overlap scheduler with HiCache. Amended for main with #43790: the in-graph accept writes the static buffers through _accept_buffers (PR head 7a8f74963c9d made it write into read_accept copies, so commit_lens read back as 0 and 0.4.0-rc.2 crashed on a negative correct-draft count).",
+      "base": "4eb606b2aee8a9165e16352fd4c08d998ba37990",
       "applied": "clean",
       "cpu_tests": [
-        "test/registered/unit/spec/test_dspark_read_accept_no_alias.py"
+        "test/registered/unit/spec/test_dspark_read_accept_no_alias.py",
+        "test/registered/unit/spec/test_dspark_accept_tail.py",
+        "test/registered/unit/spec/test_dspark_verify_seq_lens.py",
+        "test/registered/unit/spec/test_dspark_greedy_draft_accept.py"
       ],
       "path": "patches/27-dspark-read-accept-no-alias.patch",
-      "sha256": "229898a8e66a3f8bfbc9b3fd4832fcb4a60de19492939ba7b4db1500532226f5"
+      "sha256": "f5daf80ea431f9da3a22ca9174322eece098c226ca114d7adaed805be3da9ec2"
     }
   ],
   "packaging": {

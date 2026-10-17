@@ -81,7 +81,7 @@ SGLang series, applied in order to the pinned SGLang commit:
 | 24 | `24-encoder-swa-replay-multimodal.patch` | [sgl-project/sglang#43241](https://github.com/sgl-project/sglang/pull/43241) | Encoder SWA bounded replay accepts image requests (replay carries the request's multimodal inputs) |
 | 25 | `25-dsv41-indexer-prefill-tile-budget.patch` | [sgl-project/sglang#43376](https://github.com/sgl-project/sglang/pull/43376) | Prefill indexer score tiles sized from free memory, scratch counted, no padded copy (OOM fix) |
 | 26 | `26-dspark-smoothed-budget-sizing.patch` | not yet upstream | Host verify-budget sizing from a per-request running average of lagged survival (opt-in) |
-| 27 | `27-dspark-read-accept-no-alias.patch` | [sgl-project/sglang#42812](https://github.com/sgl-project/sglang/pull/42812) | DSpark folded accept results are copied before the next verify replay, so TP ranks commit the same tokens under overlap scheduling with HiCache |
+| 27 | `27-dspark-read-accept-no-alias.patch` | [sgl-project/sglang#42812](https://github.com/sgl-project/sglang/pull/42812), amended for #43790 | DSpark folded accept results are copied before the next verify replay, so TP ranks commit the same tokens under overlap scheduling with HiCache; the in-graph accept still writes the static buffers |
 
 FlashInfer series, applied to the pinned FlashInfer commit:
 
