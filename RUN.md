@@ -3,13 +3,13 @@
 Download the checkpoint using [README.md](README.md), then start the TP4 launcher with the published image `ghcr.io/ormandj/sglang-deepseek-v41-flash-sm120:v0.2.1`:
 
 ```bash
-export MODEL_DIR=/srv/models/DeepSeek-V4.1-Flash
+export MODEL_DIR=/srv/models/DeepSeek-V4.1-Flash-1017
 export IMAGE=ghcr.io/ormandj/sglang-deepseek-v41-flash-sm120:v0.2.1
 export CACHE_DIR=/srv/cache/sglang-deepseek-v41-flash-sm120-v1-tp4
 ./examples/serve-deepseek-v41-flash-tp4.sh
 ```
 
-Use `deepseek-ai/DeepSeek-V4.1-Flash` at revision `dba1be0a40aa45a94ad051997016db3960a90277`. Use a fresh cache directory for each image version; the directory holds compiled kernels and the measured speculative-decoding cost table.
+Use `deepseek-ai/DeepSeek-V4.1-Flash-1017` at revision `1bae0e1088993b9b82de08f59de5be5a34e42170`. Use a fresh cache directory for each image version; the directory holds compiled kernels and the measured speculative-decoding cost table.
 
 ## Profile
 

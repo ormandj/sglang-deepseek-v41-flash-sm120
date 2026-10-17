@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "lineage": "dsv41-platform",
-  "candidate_tag": "v0.2.1-rc.20",
+  "candidate_tag": "v0.3.0-rc.1",
   "platform": "linux/amd64",
   "base": {
     "tag": "docker.io/lmsysorg/sglang:nightly-dev-cu13-20261005-f70e8c68",
@@ -27,7 +27,7 @@
       "ref": "refs/heads/main",
       "commit": "9ddbba50dd8c8f1a05b2970a997350d9c5844e91",
       "tree": "e3252c0f0b57cb6452cc8e39a2e58a5d7d7e58f3",
-      "effective_tree": "6ba39f32daede419834e4cd7c6a0e6eb352adb05"
+      "effective_tree": "274176f20a6814b2dbe64c62196164aff542c612"
     },
     "triton": {
       "repository": "https://github.com/triton-lang/triton.git",
@@ -552,6 +552,22 @@
       "cpu_tests": [
         "test/registered/spec/dspark/test_dspark_budget_smoothing.py"
       ]
+    },
+    {
+      "id": "dsv41-encoding-tool-result-turns",
+      "kind": "pr",
+      "pr": 44751,
+      "head": "a038a0dca05cefca1e0edc4ac43e3bfbec2e064c",
+      "upstream_pr": "https://github.com/sgl-project/sglang/pull/44751",
+      "purpose": "Backport of the merged V4.1 encoder fix matching DeepSeek-V4.1-Flash-1017 encoding/encoding.py: tool results that only carry tool output do not start a new turn (current-turn reasoning is kept), list-form tool and user content, and images collected after tool results are sorted.",
+      "path": "patches/34-dsv41-encoding-tool-result-turns.patch",
+      "base": "9ddbba50dd8c8f1a05b2970a997350d9c5844e91",
+      "applied": "three-way",
+      "resolution": "Upstream test_serving_chat.py imports drifted after the pin; the patch is regenerated against the 0.2.1 effective tree. The encoder source diff is patch-id identical to upstream.",
+      "sha256": "aafe062bee7483f52edfec195f12b6f4bdd050bab5ad5780dc0e1dfbb21e450f",
+      "cpu_tests": [
+        "test/registered/unit/entrypoints/openai/test_serving_chat.py"
+      ]
     }
   ],
   "packaging": {
@@ -631,8 +647,8 @@
     }
   ],
   "model": {
-    "repository": "deepseek-ai/DeepSeek-V4.1-Flash",
-    "revision": "dba1be0a40aa45a94ad051997016db3960a90277"
+    "repository": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    "revision": "1bae0e1088993b9b82de08f59de5be5a34e42170"
   },
   "hardware": {
     "architecture": "sm120",

@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.3.0-rc.1
+
+The 0.2.1 image for `deepseek-ai/DeepSeek-V4.1-Flash-1017` (revision `1bae0e1088993b9b82de08f59de5be5a34e42170`), DeepSeek's update to V4.1-Flash with the same architecture, configuration and tokenizer.
+
+### Changes
+
+- The model is `deepseek-ai/DeepSeek-V4.1-Flash-1017`. Download it into a new directory; the earlier checkpoint is not modified.
+- Prompt encoding follows the 1017 release's `encoding/encoding.py` (backport of sgl-project/sglang#44751): a message that only returns tool results no longer starts a new user turn, so reasoning from earlier in the current turn is kept across tool calls; tool and user content given as a list of blocks is accepted; images in tool results follow the tool results' call order.
+- Sources, the other 33 patches and the runtime configuration are unchanged from 0.2.1.
+
 ## v0.2.1 (stable; 2026-10-16)
 
 First published release of this image for `deepseek-ai/DeepSeek-V4.1-Flash` on four RTX PRO 6000 Blackwell GPUs over PCIe.

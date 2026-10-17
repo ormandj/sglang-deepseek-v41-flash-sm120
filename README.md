@@ -1,13 +1,13 @@
 # SGLang for DeepSeek-V4.1-Flash on SM120
 
-An SGLang image, built from pinned sources, for [`deepseek-ai/DeepSeek-V4.1-Flash`](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) on four RTX PRO 6000 Blackwell (SM120) GPUs over PCIe: tensor parallelism 4 with expert parallelism 2, FP8 KV cache, DSpark speculative decoding, a 1,048,576-token context, image input and a host-RAM prefix cache.
+An SGLang image, built from pinned sources, for [`deepseek-ai/DeepSeek-V4.1-Flash-1017`](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017) on four RTX PRO 6000 Blackwell (SM120) GPUs over PCIe: tensor parallelism 4 with expert parallelism 2, FP8 KV cache, DSpark speculative decoding, a 1,048,576-token context, image input and a host-RAM prefix cache.
 
 The current published stable image is `v0.2.1`.
 
 | | |
 |---|---|
 | Image | `ghcr.io/ormandj/sglang-deepseek-v41-flash-sm120:v0.2.1` |
-| Model | `deepseek-ai/DeepSeek-V4.1-Flash` at revision `dba1be0a40aa45a94ad051997016db3960a90277` |
+| Model | `deepseek-ai/DeepSeek-V4.1-Flash-1017` at revision `1bae0e1088993b9b82de08f59de5be5a34e42170` |
 | GPUs | four 96 GB RTX PRO 6000 Blackwell (SM120) with working PCIe peer-to-peer; no NVLink needed |
 | Host RAM | about 250 GiB in use while serving (189 GiB of Engram tables plus the HiCache host tier); 384 GB or more recommended |
 | Disk | about 480 GiB for the checkpoint, plus a persistent kernel cache |
@@ -17,15 +17,15 @@ The current published stable image is `v0.2.1`.
 Download the checkpoint at the pinned revision:
 
 ```bash
-hf download deepseek-ai/DeepSeek-V4.1-Flash \
-  --revision dba1be0a40aa45a94ad051997016db3960a90277 \
-  --local-dir /srv/models/DeepSeek-V4.1-Flash
+hf download deepseek-ai/DeepSeek-V4.1-Flash-1017 \
+  --revision 1bae0e1088993b9b82de08f59de5be5a34e42170 \
+  --local-dir /srv/models/DeepSeek-V4.1-Flash-1017
 ```
 
 Start the server with the TP4 launcher:
 
 ```bash
-export MODEL_DIR=/srv/models/DeepSeek-V4.1-Flash
+export MODEL_DIR=/srv/models/DeepSeek-V4.1-Flash-1017
 export CACHE_DIR=/srv/cache/sglang-deepseek-v41-flash-sm120-v1-tp4
 ./examples/serve-deepseek-v41-flash-tp4.sh
 ```
@@ -87,6 +87,7 @@ SGLang series, applied in order to the pinned SGLang commit:
 | 31 | `31-encoder-swa-replay-multimodal.patch` | not yet upstream | Encoder SWA bounded replay accepts image requests (replay carries the request's multimodal inputs) |
 | 32 | `32-dsv41-indexer-prefill-tile-budget.patch` | not yet upstream | Prefill indexer score tiles sized from free memory, scratch counted, no padded copy (OOM fix) |
 | 33 | `33-dspark-smoothed-budget-sizing.patch` | not yet upstream | Host verify-budget sizing from a per-request running average of lagged survival (opt-in); request-pool generations unique across a clear |
+| 34 | `34-dsv41-encoding-tool-result-turns.patch` | [sgl-project/sglang#44751](https://github.com/sgl-project/sglang/pull/44751), backported | V4.1 prompt encoding as in DeepSeek-V4.1-Flash-1017: messages holding only tool results keep the current turn's reasoning, list-form tool and user content is accepted, and images follow the sorted tool results |
 
 FlashInfer series, applied to the pinned FlashInfer commit:
 
