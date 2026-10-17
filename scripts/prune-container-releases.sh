@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+forgejo_url=${FORGEJO_URL:-}
+package_owner=${PACKAGE_OWNER:-}
+package_name=${PACKAGE_NAME:-}
+keep_releases=${KEEP_RELEASES:-6}
+apply=false
+
+usage() {
+  cat <<'EOF'
+Usage: prune-container-releases.sh [--apply]
+
+Keep the newest SemVer release tags and their recent numeric build aliases for
+one Forgejo container package. The default is a dry run.
+
+Environment:
+  FORGEJO_TOKEN  Required Forgejo token with package read/delete access
+  FORGEJO_URL    Required Forgejo base URL
+  PACKAGE_OWNER  Required package owner
+  PACKAGE_NAME   Required container package name
+  KEEP_RELEASES  Number of release tags and build aliases to keep (default: 6)
+  KEEP_NEWEST    Optional: also keep the N most recently created tags of any
+                 name (for content-keyed tags such as stack-<hash>)
+  KEEP_REFERENCED_DIR  Optional checkout (e.g. the GitOps repository); every
+                 "<PACKAGE_NAME>:<tag>" referenced under it is also kept
+EOF
+}
+
+while (($#)); do
+  case "$1" in
+    --apply)
+      apply=true
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+for tool in curl cut jq sort; do
+  command -v "$tool" >/dev/null || {
+    echo "missing required tool: $tool" >&2
+    exit 1
+  }
+done
+
+[[ -n "${FORGEJO_TOKEN:-}" ]] || {
+  echo "FORGEJO_TOKEN is required" >&2
+  exit 1
+}
+for name in forgejo_url package_owner package_name; do
+  [[ -n "${!name}" ]] || { echo "${name^^} is required" >&2; exit 1; }
+done
+[[ "$keep_releases" =~ ^[1-9][0-9]*$ ]] || {
+  echo "KEEP_RELEASES must be a positive integer" >&2
+  exit 1
+}
+
+inventory=$(mktemp)
+trap 'rm -f "$inventory"' EXIT
+printf '[]\n' >"$inventory"
+
+page=1
+limit=50
+while :; do
+  response=$(curl --fail --silent --show-error \
+    --header "Authorization: token ${FORGEJO_TOKEN}" \
+    --get \
+    --data-urlencode 'type=container' \
+    --data-urlencode "q=${package_name}" \
+    --data-urlencode "limit=${limit}" \
+    --data-urlencode "page=${page}" \
+    "${forgejo_url}/api/v1/packages/${package_owner}")
+  count=$(jq -er 'length' <<<"$response")
+  jq --argjson page "$response" '. + $page' "$inventory" >"${inventory}.next"
+  mv "${inventory}.next" "$inventory"
+  ((count < limit)) && break
+  ((page += 1))
+done
+
+mapfile -t all_versions < <(
+  jq -r --arg package "$package_name" \
+    '.[] | select(.name == $package) | .version' "$inventory" | sort -u
+)
+mapfile -t release_versions < <(
+  printf '%s\n' "${all_versions[@]}" \
+    | jq -Rr 'select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+(-rc\\.[0-9]+)?$"))' \
+    | while IFS= read -r version; do
+        if [[ "$version" == *-rc.* ]]; then
+          printf '%s\t%s\n' "$version" "$version"
+        else
+          printf '%s-zz\t%s\n' "$version" "$version"
+        fi
+      done \
+    | sort -k1,1Vr \
+    | cut -f2
+)
+mapfile -t build_versions < <(
+  printf '%s\n' "${all_versions[@]}" \
+    | jq -Rr 'select(test("^build-[0-9]+$"))' \
+    | sort -t- -k2,2nr
+)
+
+declare -A keep=()
+if [[ -n "${KEEP_REFERENCED_DIR:-}" ]]; then
+  [[ -d "$KEEP_REFERENCED_DIR" ]] || {
+    echo "KEEP_REFERENCED_DIR does not exist: $KEEP_REFERENCED_DIR" >&2
+    exit 1
+  }
+  while IFS= read -r version; do
+    keep["$version"]=1
+  done < <(grep -rhoE "${package_name}:[A-Za-z0-9._-]+" "$KEEP_REFERENCED_DIR" \
+    | cut -d: -f2 | sort -u)
+fi
+for version in "${release_versions[@]:0:keep_releases}"; do
+  keep["$version"]=1
+done
+for version in "${build_versions[@]:0:keep_releases}"; do
+  keep["$version"]=1
+done
+if [[ -n "${KEEP_NEWEST:-}" ]]; then
+  [[ "$KEEP_NEWEST" =~ ^[0-9]+$ ]] || {
+    echo "KEEP_NEWEST must be a non-negative integer: $KEEP_NEWEST" >&2
+    exit 1
+  }
+  while IFS= read -r version; do
+    keep["$version"]=1
+  done < <(jq -r --arg package "$package_name" \
+    '[.[] | select(.name == $package)] | sort_by(.created_at) | reverse | .[].version' \
+    "$inventory" | awk '!seen[$0]++' | head -n "$KEEP_NEWEST")
+fi
+
+delete_versions=()
+for version in "${all_versions[@]}"; do
+  [[ -n "${keep[$version]:-}" ]] || delete_versions+=("$version")
+done
+
+echo "package: ${package_owner}/${package_name}"
+echo "keeping ${#keep[@]} tag(s):"
+printf '  %s\n' "${!keep[@]}" | sort -V
+
+if ((${#delete_versions[@]} == 0)); then
+  echo "nothing to delete"
+  exit 0
+fi
+
+if [[ "$apply" != true ]]; then
+  echo "dry run; would delete ${#delete_versions[@]} tag(s):"
+  printf '  %s\n' "${delete_versions[@]}"
+  exit 0
+fi
+
+echo "deleting ${#delete_versions[@]} tag(s):"
+for version in "${delete_versions[@]}"; do
+  echo "  ${version}"
+  curl --fail --silent --show-error \
+    --request DELETE \
+    --header "Authorization: token ${FORGEJO_TOKEN}" \
+    "${forgejo_url}/api/v1/packages/${package_owner}/container/${package_name}/${version}"
+done

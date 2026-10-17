@@ -1,0 +1,53 @@
+name: Retain container releases
+
+on:
+  schedule:
+    - cron: '17 7 * * *'
+  workflow_dispatch:
+
+jobs:
+  prune:
+    name: Prune old container tags
+    runs-on: linux
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        include:
+          # Each image is about 15 GB; keep the newest three releases.
+          - suffix: ''
+            keep: '3'
+          # Content-keyed stack images (stack-<hash>) that candidates build FROM.
+          - suffix: '-stack'
+            keep: '1'
+            keep_newest: '3'
+    container:
+      image: debian:trixie-slim
+    steps:
+      - name: Install tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            bash coreutils curl git grep jq nodejs ca-certificates
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # Never delete a tag a deployment manifest still references.
+      - name: Check out GitOps
+        env:
+          FORGEJO_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
+        run: |
+          git -c http.extraHeader="Authorization: token ${FORGEJO_TOKEN}" \
+            clone --depth 1 ${{ github.server_url }}/${{ github.repository_owner }}/gitops.git /tmp/gitops
+
+      - name: Retain releases, build aliases and deployed tags
+        env:
+          FORGEJO_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
+          FORGEJO_URL: ${{ github.server_url }}
+          PACKAGE_OWNER: ${{ github.repository_owner }}
+          PACKAGE_SUFFIX: ${{ matrix.suffix }}
+          KEEP_RELEASES: ${{ matrix.keep }}
+          KEEP_NEWEST: ${{ matrix.keep_newest }}
+          KEEP_REFERENCED_DIR: /tmp/gitops/clusters
+        run: |
+          export PACKAGE_NAME="${GITHUB_REPOSITORY#*/}${PACKAGE_SUFFIX}"
+          ./scripts/prune-container-releases.sh --apply
