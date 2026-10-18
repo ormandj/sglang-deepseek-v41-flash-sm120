@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.4.0-rc.3
+## v0.4.0 (stable; 2026-10-17)
 
 The 0.3.0 image rebuilt on current upstream sources for `deepseek-ai/DeepSeek-V4.1-Flash-1017` (revision `1bae0e1088993b9b82de08f59de5be5a34e42170`, unchanged). The runtime configuration is unchanged.
 
@@ -12,9 +12,26 @@ The 0.3.0 image rebuilt on current upstream sources for `deepseek-ai/DeepSeek-V4
 - New patches: DSpark folded-accept results are copied before the next verify replay, so tensor-parallel ranks commit the same tokens under overlap scheduling with HiCache (sgl-project/sglang#42812, amended so the in-graph accept still writes the static accept buffers after SGLang's accept refactor); the FlashInfer PCIe-IPC all-reduce tuner adds a barrier before its warm-up, bounds the copy-engine ring depth and alternates the candidate order while ranking (flashinfer-ai/flashinfer#6401).
 - The other patches are carried at their current heads, rebased onto the new sources; the mHC decode split and the wide-prefill mHC statistics overlap are ported to SGLang's new layer-boundary transports.
 
+- The launcher measures the speculative-decoding cost table at `top_p` 1.0, the DeepSeek-V4.1-Flash-1017 model card's sampling, passes `--tp-size` and no longer sets `SGLANG_DSPARK_FOLDED_SAMPLING`: SGLang now folds a sampling DSpark proposal by default.
+
 ### Upgrade
 
-Start the `v0.4.0-rc.1` image with the same settings as 0.3.0. FlashInfer changed, so the first start compiles its kernels into a new directory of the kernel cache, and the speculative-decoding cost table is measured again.
+Start the `v0.4.0` image with the updated launcher, or with 0.3.0's settings plus `SGLANG_DSPARK_SPS_AUTOTUNE_TOP_P=1.0`. FlashInfer changed, so use a new kernel cache directory: the first start compiles its kernels and measures the speculative-decoding cost table (about 7 minutes after warmup; its decode log lines show an accept length of 1.00 by design), and later starts reuse both.
+
+### Measurements
+
+Validation runs on four RTX PRO 6000 Blackwell Max-Q GPUs at 250 W each, with the privately built image of this release, at the model card's sampling (temperature 1.0, `top_p` 1.0, thinking with `reasoning_effort` high), three repetitions per cell.
+
+| Concurrency | C1 | C2 | C4 | C8 | C16 |
+|---|---|---|---|---|---|
+| Decode output tok/s | 200 | 319 | 502 | 710 | 1,022 |
+| Accepted tokens per step | 2.25 | 2.20 | 2.24 | 2.13 | 2.09 |
+
+- Cold prefill: about 12.9K, 13.4K and 12.9K prompt tok/s at 8K, 32K and 128K tokens, with prompts sized to whole 8,192-token prefill chunks.
+- Device KV pool: 2,934,016 tokens across requests (2,078,208 in 0.3.0); one request may use up to 1,048,576.
+- Quality: teacher-forced log-probabilities within 0.07 nats (worst prompt mean) and 0.52 nats (maximum) of a full prefill, and no repetition loops in 64 sampled reasoning streams at 4 and 16 concurrent requests.
+
+These are controlled measurements and do not necessarily represent real-world performance. Output rates include reasoning tokens and depend on speculative acceptance. Earlier releases measured decode at `top_p` 0.95 and prefill with prompts that spilled into a short second prefill pass, so their numbers are not directly comparable.
 
 ## v0.3.0 (stable; 2026-10-17)
 

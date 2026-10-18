@@ -30,7 +30,7 @@ require_text "$repo/RUN.md" "revision \`${revision}\`"
 grep -Fx "IMAGE=\${IMAGE:-${image}}" "$launcher" >/dev/null || {
   echo "launcher default image is not ${image}" >&2; exit 1;
 }
-for value in '--tp "$TP_SIZE"' '--ep-size 2' '--kv-cache-dtype fp8_e4m3' '--speculative-algorithm DSPARK' \
+for value in '--tp-size "$TP_SIZE"' '--ep-size 2' '--kv-cache-dtype fp8_e4m3' '--speculative-algorithm DSPARK' \
   '--speculative-dspark-block-size 5' '--speculative-dspark-sps-autotune auto' '--load-format instanttensor' \
   '--enable-decoder-swa-bounded-replay' '--enable-encoder-swa-bounded-replay' '--warmups serving_coverage'; do
   require_text "$launcher" "$value"
