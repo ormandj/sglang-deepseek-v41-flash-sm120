@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.1-rc.1
+
+0.4.0 with OpenAI-standard reasoning-token usage.
+
+### Changes
+
+- Chat and completions usage report reasoning tokens at `usage.completion_tokens_details.reasoning_tokens`, OpenAI's location, in non-streamed responses, the final `stream_options.include_usage` chunk and continuous usage chunks. OpenAI-compatible gateways that pass only standard usage fields dropped SGLang's top-level `usage.reasoning_tokens`, which is kept.
+
 ## v0.4.0 (stable; 2026-10-17)
 
 The 0.3.0 image rebuilt on current upstream sources for `deepseek-ai/DeepSeek-V4.1-Flash-1017` (revision `1bae0e1088993b9b82de08f59de5be5a34e42170`, unchanged). The runtime configuration is unchanged.

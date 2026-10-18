@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "lineage": "dsv41-platform",
-  "candidate_tag": "v0.4.0-rc.3",
+  "candidate_tag": "v0.4.1-rc.1",
   "platform": "linux/amd64",
   "base": {
     "tag": "docker.io/lmsysorg/sglang:nightly-dev-cu13-20261016-a93f16f0",
@@ -27,7 +27,7 @@
       "ref": "refs/heads/main",
       "commit": "4eb606b2aee8a9165e16352fd4c08d998ba37990",
       "tree": "3aad2bbca943086354e1d9e826be7ca3702e5e29",
-      "effective_tree": "e307153f8094639e066a55adc377315bbc5154c9"
+      "effective_tree": "6ecb886d991e32cad1190c8ae2ac2e3d0ce84b6a"
     },
     "triton": {
       "repository": "https://github.com/triton-lang/triton.git",
@@ -460,6 +460,23 @@
       ],
       "path": "patches/27-dspark-read-accept-no-alias.patch",
       "sha256": "f5daf80ea431f9da3a22ca9174322eece098c226ca114d7adaed805be3da9ec2"
+    },
+    {
+      "id": "chat-usage-completion-tokens-details",
+      "kind": "branch",
+      "branch": "up/openai-usage-reasoning-tokens",
+      "head": "f297d19301e19f1f7af4e93f5fb11e94bbb4e0f9",
+      "upstream_pr": "pending",
+      "reason": "Prepared for sgl-project/sglang (Python, sglang-processor and sglang-server); opencode-reviewed, review findings resolved; PR awaits owner approval.",
+      "purpose": "Chat and completions usage also report reasoning tokens at usage.completion_tokens_details.reasoning_tokens, where OpenAI clients and gateways read them; the top-level usage.reasoning_tokens stays.",
+      "base": "4eb606b2aee8a9165e16352fd4c08d998ba37990",
+      "applied": "three-way",
+      "resolution": "Applied onto the 0.4.0 series with git apply --3way; Rust test helpers and fixtures merge cleanly.",
+      "cpu_tests": [
+        "test/registered/unit/entrypoints/openai/test_usage_processor.py"
+      ],
+      "path": "patches/28-chat-usage-completion-tokens-details.patch",
+      "sha256": "a6fa72ee53f1adb682b5a0c56a2a8d5e80f95f2898285e7b01c7d0281edb86c0"
     }
   ],
   "packaging": {

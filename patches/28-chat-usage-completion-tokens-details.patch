@@ -1,0 +1,1415 @@
+diff --git a/python/sglang/srt/entrypoints/openai/protocol.py b/python/sglang/srt/entrypoints/openai/protocol.py
+index 36c1a41f6731019913b87a26f23e43e5aef275fd..ec6f4387dc4dbedaf33f329c1c3d939283ebcad6 100644
+--- a/python/sglang/srt/entrypoints/openai/protocol.py
++++ b/python/sglang/srt/entrypoints/openai/protocol.py
+@@ -206,14 +206,33 @@ class PromptTokensDetails(BaseModel):
+         return data
+ 
+ 
++class CompletionTokensDetails(BaseModel):
++    """OpenAI ``usage.completion_tokens_details``."""
++
++    reasoning_tokens: int = 0
++
++
+ class UsageInfo(BaseModel):
+     prompt_tokens: int = 0
+     total_tokens: int = 0
+     completion_tokens: Optional[int] = 0
+     # Used to return cached tokens info when --enable-cache-report is set
+     prompt_tokens_details: Optional[PromptTokensDetails] = None
++    # OpenAI's location for reasoning tokens (0 when the reasoning parser split
++    # none out). The top-level reasoning_tokens is kept for existing clients.
++    completion_tokens_details: Optional[CompletionTokensDetails] = None
+     reasoning_tokens: Optional[int] = 0
+ 
++    @model_serializer(mode="wrap")
++    def _serialize(self, handler):
++        data = handler(self)
++        # Generation endpoints always set completion_tokens_details (through
++        # UsageProcessor); usage built elsewhere (embeddings, score, classify)
++        # omits the key instead of emitting null, which OpenAI does not allow.
++        if data.get("completion_tokens_details") is None:
++            data.pop("completion_tokens_details", None)
++        return data
++
+ 
+ class StreamOptions(BaseModel):
+     include_usage: Optional[bool] = False
+diff --git a/python/sglang/srt/entrypoints/openai/usage_processor.py b/python/sglang/srt/entrypoints/openai/usage_processor.py
+index 503496af54b49e3d68b20edef6a9d6189663be99..55725b2c07b7cf6a672ffd5cae116e54bf95a16a 100644
+--- a/python/sglang/srt/entrypoints/openai/usage_processor.py
++++ b/python/sglang/srt/entrypoints/openai/usage_processor.py
+@@ -2,7 +2,11 @@ from __future__ import annotations
+ 
+ from typing import Any, Dict, List, Mapping, Optional, final
+ 
+-from sglang.srt.entrypoints.openai.protocol import PromptTokensDetails, UsageInfo
++from sglang.srt.entrypoints.openai.protocol import (
++    CompletionTokensDetails,
++    PromptTokensDetails,
++    UsageInfo,
++)
+ 
+ 
+ @final
+@@ -119,5 +123,10 @@ class UsageProcessor:
+             completion_tokens=completion_tokens,
+             total_tokens=prompt_tokens + completion_tokens,
+             prompt_tokens_details=details,
++            # Also report reasoning tokens where OpenAI clients and gateways look
++            # for them; gateways that pass only standard fields drop the top-level one.
++            completion_tokens_details=CompletionTokensDetails(
++                reasoning_tokens=reasoning_tokens or 0
++            ),
+             reasoning_tokens=reasoning_tokens,
+         )
+diff --git a/python/sglang/test/tool_call_test_runner.py b/python/sglang/test/tool_call_test_runner.py
+index b642260cbda5b9ecf0178374aa0296a66819bcce..f2516c1b269ac1d66fc298ca46bb923c0d1354a3 100644
+--- a/python/sglang/test/tool_call_test_runner.py
++++ b/python/sglang/test/tool_call_test_runner.py
+@@ -267,7 +267,8 @@ def _test_reasoning_usage(client, model):
+         f"expected reasoning_tokens > 0, got {usage.reasoning_tokens}"
+     )
+     if usage.completion_tokens_details:
+-        detail_reasoning = usage.completion_tokens_details.get("reasoning_tokens", 0)
++        # The OpenAI SDK parses this as a model, not a dict.
++        detail_reasoning = usage.completion_tokens_details.reasoning_tokens or 0
+         assert detail_reasoning > 0, (
+             f"expected completion_tokens_details.reasoning_tokens > 0, got {detail_reasoning}"
+         )
+diff --git a/rust/sglang-processor/src/openai/wire.rs b/rust/sglang-processor/src/openai/wire.rs
+index 50fff96bd4411fa6ce9ca3b8fadd1449770c6efc..ced924cb2249856c35bc57b13a1c723d4693e55f 100644
+--- a/rust/sglang-processor/src/openai/wire.rs
++++ b/rust/sglang-processor/src/openai/wire.rs
+@@ -75,6 +75,7 @@ pub(super) fn usage(prompt: u64, completion: u64, reasoning: u64, cached: Option
+         "total_tokens": prompt + completion,
+         "completion_tokens": completion,
+         "prompt_tokens_details": cached.map(|n| json!({"cached_tokens": n})),
++        "completion_tokens_details": {"reasoning_tokens": reasoning},
+         "reasoning_tokens": reasoning,
+     })
+ }
+diff --git a/rust/sglang-processor/tests/fixtures/openai_parity/deepseek-v4-flash-0731.json b/rust/sglang-processor/tests/fixtures/openai_parity/deepseek-v4-flash-0731.json
+index bbbaf63cc35dcd9629e7b41c91fecd5a30c707ab..43340fdf18c66b983d0cf4c561bce3986f8be5a8 100644
+--- a/rust/sglang-processor/tests/fixtures/openai_parity/deepseek-v4-flash-0731.json
++++ b/rust/sglang-processor/tests/fixtures/openai_parity/deepseek-v4-flash-0731.json
+@@ -64,6 +64,7 @@
+             "total_tokens": 21,
+             "completion_tokens": 16,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -131,6 +132,7 @@
+             "total_tokens": 21,
+             "completion_tokens": 16,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -217,7 +219,7 @@
+           {"id": "9136486064c0430ebbf11fbb6b157884", "object": "text_completion", "created": 1791964719, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "text": "1,", "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": null},
+           {"id": "9136486064c0430ebbf11fbb6b157884", "object": "text_completion", "created": 1791964719, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "text": " 2, 3,", "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": null},
+           {"id": "9136486064c0430ebbf11fbb6b157884", "object": "text_completion", "created": 1791964719, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "text": " 4,", "logprobs": null, "finish_reason": "length", "matched_stop": null}], "usage": null},
+-          {"id": "9136486064c0430ebbf11fbb6b157884", "object": "text_completion", "created": 1791964719, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [], "usage": {"prompt_tokens": 4, "total_tokens": 16, "completion_tokens": 12, "reasoning_tokens": 0}},
++          {"id": "9136486064c0430ebbf11fbb6b157884", "object": "text_completion", "created": 1791964719, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [], "usage": {"prompt_tokens": 4, "total_tokens": 16, "completion_tokens": 12, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
+           "[DONE]"
+         ]
+       }
+@@ -252,10 +254,10 @@
+       },
+       "openai": {
+         "events": [
+-          {"id": "e1e9b18d1513489e9165393ebca155b9", "object": "text_completion", "created": 1791964719, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "text": " ", "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 4, "total_tokens": 5, "completion_tokens": 1, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "e1e9b18d1513489e9165393ebca155b9", "object": "text_completion", "created": 1791964719, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "text": "1,", "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 4, "total_tokens": 7, "completion_tokens": 3, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "e1e9b18d1513489e9165393ebca155b9", "object": "text_completion", "created": 1791964719, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "text": " 2,", "logprobs": null, "finish_reason": "length", "matched_stop": null}], "usage": {"prompt_tokens": 4, "total_tokens": 10, "completion_tokens": 6, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "e1e9b18d1513489e9165393ebca155b9", "object": "text_completion", "created": 1791964719, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [], "usage": {"prompt_tokens": 4, "total_tokens": 10, "completion_tokens": 6, "reasoning_tokens": 0}},
++          {"id": "e1e9b18d1513489e9165393ebca155b9", "object": "text_completion", "created": 1791964719, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "text": " ", "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 4, "total_tokens": 5, "completion_tokens": 1, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "e1e9b18d1513489e9165393ebca155b9", "object": "text_completion", "created": 1791964719, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "text": "1,", "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 4, "total_tokens": 7, "completion_tokens": 3, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "e1e9b18d1513489e9165393ebca155b9", "object": "text_completion", "created": 1791964719, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "text": " 2,", "logprobs": null, "finish_reason": "length", "matched_stop": null}], "usage": {"prompt_tokens": 4, "total_tokens": 10, "completion_tokens": 6, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "e1e9b18d1513489e9165393ebca155b9", "object": "text_completion", "created": 1791964719, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [], "usage": {"prompt_tokens": 4, "total_tokens": 10, "completion_tokens": 6, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
+           "[DONE]"
+         ]
+       }
+@@ -317,6 +319,7 @@
+             "total_tokens": 14,
+             "completion_tokens": 8,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -494,6 +497,7 @@
+             "total_tokens": 31,
+             "completion_tokens": 24,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -567,7 +571,7 @@
+           {"id": "8b9e978ebd6a47deb39088b695154f69", "object": "text_completion", "created": 1791964720, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 3, "text": " sky is", "logprobs": null, "finish_reason": "length", "matched_stop": null}], "usage": null},
+           {"id": "f237edf68a5f41b5b30f712d9fe3aebb", "object": "text_completion", "created": 1791964720, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "text": " plus", "logprobs": null, "finish_reason": "length", "matched_stop": null}], "usage": null},
+           {"id": "975c9aefdabd4907baf0972bc7e7be8c", "object": "text_completion", "created": 1791964720, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 1, "text": " plus", "logprobs": null, "finish_reason": "length", "matched_stop": null}], "usage": null},
+-          {"id": "975c9aefdabd4907baf0972bc7e7be8c", "object": "text_completion", "created": 1791964720, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [], "usage": {"prompt_tokens": 7, "total_tokens": 31, "completion_tokens": 24, "reasoning_tokens": 0}},
++          {"id": "975c9aefdabd4907baf0972bc7e7be8c", "object": "text_completion", "created": 1791964720, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [], "usage": {"prompt_tokens": 7, "total_tokens": 31, "completion_tokens": 24, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
+           "[DONE]"
+         ]
+       }
+@@ -749,6 +753,7 @@
+             "total_tokens": 13,
+             "completion_tokens": 8,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -863,6 +868,7 @@
+             "total_tokens": 18,
+             "completion_tokens": 8,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -971,6 +977,7 @@
+             "total_tokens": 28,
+             "completion_tokens": 21,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -1058,6 +1065,7 @@
+             "total_tokens": 31,
+             "completion_tokens": 22,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -1157,6 +1165,7 @@
+             "total_tokens": 12,
+             "completion_tokens": 8,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -1224,6 +1233,7 @@
+             "total_tokens": 5,
+             "completion_tokens": 4,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -1358,7 +1368,7 @@
+         "events": [
+           {"id": "r", "object": "text_completion", "created": 1791964722, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "text": " there", "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": null},
+           {"error": {"object": "error", "message": "Out of memory.", "type": "SERVICE_UNAVAILABLE", "param": null, "code": 503}},
+-          {"id": "r", "object": "text_completion", "created": 1791964722, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [], "usage": {"prompt_tokens": 2, "total_tokens": 3, "completion_tokens": 1, "reasoning_tokens": 0}},
++          {"id": "r", "object": "text_completion", "created": 1791964722, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [], "usage": {"prompt_tokens": 2, "total_tokens": 3, "completion_tokens": 1, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
+           "[DONE]"
+         ]
+       }
+@@ -1455,6 +1465,7 @@
+             "total_tokens": 24,
+             "completion_tokens": 9,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -1573,6 +1584,7 @@
+             "total_tokens": 80,
+             "completion_tokens": 65,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 63},
+             "reasoning_tokens": 63
+           },
+           "metadata": {
+@@ -1656,7 +1668,7 @@
+           {"id": "a2cb39f9ec204a51bc183a70badaeea0", "object": "chat.completion.chunk", "created": 1791964723, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"reasoning_content": " number."}, "logprobs": null, "finish_reason": null, "matched_stop": null}]},
+           {"id": "a2cb39f9ec204a51bc183a70badaeea0", "object": "chat.completion.chunk", "created": 1791964723, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"reasoning_content": null, "content": "391"}, "logprobs": null, "finish_reason": null, "matched_stop": null}]},
+           {"id": "a2cb39f9ec204a51bc183a70badaeea0", "object": "chat.completion.chunk", "created": 1791964723, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"reasoning_content": null}, "logprobs": null, "finish_reason": "stop", "matched_stop": 1}]},
+-          {"id": "a2cb39f9ec204a51bc183a70badaeea0", "object": "chat.completion.chunk", "created": 1791964723, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [], "usage": {"prompt_tokens": 15, "total_tokens": 93, "completion_tokens": 78, "prompt_tokens_details": null, "reasoning_tokens": 76}},
++          {"id": "a2cb39f9ec204a51bc183a70badaeea0", "object": "chat.completion.chunk", "created": 1791964723, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [], "usage": {"prompt_tokens": 15, "total_tokens": 93, "completion_tokens": 78, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 76}, "reasoning_tokens": 76}},
+           "[DONE]"
+         ]
+       }
+@@ -1795,6 +1807,7 @@
+             "total_tokens": 128,
+             "completion_tokens": 21,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 19},
+             "reasoning_tokens": 19
+           },
+           "metadata": {
+@@ -2256,6 +2269,7 @@
+             "total_tokens": 39,
+             "completion_tokens": 24,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 24},
+             "reasoning_tokens": 24
+           },
+           "metadata": {
+@@ -2352,16 +2366,16 @@
+       "openai": {
+         "events": [
+           {"id": "ddfd1c2edfda448dbd506c6c70c0f2d0", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 1, "delta": {"reasoning_content": null, "role": "assistant", "content": ""}, "logprobs": null, "finish_reason": null, "matched_stop": null}]},
+-          {"id": "ddfd1c2edfda448dbd506c6c70c0f2d0", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 1, "delta": {"reasoning_content": null, "content": "17"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 15, "total_tokens": 16, "completion_tokens": 1, "prompt_tokens_details": null, "reasoning_tokens": 0}},
++          {"id": "ddfd1c2edfda448dbd506c6c70c0f2d0", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 1, "delta": {"reasoning_content": null, "content": "17"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 15, "total_tokens": 16, "completion_tokens": 1, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
+           {"id": "63809bbe29f54f1d8538e0623c2f7d37", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"reasoning_content": null, "role": "assistant", "content": ""}, "logprobs": null, "finish_reason": null, "matched_stop": null}]},
+-          {"id": "63809bbe29f54f1d8538e0623c2f7d37", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"reasoning_content": null, "content": "17"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 15, "total_tokens": 16, "completion_tokens": 1, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "63809bbe29f54f1d8538e0623c2f7d37", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"reasoning_content": null, "content": " * 23 = 391"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 15, "total_tokens": 22, "completion_tokens": 7, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "ddfd1c2edfda448dbd506c6c70c0f2d0", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 1, "delta": {"reasoning_content": null, "content": " * 23 = 391"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 15, "total_tokens": 22, "completion_tokens": 7, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "ddfd1c2edfda448dbd506c6c70c0f2d0", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 1, "delta": {"reasoning_content": null, "content": "."}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 15, "total_tokens": 24, "completion_tokens": 9, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "63809bbe29f54f1d8538e0623c2f7d37", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"reasoning_content": null, "content": "."}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 15, "total_tokens": 24, "completion_tokens": 9, "prompt_tokens_details": null, "reasoning_tokens": 0}},
++          {"id": "63809bbe29f54f1d8538e0623c2f7d37", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"reasoning_content": null, "content": "17"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 15, "total_tokens": 16, "completion_tokens": 1, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "63809bbe29f54f1d8538e0623c2f7d37", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"reasoning_content": null, "content": " * 23 = 391"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 15, "total_tokens": 22, "completion_tokens": 7, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "ddfd1c2edfda448dbd506c6c70c0f2d0", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 1, "delta": {"reasoning_content": null, "content": " * 23 = 391"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 15, "total_tokens": 22, "completion_tokens": 7, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "ddfd1c2edfda448dbd506c6c70c0f2d0", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 1, "delta": {"reasoning_content": null, "content": "."}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 15, "total_tokens": 24, "completion_tokens": 9, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "63809bbe29f54f1d8538e0623c2f7d37", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"reasoning_content": null, "content": "."}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 15, "total_tokens": 24, "completion_tokens": 9, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
+           {"id": "63809bbe29f54f1d8538e0623c2f7d37", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 1, "delta": {"reasoning_content": null}, "logprobs": null, "finish_reason": "stop", "matched_stop": 1}]},
+           {"id": "63809bbe29f54f1d8538e0623c2f7d37", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"reasoning_content": null}, "logprobs": null, "finish_reason": "stop", "matched_stop": 1}]},
+-          {"id": "63809bbe29f54f1d8538e0623c2f7d37", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [], "usage": {"prompt_tokens": 15, "total_tokens": 33, "completion_tokens": 18, "prompt_tokens_details": null, "reasoning_tokens": 0}},
++          {"id": "63809bbe29f54f1d8538e0623c2f7d37", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [], "usage": {"prompt_tokens": 15, "total_tokens": 33, "completion_tokens": 18, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
+           "[DONE]"
+         ]
+       }
+@@ -2403,7 +2417,7 @@
+           {"id": "r", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"reasoning_content": null, "role": "assistant", "content": ""}, "logprobs": null, "finish_reason": null, "matched_stop": null}]},
+           {"id": "r", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"reasoning_content": null, "content": " there"}, "logprobs": null, "finish_reason": null, "matched_stop": null}]},
+           {"error": {"object": "error", "message": "Out of memory.", "type": "SERVICE_UNAVAILABLE", "param": null, "code": 503}},
+-          {"id": "r", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [], "usage": {"prompt_tokens": 2, "total_tokens": 3, "completion_tokens": 1, "prompt_tokens_details": null, "reasoning_tokens": 0}},
++          {"id": "r", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [], "usage": {"prompt_tokens": 2, "total_tokens": 3, "completion_tokens": 1, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
+           "[DONE]"
+         ]
+       }
+@@ -2467,6 +2481,7 @@
+             "total_tokens": 24,
+             "completion_tokens": 9,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -2541,6 +2556,7 @@
+             "total_tokens": 22,
+             "completion_tokens": 4,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -2675,6 +2691,7 @@
+             "total_tokens": 31,
+             "completion_tokens": 17,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -2753,6 +2770,7 @@
+             "total_tokens": 63,
+             "completion_tokens": 48,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 51},
+             "reasoning_tokens": 51
+           },
+           "metadata": {
+@@ -2893,6 +2911,7 @@
+             "total_tokens": 79,
+             "completion_tokens": 56,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 53},
+             "reasoning_tokens": 53
+           },
+           "metadata": {
+@@ -2973,6 +2992,7 @@
+             "total_tokens": 24,
+             "completion_tokens": 9,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -3041,6 +3061,7 @@
+             "total_tokens": 12,
+             "completion_tokens": 2,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -3192,6 +3213,7 @@
+             "total_tokens": 425,
+             "completion_tokens": 53,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -3306,7 +3328,7 @@
+           {"id": "3cfe97776e0945739b2cc709999f7899", "object": "chat.completion.chunk", "created": 1791964726, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"role": null, "content": " you.", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": null},
+           {"id": "3cfe97776e0945739b2cc709999f7899", "object": "chat.completion.chunk", "created": 1791964726, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"role": null, "content": null, "reasoning_content": null, "tool_calls": [{"id": "call_ca0b194dacd342d7925ba091", "index": 0, "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"Paris\"}"}}]}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": null},
+           {"id": "3cfe97776e0945739b2cc709999f7899", "object": "chat.completion.chunk", "created": 1791964726, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"reasoning_content": null}, "logprobs": null, "finish_reason": "tool_calls", "matched_stop": 1}]},
+-          {"id": "3cfe97776e0945739b2cc709999f7899", "object": "chat.completion.chunk", "created": 1791964726, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [], "usage": {"prompt_tokens": 372, "total_tokens": 427, "completion_tokens": 55, "prompt_tokens_details": null, "reasoning_tokens": 0}},
++          {"id": "3cfe97776e0945739b2cc709999f7899", "object": "chat.completion.chunk", "created": 1791964726, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [], "usage": {"prompt_tokens": 372, "total_tokens": 427, "completion_tokens": 55, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
+           "[DONE]"
+         ]
+       }
+@@ -3571,6 +3593,7 @@
+             "total_tokens": 492,
+             "completion_tokens": 109,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -3821,6 +3844,7 @@
+             "total_tokens": 420,
+             "completion_tokens": 48,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -4066,20 +4090,20 @@
+       "openai": {
+         "events": [
+           {"id": "8825fd65b4654203ba66a8b3232ac5e0", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 1, "delta": {"reasoning_content": null, "role": "assistant", "content": ""}, "logprobs": null, "finish_reason": null, "matched_stop": null}]},
+-          {"id": "8825fd65b4654203ba66a8b3232ac5e0", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 1, "delta": {"role": null, "content": "I", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 372, "total_tokens": 373, "completion_tokens": 1, "prompt_tokens_details": null, "reasoning_tokens": 0}},
++          {"id": "8825fd65b4654203ba66a8b3232ac5e0", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 1, "delta": {"role": null, "content": "I", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 372, "total_tokens": 373, "completion_tokens": 1, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
+           {"id": "7f853bbca7474f1ebc84b5b1239509b4", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"reasoning_content": null, "role": "assistant", "content": ""}, "logprobs": null, "finish_reason": null, "matched_stop": null}]},
+-          {"id": "7f853bbca7474f1ebc84b5b1239509b4", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"role": null, "content": "I", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 372, "total_tokens": 373, "completion_tokens": 1, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "7f853bbca7474f1ebc84b5b1239509b4", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"role": null, "content": "'ll get", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 372, "total_tokens": 375, "completion_tokens": 3, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "8825fd65b4654203ba66a8b3232ac5e0", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 1, "delta": {"role": null, "content": "'ll get", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 372, "total_tokens": 375, "completion_tokens": 3, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "8825fd65b4654203ba66a8b3232ac5e0", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 1, "delta": {"role": null, "content": " the current", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 372, "total_tokens": 377, "completion_tokens": 5, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "7f853bbca7474f1ebc84b5b1239509b4", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"role": null, "content": " the current", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 372, "total_tokens": 377, "completion_tokens": 5, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "7f853bbca7474f1ebc84b5b1239509b4", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"role": null, "content": " weather for Paris.", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 372, "total_tokens": 381, "completion_tokens": 9, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "8825fd65b4654203ba66a8b3232ac5e0", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 1, "delta": {"role": null, "content": " weather for Paris.", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 372, "total_tokens": 381, "completion_tokens": 9, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "7f853bbca7474f1ebc84b5b1239509b4", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"role": null, "content": null, "reasoning_content": null, "tool_calls": [{"id": "call_0acb95589e824c6ea69ae41d", "index": 0, "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"Paris\"}"}}]}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 372, "total_tokens": 423, "completion_tokens": 51, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "8825fd65b4654203ba66a8b3232ac5e0", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 1, "delta": {"role": null, "content": null, "reasoning_content": null, "tool_calls": [{"id": "call_d4f164bae6d5406c8c0fb239", "index": 0, "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"Paris\"}"}}]}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 372, "total_tokens": 423, "completion_tokens": 51, "prompt_tokens_details": null, "reasoning_tokens": 0}},
++          {"id": "7f853bbca7474f1ebc84b5b1239509b4", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"role": null, "content": "I", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 372, "total_tokens": 373, "completion_tokens": 1, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "7f853bbca7474f1ebc84b5b1239509b4", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"role": null, "content": "'ll get", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 372, "total_tokens": 375, "completion_tokens": 3, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "8825fd65b4654203ba66a8b3232ac5e0", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 1, "delta": {"role": null, "content": "'ll get", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 372, "total_tokens": 375, "completion_tokens": 3, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "8825fd65b4654203ba66a8b3232ac5e0", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 1, "delta": {"role": null, "content": " the current", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 372, "total_tokens": 377, "completion_tokens": 5, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "7f853bbca7474f1ebc84b5b1239509b4", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"role": null, "content": " the current", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 372, "total_tokens": 377, "completion_tokens": 5, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "7f853bbca7474f1ebc84b5b1239509b4", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"role": null, "content": " weather for Paris.", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 372, "total_tokens": 381, "completion_tokens": 9, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "8825fd65b4654203ba66a8b3232ac5e0", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 1, "delta": {"role": null, "content": " weather for Paris.", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 372, "total_tokens": 381, "completion_tokens": 9, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "7f853bbca7474f1ebc84b5b1239509b4", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"role": null, "content": null, "reasoning_content": null, "tool_calls": [{"id": "call_0acb95589e824c6ea69ae41d", "index": 0, "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"Paris\"}"}}]}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 372, "total_tokens": 423, "completion_tokens": 51, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "8825fd65b4654203ba66a8b3232ac5e0", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 1, "delta": {"role": null, "content": null, "reasoning_content": null, "tool_calls": [{"id": "call_d4f164bae6d5406c8c0fb239", "index": 0, "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"Paris\"}"}}]}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 372, "total_tokens": 423, "completion_tokens": 51, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
+           {"id": "7f853bbca7474f1ebc84b5b1239509b4", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 1, "delta": {"reasoning_content": null}, "logprobs": null, "finish_reason": "tool_calls", "matched_stop": 1}]},
+           {"id": "7f853bbca7474f1ebc84b5b1239509b4", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"reasoning_content": null}, "logprobs": null, "finish_reason": "tool_calls", "matched_stop": 1}]},
+-          {"id": "7f853bbca7474f1ebc84b5b1239509b4", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [], "usage": {"prompt_tokens": 372, "total_tokens": 478, "completion_tokens": 106, "prompt_tokens_details": null, "reasoning_tokens": 0}},
++          {"id": "7f853bbca7474f1ebc84b5b1239509b4", "object": "chat.completion.chunk", "created": 1791964728, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [], "usage": {"prompt_tokens": 372, "total_tokens": 478, "completion_tokens": 106, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
+           "[DONE]"
+         ]
+       }
+@@ -4205,6 +4229,7 @@
+             "total_tokens": 400,
+             "completion_tokens": 32,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+diff --git a/rust/sglang-processor/tests/fixtures/openai_parity/deepseek-v4.1-flash.json b/rust/sglang-processor/tests/fixtures/openai_parity/deepseek-v4.1-flash.json
+index 45f9909003d64ccabdf5f6684fe0a0d295b4eac8..e602f501ecaa5484ac2bb85cdab45a1406dcc56a 100644
+--- a/rust/sglang-processor/tests/fixtures/openai_parity/deepseek-v4.1-flash.json
++++ b/rust/sglang-processor/tests/fixtures/openai_parity/deepseek-v4.1-flash.json
+@@ -59,6 +59,7 @@
+             "total_tokens": 21,
+             "completion_tokens": 16,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -145,7 +146,7 @@
+           {"id": "1065b36962644355822df94ac3e210a9", "object": "text_completion", "created": 1791964219, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "text": "1", "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": null},
+           {"id": "1065b36962644355822df94ac3e210a9", "object": "text_completion", "created": 1791964219, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "text": ". 2.", "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": null},
+           {"id": "1065b36962644355822df94ac3e210a9", "object": "text_completion", "created": 1791964219, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "text": " 3. 4.", "logprobs": null, "finish_reason": "length", "matched_stop": null}], "usage": null},
+-          {"id": "1065b36962644355822df94ac3e210a9", "object": "text_completion", "created": 1791964219, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [], "usage": {"prompt_tokens": 4, "total_tokens": 16, "completion_tokens": 12, "reasoning_tokens": 0}},
++          {"id": "1065b36962644355822df94ac3e210a9", "object": "text_completion", "created": 1791964219, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [], "usage": {"prompt_tokens": 4, "total_tokens": 16, "completion_tokens": 12, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
+           "[DONE]"
+         ]
+       }
+@@ -207,6 +208,7 @@
+             "total_tokens": 14,
+             "completion_tokens": 8,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -315,6 +317,7 @@
+             "total_tokens": 17,
+             "completion_tokens": 2,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -432,6 +435,7 @@
+             "total_tokens": 59,
+             "completion_tokens": 18,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 16},
+             "reasoning_tokens": 16
+           },
+           "metadata": {
+@@ -489,7 +493,7 @@
+           {"id": "8eb1429855cc4ed58576582e47a480ce", "object": "chat.completion.chunk", "created": 1791964222, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "delta": {"reasoning_content": "."}, "logprobs": null, "finish_reason": null, "matched_stop": null}]},
+           {"id": "8eb1429855cc4ed58576582e47a480ce", "object": "chat.completion.chunk", "created": 1791964222, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "delta": {"reasoning_content": null, "content": "391"}, "logprobs": null, "finish_reason": null, "matched_stop": null}]},
+           {"id": "8eb1429855cc4ed58576582e47a480ce", "object": "chat.completion.chunk", "created": 1791964222, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "delta": {"reasoning_content": null}, "logprobs": null, "finish_reason": "stop", "matched_stop": 1}]},
+-          {"id": "8eb1429855cc4ed58576582e47a480ce", "object": "chat.completion.chunk", "created": 1791964222, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [], "usage": {"prompt_tokens": 41, "total_tokens": 59, "completion_tokens": 18, "prompt_tokens_details": null, "reasoning_tokens": 16}},
++          {"id": "8eb1429855cc4ed58576582e47a480ce", "object": "chat.completion.chunk", "created": 1791964222, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [], "usage": {"prompt_tokens": 41, "total_tokens": 59, "completion_tokens": 18, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 16}, "reasoning_tokens": 16}},
+           "[DONE]"
+         ]
+       }
+@@ -616,6 +620,7 @@
+             "total_tokens": 59,
+             "completion_tokens": 18,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 16},
+             "reasoning_tokens": 16
+           },
+           "metadata": {
+@@ -1008,6 +1013,7 @@
+             "total_tokens": 59,
+             "completion_tokens": 18,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 16},
+             "reasoning_tokens": 16
+           },
+           "metadata": {
+@@ -1105,12 +1111,12 @@
+       "openai": {
+         "events": [
+           {"id": "f362f47a2265417c91a85ecf0d24f301", "object": "chat.completion.chunk", "created": 1791964223, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "delta": {"reasoning_content": null, "role": "assistant", "content": ""}, "logprobs": null, "finish_reason": null, "matched_stop": null}]},
+-          {"id": "f362f47a2265417c91a85ecf0d24f301", "object": "chat.completion.chunk", "created": 1791964223, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "delta": {"reasoning_content": null, "content": "391"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 15, "total_tokens": 16, "completion_tokens": 1, "prompt_tokens_details": null, "reasoning_tokens": 0}},
++          {"id": "f362f47a2265417c91a85ecf0d24f301", "object": "chat.completion.chunk", "created": 1791964223, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "delta": {"reasoning_content": null, "content": "391"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 15, "total_tokens": 16, "completion_tokens": 1, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
+           {"id": "ee5d4a95cb574d54844cb72ce03c2f9d", "object": "chat.completion.chunk", "created": 1791964223, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 1, "delta": {"reasoning_content": null, "role": "assistant", "content": ""}, "logprobs": null, "finish_reason": null, "matched_stop": null}]},
+-          {"id": "ee5d4a95cb574d54844cb72ce03c2f9d", "object": "chat.completion.chunk", "created": 1791964223, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 1, "delta": {"reasoning_content": null, "content": "391"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 15, "total_tokens": 16, "completion_tokens": 1, "prompt_tokens_details": null, "reasoning_tokens": 0}},
++          {"id": "ee5d4a95cb574d54844cb72ce03c2f9d", "object": "chat.completion.chunk", "created": 1791964223, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 1, "delta": {"reasoning_content": null, "content": "391"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 15, "total_tokens": 16, "completion_tokens": 1, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
+           {"id": "ee5d4a95cb574d54844cb72ce03c2f9d", "object": "chat.completion.chunk", "created": 1791964223, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "delta": {"reasoning_content": null}, "logprobs": null, "finish_reason": "stop", "matched_stop": 1}]},
+           {"id": "ee5d4a95cb574d54844cb72ce03c2f9d", "object": "chat.completion.chunk", "created": 1791964223, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 1, "delta": {"reasoning_content": null}, "logprobs": null, "finish_reason": "stop", "matched_stop": 1}]},
+-          {"id": "ee5d4a95cb574d54844cb72ce03c2f9d", "object": "chat.completion.chunk", "created": 1791964223, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [], "usage": {"prompt_tokens": 15, "total_tokens": 19, "completion_tokens": 4, "prompt_tokens_details": null, "reasoning_tokens": 0}},
++          {"id": "ee5d4a95cb574d54844cb72ce03c2f9d", "object": "chat.completion.chunk", "created": 1791964223, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [], "usage": {"prompt_tokens": 15, "total_tokens": 19, "completion_tokens": 4, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
+           "[DONE]"
+         ]
+       }
+@@ -1174,6 +1180,7 @@
+             "total_tokens": 24,
+             "completion_tokens": 9,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -1248,6 +1255,7 @@
+             "total_tokens": 22,
+             "completion_tokens": 4,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -1378,6 +1386,7 @@
+             "total_tokens": 29,
+             "completion_tokens": 15,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -1459,6 +1468,7 @@
+             "total_tokens": 59,
+             "completion_tokens": 18,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 16},
+             "reasoning_tokens": 16
+           },
+           "metadata": {
+@@ -1593,6 +1603,7 @@
+             "total_tokens": 75,
+             "completion_tokens": 26,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 24},
+             "reasoning_tokens": 24
+           },
+           "metadata": {
+@@ -1673,6 +1684,7 @@
+             "total_tokens": 17,
+             "completion_tokens": 2,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -1741,6 +1753,7 @@
+             "total_tokens": 12,
+             "completion_tokens": 2,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -1890,6 +1903,7 @@
+             "total_tokens": 402,
+             "completion_tokens": 49,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -1999,7 +2013,7 @@
+           {"id": "dc6419e71ec54b5fa23616abecede55c", "object": "chat.completion.chunk", "created": 1791964224, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "delta": {"role": null, "content": " you.", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": null},
+           {"id": "dc6419e71ec54b5fa23616abecede55c", "object": "chat.completion.chunk", "created": 1791964224, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "delta": {"role": null, "content": null, "reasoning_content": null, "tool_calls": [{"id": "call_81045c2dd21f4771a297a641", "index": 0, "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"Paris\"}"}}]}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": null},
+           {"id": "dc6419e71ec54b5fa23616abecede55c", "object": "chat.completion.chunk", "created": 1791964224, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "delta": {"reasoning_content": null}, "logprobs": null, "finish_reason": "tool_calls", "matched_stop": 1}]},
+-          {"id": "dc6419e71ec54b5fa23616abecede55c", "object": "chat.completion.chunk", "created": 1791964224, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [], "usage": {"prompt_tokens": 353, "total_tokens": 402, "completion_tokens": 49, "prompt_tokens_details": null, "reasoning_tokens": 0}},
++          {"id": "dc6419e71ec54b5fa23616abecede55c", "object": "chat.completion.chunk", "created": 1791964224, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [], "usage": {"prompt_tokens": 353, "total_tokens": 402, "completion_tokens": 49, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
+           "[DONE]"
+         ]
+       }
+@@ -2258,6 +2272,7 @@
+             "total_tokens": 448,
+             "completion_tokens": 84,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -2501,6 +2516,7 @@
+             "total_tokens": 401,
+             "completion_tokens": 48,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -2752,20 +2768,20 @@
+       "openai": {
+         "events": [
+           {"id": "64f7d825330043e195fdc42064f2da81", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "delta": {"reasoning_content": null, "role": "assistant", "content": ""}, "logprobs": null, "finish_reason": null, "matched_stop": null}]},
+-          {"id": "64f7d825330043e195fdc42064f2da81", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "delta": {"role": null, "content": "I", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 353, "total_tokens": 354, "completion_tokens": 1, "prompt_tokens_details": null, "reasoning_tokens": 0}},
++          {"id": "64f7d825330043e195fdc42064f2da81", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "delta": {"role": null, "content": "I", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 353, "total_tokens": 354, "completion_tokens": 1, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
+           {"id": "92535597b39e4115a1646fe00509816f", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 1, "delta": {"reasoning_content": null, "role": "assistant", "content": ""}, "logprobs": null, "finish_reason": null, "matched_stop": null}]},
+-          {"id": "92535597b39e4115a1646fe00509816f", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 1, "delta": {"role": null, "content": "I", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 353, "total_tokens": 354, "completion_tokens": 1, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "64f7d825330043e195fdc42064f2da81", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "delta": {"role": null, "content": "'ll check the current", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 353, "total_tokens": 358, "completion_tokens": 5, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "92535597b39e4115a1646fe00509816f", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 1, "delta": {"role": null, "content": "'ll check the current", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 353, "total_tokens": 358, "completion_tokens": 5, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "64f7d825330043e195fdc42064f2da81", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "delta": {"role": null, "content": " weather in Paris for", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 353, "total_tokens": 362, "completion_tokens": 9, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "92535597b39e4115a1646fe00509816f", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 1, "delta": {"role": null, "content": " weather in Paris for", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 353, "total_tokens": 362, "completion_tokens": 9, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "64f7d825330043e195fdc42064f2da81", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "delta": {"role": null, "content": " you.", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 353, "total_tokens": 398, "completion_tokens": 45, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "64f7d825330043e195fdc42064f2da81", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "delta": {"role": null, "content": null, "reasoning_content": null, "tool_calls": [{"id": "call_01a611e73a394e758a729517", "index": 0, "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"Paris\"}"}}]}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 353, "total_tokens": 398, "completion_tokens": 45, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "92535597b39e4115a1646fe00509816f", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 1, "delta": {"role": null, "content": " you.", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 353, "total_tokens": 398, "completion_tokens": 45, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "92535597b39e4115a1646fe00509816f", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 1, "delta": {"role": null, "content": null, "reasoning_content": null, "tool_calls": [{"id": "call_ffa07ea755914496ab872034", "index": 0, "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"Paris\"}"}}]}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 353, "total_tokens": 398, "completion_tokens": 45, "prompt_tokens_details": null, "reasoning_tokens": 0}},
++          {"id": "92535597b39e4115a1646fe00509816f", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 1, "delta": {"role": null, "content": "I", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 353, "total_tokens": 354, "completion_tokens": 1, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "64f7d825330043e195fdc42064f2da81", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "delta": {"role": null, "content": "'ll check the current", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 353, "total_tokens": 358, "completion_tokens": 5, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "92535597b39e4115a1646fe00509816f", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 1, "delta": {"role": null, "content": "'ll check the current", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 353, "total_tokens": 358, "completion_tokens": 5, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "64f7d825330043e195fdc42064f2da81", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "delta": {"role": null, "content": " weather in Paris for", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 353, "total_tokens": 362, "completion_tokens": 9, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "92535597b39e4115a1646fe00509816f", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 1, "delta": {"role": null, "content": " weather in Paris for", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 353, "total_tokens": 362, "completion_tokens": 9, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "64f7d825330043e195fdc42064f2da81", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "delta": {"role": null, "content": " you.", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 353, "total_tokens": 398, "completion_tokens": 45, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "64f7d825330043e195fdc42064f2da81", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "delta": {"role": null, "content": null, "reasoning_content": null, "tool_calls": [{"id": "call_01a611e73a394e758a729517", "index": 0, "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"Paris\"}"}}]}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 353, "total_tokens": 398, "completion_tokens": 45, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "92535597b39e4115a1646fe00509816f", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 1, "delta": {"role": null, "content": " you.", "reasoning_content": null}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 353, "total_tokens": 398, "completion_tokens": 45, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "92535597b39e4115a1646fe00509816f", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 1, "delta": {"role": null, "content": null, "reasoning_content": null, "tool_calls": [{"id": "call_ffa07ea755914496ab872034", "index": 0, "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"Paris\"}"}}]}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 353, "total_tokens": 398, "completion_tokens": 45, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
+           {"id": "92535597b39e4115a1646fe00509816f", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "delta": {"reasoning_content": null}, "logprobs": null, "finish_reason": "tool_calls", "matched_stop": 1}]},
+           {"id": "92535597b39e4115a1646fe00509816f", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 1, "delta": {"reasoning_content": null}, "logprobs": null, "finish_reason": "tool_calls", "matched_stop": 1}]},
+-          {"id": "92535597b39e4115a1646fe00509816f", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [], "usage": {"prompt_tokens": 353, "total_tokens": 451, "completion_tokens": 98, "prompt_tokens_details": null, "reasoning_tokens": 0}},
++          {"id": "92535597b39e4115a1646fe00509816f", "object": "chat.completion.chunk", "created": 1791964226, "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [], "usage": {"prompt_tokens": 353, "total_tokens": 451, "completion_tokens": 98, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
+           "[DONE]"
+         ]
+       }
+@@ -2882,6 +2898,7 @@
+             "total_tokens": 353,
+             "completion_tokens": 4,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -3102,6 +3119,7 @@
+             "total_tokens": 59,
+             "completion_tokens": 18,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 16},
+             "reasoning_tokens": 16
+           },
+           "metadata": {
+@@ -3182,6 +3200,7 @@
+             "total_tokens": 59,
+             "completion_tokens": 18,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 16},
+             "reasoning_tokens": 16
+           },
+           "metadata": {
+@@ -3461,6 +3480,7 @@
+             "total_tokens": 418,
+             "completion_tokens": 57,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+diff --git a/rust/sglang-processor/tests/fixtures/openai_parity/glm-5.3.json b/rust/sglang-processor/tests/fixtures/openai_parity/glm-5.3.json
+index 2a908d7f826b1e9d9b932079cfd0cda2ee93908a..a56dfc20a8e618e82c2233b8ab21e8a53811f35c 100644
+--- a/rust/sglang-processor/tests/fixtures/openai_parity/glm-5.3.json
++++ b/rust/sglang-processor/tests/fixtures/openai_parity/glm-5.3.json
+@@ -56,6 +56,7 @@
+             "total_tokens": 19,
+             "completion_tokens": 7,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 2},
+             "reasoning_tokens": 2
+           },
+           "metadata": {"weight_version": "default"}
+@@ -119,6 +120,7 @@
+             "total_tokens": 19,
+             "completion_tokens": 7,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 2},
+             "reasoning_tokens": 2
+           },
+           "metadata": {"weight_version": "default"}
+@@ -283,6 +285,7 @@
+             "total_tokens": 13,
+             "completion_tokens": 1,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 2},
+             "reasoning_tokens": 2
+           },
+           "metadata": {"weight_version": "default"}
+diff --git a/rust/sglang-processor/tests/fixtures/openai_parity/kimi-k3.json b/rust/sglang-processor/tests/fixtures/openai_parity/kimi-k3.json
+index 2ab71efeffa424c420648b598308cebefd474ec9..b7af0973f71feafbdc769d30718e0e3e6b3c7fe4 100644
+--- a/rust/sglang-processor/tests/fixtures/openai_parity/kimi-k3.json
++++ b/rust/sglang-processor/tests/fixtures/openai_parity/kimi-k3.json
+@@ -67,6 +67,7 @@
+             "total_tokens": 40,
+             "completion_tokens": 19,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 6},
+             "reasoning_tokens": 6
+           },
+           "metadata": {"weight_version": "default"}
+@@ -118,11 +119,11 @@
+       "openai": {
+         "events": [
+           {"id": "r", "object": "chat.completion.chunk", "created": 1791964276, "model": "moonshotai/Kimi-K3", "choices": [{"index": 0, "delta": {"reasoning_content": null, "role": "assistant", "content": ""}, "logprobs": null, "finish_reason": null, "matched_stop": null}]},
+-          {"id": "r", "object": "chat.completion.chunk", "created": 1791964276, "model": "moonshotai/Kimi-K3", "choices": [{"index": 0, "delta": {"reasoning_content": "Greet back"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 21, "total_tokens": 24, "completion_tokens": 3, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "r", "object": "chat.completion.chunk", "created": 1791964276, "model": "moonshotai/Kimi-K3", "choices": [{"index": 0, "delta": {"reasoning_content": "."}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 21, "total_tokens": 27, "completion_tokens": 6, "prompt_tokens_details": null, "reasoning_tokens": 0}},
+-          {"id": "r", "object": "chat.completion.chunk", "created": 1791964276, "model": "moonshotai/Kimi-K3", "choices": [{"index": 0, "delta": {"reasoning_content": null, "content": "Hello!"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 21, "total_tokens": 33, "completion_tokens": 12, "prompt_tokens_details": null, "reasoning_tokens": 0}},
++          {"id": "r", "object": "chat.completion.chunk", "created": 1791964276, "model": "moonshotai/Kimi-K3", "choices": [{"index": 0, "delta": {"reasoning_content": "Greet back"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 21, "total_tokens": 24, "completion_tokens": 3, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "r", "object": "chat.completion.chunk", "created": 1791964276, "model": "moonshotai/Kimi-K3", "choices": [{"index": 0, "delta": {"reasoning_content": "."}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 21, "total_tokens": 27, "completion_tokens": 6, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
++          {"id": "r", "object": "chat.completion.chunk", "created": 1791964276, "model": "moonshotai/Kimi-K3", "choices": [{"index": 0, "delta": {"reasoning_content": null, "content": "Hello!"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 21, "total_tokens": 33, "completion_tokens": 12, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
+           {"id": "r", "object": "chat.completion.chunk", "created": 1791964276, "model": "moonshotai/Kimi-K3", "choices": [{"index": 0, "delta": {"reasoning_content": null}, "logprobs": null, "finish_reason": "stop", "matched_stop": 163586}]},
+-          {"id": "r", "object": "chat.completion.chunk", "created": 1791964276, "model": "moonshotai/Kimi-K3", "choices": [], "usage": {"prompt_tokens": 21, "total_tokens": 40, "completion_tokens": 19, "prompt_tokens_details": null, "reasoning_tokens": 0}},
++          {"id": "r", "object": "chat.completion.chunk", "created": 1791964276, "model": "moonshotai/Kimi-K3", "choices": [], "usage": {"prompt_tokens": 21, "total_tokens": 40, "completion_tokens": 19, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
+           "[DONE]"
+         ]
+       }
+@@ -186,6 +187,7 @@
+             "total_tokens": 31,
+             "completion_tokens": 10,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {"weight_version": "default"}
+@@ -251,6 +253,7 @@
+             "total_tokens": 31,
+             "completion_tokens": 10,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {"weight_version": "default"}
+@@ -396,6 +399,7 @@
+             "total_tokens": 59,
+             "completion_tokens": 38,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {"weight_version": "default"}
+@@ -477,6 +481,7 @@
+             "total_tokens": 40,
+             "completion_tokens": 19,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {"weight_version": "default"}
+@@ -555,6 +560,7 @@
+             "total_tokens": 40,
+             "completion_tokens": 19,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {"weight_version": "default"}
+@@ -659,6 +665,7 @@
+             "total_tokens": 63,
+             "completion_tokens": 42,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {"weight_version": "default"}
+@@ -924,6 +931,7 @@
+             "total_tokens": 63,
+             "completion_tokens": 42,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {"weight_version": "default"}
+@@ -1051,6 +1059,7 @@
+             "total_tokens": 63,
+             "completion_tokens": 42,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {"weight_version": "default"}
+@@ -1156,6 +1165,7 @@
+             "total_tokens": 63,
+             "completion_tokens": 42,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {"weight_version": "default"}
+@@ -1246,6 +1256,7 @@
+             "total_tokens": 40,
+             "completion_tokens": 19,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {"weight_version": "default"}
+@@ -1358,6 +1369,7 @@
+             "total_tokens": 63,
+             "completion_tokens": 42,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {"weight_version": "default"}
+@@ -1556,6 +1568,7 @@
+             "total_tokens": 63,
+             "completion_tokens": 42,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {"weight_version": "default"}
+diff --git a/rust/sglang-processor/tests/fixtures/openai_parity/qwen3.8-27b.json b/rust/sglang-processor/tests/fixtures/openai_parity/qwen3.8-27b.json
+index 61e24b41260e3b92cf4eed20f4db0b410a3ec895..6e4080937f2589fa96478efc84a61b3187d5059f 100644
+--- a/rust/sglang-processor/tests/fixtures/openai_parity/qwen3.8-27b.json
++++ b/rust/sglang-processor/tests/fixtures/openai_parity/qwen3.8-27b.json
+@@ -75,6 +75,7 @@
+             "total_tokens": 87,
+             "completion_tokens": 23,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 20},
+             "reasoning_tokens": 20
+           },
+           "metadata": {
+@@ -146,32 +147,32 @@
+       "openai": {
+         "events": [
+           {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": null, "role": "assistant", "content": ""}, "logprobs": null, "finish_reason": null, "matched_stop": null}]},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": "We"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 56, "completion_tokens": 1, "prompt_tokens_details": null, "reasoning_tokens": 1}},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " need"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 57, "completion_tokens": 2, "prompt_tokens_details": null, "reasoning_tokens": 2}},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " to"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 58, "completion_tokens": 3, "prompt_tokens_details": null, "reasoning_tokens": 3}},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " respond"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 59, "completion_tokens": 4, "prompt_tokens_details": null, "reasoning_tokens": 4}},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " to"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 60, "completion_tokens": 5, "prompt_tokens_details": null, "reasoning_tokens": 5}},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " user"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 61, "completion_tokens": 6, "prompt_tokens_details": null, "reasoning_tokens": 6}},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": ":"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 62, "completion_tokens": 7, "prompt_tokens_details": null, "reasoning_tokens": 7}},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " \""}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 63, "completion_tokens": 8, "prompt_tokens_details": null, "reasoning_tokens": 8}},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": "Say"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 64, "completion_tokens": 9, "prompt_tokens_details": null, "reasoning_tokens": 9}},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " hi"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 65, "completion_tokens": 10, "prompt_tokens_details": null, "reasoning_tokens": 10}},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": ".\""}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 66, "completion_tokens": 11, "prompt_tokens_details": null, "reasoning_tokens": 11}},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " Simple"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 67, "completion_tokens": 12, "prompt_tokens_details": null, "reasoning_tokens": 12}},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": "."}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 68, "completion_tokens": 13, "prompt_tokens_details": null, "reasoning_tokens": 13}},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " Just"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 69, "completion_tokens": 14, "prompt_tokens_details": null, "reasoning_tokens": 14}},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " output"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 70, "completion_tokens": 15, "prompt_tokens_details": null, "reasoning_tokens": 15}},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " hi"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 71, "completion_tokens": 16, "prompt_tokens_details": null, "reasoning_tokens": 16}},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": "."}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 72, "completion_tokens": 17, "prompt_tokens_details": null, "reasoning_tokens": 17}},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " Final"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 73, "completion_tokens": 18, "prompt_tokens_details": null, "reasoning_tokens": 18}},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " only"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 74, "completion_tokens": 19, "prompt_tokens_details": null, "reasoning_tokens": 19}},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " hi"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 75, "completion_tokens": 20, "prompt_tokens_details": null, "reasoning_tokens": 20}},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": "."}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 76, "completion_tokens": 21, "prompt_tokens_details": null, "reasoning_tokens": 21}},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": "\n"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 77, "completion_tokens": 22, "prompt_tokens_details": null, "reasoning_tokens": 22}},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": null, "content": "\n\n"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 79, "completion_tokens": 24, "prompt_tokens_details": null, "reasoning_tokens": 23}},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": null, "content": "hi"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 80, "completion_tokens": 25, "prompt_tokens_details": null, "reasoning_tokens": 23}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": "We"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 56, "completion_tokens": 1, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 1}, "reasoning_tokens": 1}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " need"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 57, "completion_tokens": 2, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 2}, "reasoning_tokens": 2}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " to"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 58, "completion_tokens": 3, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 3}, "reasoning_tokens": 3}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " respond"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 59, "completion_tokens": 4, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 4}, "reasoning_tokens": 4}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " to"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 60, "completion_tokens": 5, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 5}, "reasoning_tokens": 5}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " user"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 61, "completion_tokens": 6, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 6}, "reasoning_tokens": 6}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": ":"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 62, "completion_tokens": 7, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 7}, "reasoning_tokens": 7}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " \""}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 63, "completion_tokens": 8, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 8}, "reasoning_tokens": 8}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": "Say"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 64, "completion_tokens": 9, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 9}, "reasoning_tokens": 9}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " hi"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 65, "completion_tokens": 10, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 10}, "reasoning_tokens": 10}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": ".\""}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 66, "completion_tokens": 11, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 11}, "reasoning_tokens": 11}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " Simple"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 67, "completion_tokens": 12, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 12}, "reasoning_tokens": 12}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": "."}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 68, "completion_tokens": 13, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 13}, "reasoning_tokens": 13}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " Just"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 69, "completion_tokens": 14, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 14}, "reasoning_tokens": 14}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " output"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 70, "completion_tokens": 15, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 15}, "reasoning_tokens": 15}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " hi"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 71, "completion_tokens": 16, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 16}, "reasoning_tokens": 16}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": "."}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 72, "completion_tokens": 17, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 17}, "reasoning_tokens": 17}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " Final"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 73, "completion_tokens": 18, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 18}, "reasoning_tokens": 18}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " only"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 74, "completion_tokens": 19, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 19}, "reasoning_tokens": 19}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": " hi"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 75, "completion_tokens": 20, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 20}, "reasoning_tokens": 20}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": "."}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 76, "completion_tokens": 21, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 21}, "reasoning_tokens": 21}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": "\n"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 77, "completion_tokens": 22, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 22}, "reasoning_tokens": 22}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": null, "content": "\n\n"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 79, "completion_tokens": 24, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 23}, "reasoning_tokens": 23}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": null, "content": "hi"}, "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": {"prompt_tokens": 55, "total_tokens": 80, "completion_tokens": 25, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 23}, "reasoning_tokens": 23}},
+           {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [{"index": 0, "delta": {"reasoning_content": null}, "logprobs": null, "finish_reason": "stop", "matched_stop": 248046}]},
+-          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [], "usage": {"prompt_tokens": 55, "total_tokens": 81, "completion_tokens": 26, "prompt_tokens_details": null, "reasoning_tokens": 23}},
++          {"id": "f471675dd8ea4a4cb67b95509c57124d", "object": "chat.completion.chunk", "created": 1791978408, "model": "Qwen/Qwen3.8-27B", "choices": [], "usage": {"prompt_tokens": 55, "total_tokens": 81, "completion_tokens": 26, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 23}, "reasoning_tokens": 23}},
+           "[DONE]"
+         ]
+       }
+@@ -238,6 +239,7 @@
+             "total_tokens": 26,
+             "completion_tokens": 2,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -309,6 +311,7 @@
+             "total_tokens": 18,
+             "completion_tokens": 2,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -390,6 +393,7 @@
+             "total_tokens": 84,
+             "completion_tokens": 37,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 26},
+             "reasoning_tokens": 26
+           },
+           "metadata": {
+@@ -467,6 +471,7 @@
+             "total_tokens": 68,
+             "completion_tokens": 12,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 12},
+             "reasoning_tokens": 12
+           },
+           "metadata": {
+@@ -542,6 +547,7 @@
+             "total_tokens": 28,
+             "completion_tokens": 4,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -659,6 +665,7 @@
+             "total_tokens": 322,
+             "completion_tokens": 26,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -882,6 +889,7 @@
+             "total_tokens": 413,
+             "completion_tokens": 87,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 47},
+             "reasoning_tokens": 47
+           },
+           "metadata": {
+@@ -1023,6 +1031,7 @@
+             "total_tokens": 470,
+             "completion_tokens": 103,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+@@ -1116,6 +1125,7 @@
+             "total_tokens": 49,
+             "completion_tokens": 30,
+             "prompt_tokens_details": null,
++            "completion_tokens_details": {"reasoning_tokens": 0},
+             "reasoning_tokens": 0
+           },
+           "metadata": {
+diff --git a/rust/sglang-server/src/api_server/http/openai/chat.rs b/rust/sglang-server/src/api_server/http/openai/chat.rs
+index 08e0abff685e3a8d7511dfbfb18ff959f7973265..09435a1485cadc5edec7f88ad3290749a5ac9c1b 100644
+--- a/rust/sglang-server/src/api_server/http/openai/chat.rs
++++ b/rust/sglang-server/src/api_server/http/openai/chat.rs
+@@ -462,6 +462,7 @@ pub(super) async fn unary_chat(
+     let mut choices = Vec::with_capacity(submitted.len());
+     let mut prompt_tokens = 0;
+     let mut completion_tokens = 0u64;
++    let mut reasoning_tokens = 0u64;
+ 
+     for (index, call) in submitted {
+         let output = match collect_output(call).await {
+@@ -475,6 +476,7 @@ pub(super) async fn unary_chat(
+             prompt_tokens = output.prompt_tokens;
+         }
+         completion_tokens = completion_tokens.saturating_add(output.completion_tokens);
++        reasoning_tokens = reasoning_tokens.saturating_add(output.reasoning_tokens);
+         let logprobs = want_logprobs.then(|| chat_logprobs(output.extras.as_deref()));
+         let finish_reason = chat_finish_reason(&output);
+         // Split reasoning markers out of the content first (Python splits
+@@ -528,6 +530,7 @@ pub(super) async fn unary_chat(
+         usage: Some(completion_usage(
+             prompt_tokens,
+             u32::try_from(completion_tokens).unwrap_or(u32::MAX),
++            reasoning_tokens,
+         )),
+     })
+     .into_response()
+@@ -556,6 +559,8 @@ pub(super) fn chat_event_stream(
+         let mut streams = Vec::with_capacity(count);
+         let mut prompt_tokens = 0u32;
+         let mut completion_tokens = 0u64;
++        // Running totals per choice: the latest event's value is the choice's.
++        let mut reasoning_tokens_by_choice = vec![0u64; count];
+         // One stateful reasoning splitter per choice (Python keeps a
+         // `reasoning_parser_dict` per index).
+         let mut reasoning_splitters: Vec<ReasoningStreamSplitter> =
+@@ -615,6 +620,7 @@ pub(super) fn chat_event_stream(
+                 prompt_tokens = output.prompt_tokens;
+             }
+             completion_tokens = completion_tokens.saturating_add(output.completion_tokens);
++            reasoning_tokens_by_choice[index] = output.reasoning_tokens;
+             let finish_reason = chat_finish_reason(&output);
+             // Split the step's text into (reasoning, normal) deltas when
+             // `--reasoning-parser` is set. Mirrors Python's per-step emission:
+@@ -723,6 +729,7 @@ pub(super) fn chat_event_stream(
+                     usage: Some(completion_usage(
+                         prompt_tokens,
+                         u32::try_from(completion_tokens).unwrap_or(u32::MAX),
++                        reasoning_tokens_by_choice.iter().copied().fold(0u64, u64::saturating_add),
+                     )),
+                 }),
+                 id: None,
+@@ -857,7 +864,7 @@ fn starts_in_reasoning(reasoning_parser: Option<&str>, prompt: &str) -> bool {
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::super::test_utils::{chat_submitted, chunk};
++    use super::super::test_utils::{chat_submitted, chunk, with_reasoning};
+     use super::{
+         SamplingDefaults, chat_event_stream, chat_logprobs, chat_sampling_params,
+         merge_template_stops, starts_in_reasoning, unary_chat,
+@@ -1091,6 +1098,79 @@ mod tests {
+         assert_eq!(value["usage"]["completion_tokens"], 2);
+     }
+ 
++    #[tokio::test]
++    async fn unary_chat_reports_reasoning_tokens_in_completion_tokens_details() {
++        let (choice0, tx0) = chat_submitted(0, "r0");
++        let (choice1, tx1) = chat_submitted(1, "r1");
++        tx0.send(with_reasoning(chunk("r0", "Paris", true), 3))
++            .await
++            .unwrap();
++        tx1.send(with_reasoning(chunk("r1", "Paris", true), 4))
++            .await
++            .unwrap();
++
++        let response = unary_chat(
++            vec![choice0, choice1],
++            "chatcmpl-test".into(),
++            "model".into(),
++            1,
++            false,
++            None,
++            None,
++            false,
++            None,
++            true,
++            None,
++        )
++        .await;
++        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
++            .await
++            .unwrap();
++        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
++        let details = &value["usage"]["completion_tokens_details"];
++        assert_eq!(details["reasoning_tokens"], 7);
++        assert_eq!(details["accepted_prediction_tokens"], 0);
++        assert_eq!(details["rejected_prediction_tokens"], 0);
++        assert_eq!(details["audio_tokens"], 0);
++    }
++
++    #[tokio::test]
++    async fn streaming_chat_final_usage_reports_latest_reasoning_total() {
++        // Each event carries the request's running total, so the final usage
++        // reports the latest value, not their sum.
++        let (choice, tx) = chat_submitted(0, "r0");
++        tx.send(with_reasoning(chunk("r0", "Par", false), 2))
++            .await
++            .unwrap();
++        tx.send(with_reasoning(chunk("r0", "is", true), 5))
++            .await
++            .unwrap();
++
++        let stream = chat_event_stream(
++            vec![choice],
++            "chatcmpl-test".into(),
++            "model".into(),
++            1,
++            false,
++            true,
++            None,
++            None,
++            false,
++            None,
++            None,
++            false,
++            true,
++            None,
++        );
++        futures::pin_mut!(stream);
++        let frames: Vec<String> = stream.collect().await;
++        let usage: serde_json::Value = serde_json::from_str(&frames[frames.len() - 2]).unwrap();
++        assert_eq!(
++            usage["usage"]["completion_tokens_details"]["reasoning_tokens"],
++            5
++        );
++    }
++
+     #[tokio::test]
+     async fn unary_chat_separates_reasoning_content_with_parser_configured() {
+         let (choice, tx) = chat_submitted(0, "r0");
+diff --git a/rust/sglang-server/src/api_server/http/openai/completions.rs b/rust/sglang-server/src/api_server/http/openai/completions.rs
+index 8662315f87ceb250a3ca2edb1471dc78fdae0b10..3f24bd411735c504efd98ca377c1f15210010186 100644
+--- a/rust/sglang-server/src/api_server/http/openai/completions.rs
++++ b/rust/sglang-server/src/api_server/http/openai/completions.rs
+@@ -15,8 +15,8 @@ use axum::{
+     routing::post,
+ };
+ use dynamo_protocols::types::{
+-    Choice, CompletionFinishReason, CompletionUsage, CreateCompletionRequest,
+-    CreateCompletionResponse, Logprobs, Prompt, Stop,
++    Choice, CompletionFinishReason, CompletionTokensDetails, CompletionUsage,
++    CreateCompletionRequest, CreateCompletionResponse, Logprobs, Prompt, Stop,
+ };
+ use futures::StreamExt;
+ use serde::Deserialize;
+@@ -373,6 +373,7 @@ pub(super) async fn unary_completion(
+     let mut extensions = Vec::with_capacity(submitted.len());
+     let mut prompt_tokens = BTreeMap::<usize, u32>::new();
+     let mut completion_tokens = 0u64;
++    let mut reasoning_tokens = 0u64;
+ 
+     for choice in submitted {
+         let output = match collect_output(choice.call).await {
+@@ -386,6 +387,7 @@ pub(super) async fn unary_completion(
+             .entry(choice.prompt_index)
+             .or_insert(output.prompt_tokens);
+         completion_tokens = completion_tokens.saturating_add(output.completion_tokens);
++        reasoning_tokens = reasoning_tokens.saturating_add(output.reasoning_tokens);
+         let (response_choice, extension) = completion_choice(
+             choice.index,
+             if echo {
+@@ -408,6 +410,7 @@ pub(super) async fn unary_completion(
+     let usage = completion_usage(
+         prompt_tokens,
+         u32::try_from(completion_tokens).unwrap_or(u32::MAX),
++        reasoning_tokens,
+     );
+ 
+     Json(completion_response_value(
+@@ -531,6 +534,8 @@ pub(super) fn completion_event_stream(
+         let mut first_chunks = vec![true; count];
+         let mut prompt_tokens_by_prompt = BTreeMap::<usize, u32>::new();
+         let mut completion_tokens_by_choice = vec![0u64; count];
++        // Running totals per choice: the latest event's value is the choice's.
++        let mut reasoning_tokens_by_choice = vec![0u64; count];
+         let mut streams = Vec::with_capacity(count);
+ 
+         for choice in submitted {
+@@ -555,6 +560,7 @@ pub(super) fn completion_event_stream(
+                 .or_insert(output.prompt_tokens);
+             completion_tokens_by_choice[index] = completion_tokens_by_choice[index]
+                 .saturating_add(output.completion_tokens);
++            reasoning_tokens_by_choice[index] = output.reasoning_tokens;
+             let first = std::mem::replace(&mut first_chunks[index], false);
+             let text = if echo && first {
+                 echoes[index].clone() + &output.text
+@@ -565,6 +571,7 @@ pub(super) fn completion_event_stream(
+                 completion_usage(
+                     output.prompt_tokens,
+                     u32::try_from(completion_tokens_by_choice[index]).unwrap_or(u32::MAX),
++                    reasoning_tokens_by_choice[index],
+                 )
+             });
+             let (choice, extension) = completion_choice(
+@@ -594,6 +601,9 @@ pub(super) fn completion_event_stream(
+             let completion_tokens = completion_tokens_by_choice
+                 .into_iter()
+                 .fold(0u64, u64::saturating_add);
++            let reasoning_tokens = reasoning_tokens_by_choice
++                .into_iter()
++                .fold(0u64, u64::saturating_add);
+             let final_chunk = CreateCompletionResponse {
+                 id: response_id,
+                 choices: vec![],
+@@ -604,6 +614,7 @@ pub(super) fn completion_event_stream(
+                 usage: Some(completion_usage(
+                     prompt_tokens,
+                     u32::try_from(completion_tokens).unwrap_or(u32::MAX),
++                    reasoning_tokens,
+                 )),
+             };
+             yield completion_response_value(final_chunk, &[]).to_string();
+@@ -612,11 +623,25 @@ pub(super) fn completion_event_stream(
+     }
+ }
+ 
+-pub(super) fn completion_usage(prompt_tokens: u32, completion_tokens: u32) -> CompletionUsage {
++/// OpenAI `CompletionUsage`, with reasoning tokens in `completion_tokens_details`
++/// as Python's `UsageProcessor` reports them. The spec's other completion detail
++/// counts (predicted outputs, audio) do not apply and are reported as 0.
++pub(super) fn completion_usage(
++    prompt_tokens: u32,
++    completion_tokens: u32,
++    reasoning_tokens: u64,
++) -> CompletionUsage {
+     CompletionUsage {
+         prompt_tokens,
+         completion_tokens,
+         total_tokens: prompt_tokens.saturating_add(completion_tokens),
++        completion_tokens_details: Some(CompletionTokensDetails {
++            reasoning_tokens: Some(u32::try_from(reasoning_tokens).unwrap_or(u32::MAX)),
++            accepted_prediction_tokens: Some(0),
++            rejected_prediction_tokens: Some(0),
++            audio_tokens: Some(0),
++            ..Default::default()
++        }),
+         ..Default::default()
+     }
+ }
+@@ -713,7 +738,7 @@ fn append_top_logprobs(
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::super::test_utils::{chunk, submitted};
++    use super::super::test_utils::{chunk, submitted, with_reasoning};
+     use super::{
+         ChoiceExtensions, PromptSpec, completion_event_stream, completion_logprobs,
+         completion_prompt_specs, completion_response_value, unary_completion,
+@@ -827,6 +852,40 @@ mod tests {
+         assert_eq!(value["usage"]["completion_tokens"], 4);
+     }
+ 
++    #[tokio::test]
++    async fn unary_reports_reasoning_tokens_in_completion_tokens_details() {
++        // Running totals: each choice's latest value, summed over choices.
++        let (choice0, tx0) = submitted(0, 0, "r0");
++        let (choice1, tx1) = submitted(1, 0, "r1");
++        tx0.send(with_reasoning(chunk("r0", "a", false), 1))
++            .await
++            .unwrap();
++        tx0.send(with_reasoning(chunk("r0", "b", true), 2))
++            .await
++            .unwrap();
++        tx1.send(with_reasoning(chunk("r1", "x", true), 3))
++            .await
++            .unwrap();
++
++        let response = unary_completion(
++            vec![choice0, choice1],
++            "cmpl-test".into(),
++            "model".into(),
++            1,
++            false,
++            false,
++        )
++        .await;
++        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
++            .await
++            .unwrap();
++        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
++        assert_eq!(
++            value["usage"]["completion_tokens_details"]["reasoning_tokens"],
++            5
++        );
++    }
++
+     #[tokio::test]
+     async fn stream_uses_deltas_then_usage_and_done() {
+         let (choice, tx) = submitted(0, 0, "r0");
+diff --git a/rust/sglang-server/src/api_server/http/openai/test_utils.rs b/rust/sglang-server/src/api_server/http/openai/test_utils.rs
+index f91abd6b5e547222402b08d4a9fad259219b1de1..b3ce61e743ecd1a96a728c157df2b1c279c8da4e 100644
+--- a/rust/sglang-server/src/api_server/http/openai/test_utils.rs
++++ b/rust/sglang-server/src/api_server/http/openai/test_utils.rs
+@@ -62,6 +62,21 @@ pub(super) fn chunk(rid: &str, text: &str, done: bool) -> ResponseItem {
+     }
+ }
+ 
++/// `chunk` carrying the request's running reasoning-token total.
++pub(super) fn with_reasoning(item: ResponseItem, reasoning_tokens: u64) -> ResponseItem {
++    match item {
++        ResponseItem::Frame(mut output) => {
++            output.reasoning_tokens = reasoning_tokens;
++            ResponseItem::Frame(output)
++        }
++        ResponseItem::Done(mut output) => {
++            output.reasoning_tokens = reasoning_tokens;
++            ResponseItem::Done(output)
++        }
++        other => other,
++    }
++}
++
+ /// A submitted legacy completion choice.
+ pub(super) fn submitted(
+     index: usize,
+diff --git a/test/registered/unit/entrypoints/openai/test_usage_processor.py b/test/registered/unit/entrypoints/openai/test_usage_processor.py
+index 2d59d49793c0c5f480873caf08a9172c3fc37741..57a6efda7ccc9aef16a2869ed5bfaac79091fcc3 100644
+--- a/test/registered/unit/entrypoints/openai/test_usage_processor.py
++++ b/test/registered/unit/entrypoints/openai/test_usage_processor.py
+@@ -1,5 +1,13 @@
++import json
+ import unittest
+ 
++from sglang.srt.entrypoints.openai.protocol import (
++    ChatCompletionResponse,
++    ChatCompletionResponseChoice,
++    ChatCompletionStreamResponse,
++    ChatMessage,
++    UsageInfo,
++)
+ from sglang.srt.entrypoints.openai.usage_processor import UsageProcessor
+ from sglang.test.ci.ci_register import register_cpu_ci
+ from sglang.test.test_utils import CustomTestCase
+@@ -40,6 +48,115 @@ class TestUsageProcessor(CustomTestCase):
+                     else:
+                         self.assertIsNone(details)
+ 
++    def test_reasoning_tokens_in_completion_tokens_details(self):
++        # OpenAI clients and gateways read usage.completion_tokens_details.reasoning_tokens;
++        # the top-level reasoning_tokens stays for existing clients.
++        usages = (
++            UsageProcessor.calculate_response_usage(
++                [{"meta_info": {"completion_tokens": 58, "reasoning_tokens": 55}}]
++            ),
++            UsageProcessor.calculate_streaming_usage(
++                prompt_tokens={0: 45},
++                reasoning_tokens={0: 55},
++                completion_tokens={0: 58},
++                cached_tokens={0: 0},
++                n_choices=1,
++            ),
++            UsageProcessor.calculate_token_usage(
++                prompt_tokens=45, completion_tokens=58, reasoning_tokens=55
++            ),
++        )
++        for usage in usages:
++            with self.subTest(usage=usage):
++                self.assertEqual(usage.reasoning_tokens, 55)
++                self.assertEqual(usage.completion_tokens_details.reasoning_tokens, 55)
++                dumped = usage.model_dump()
++                self.assertEqual(
++                    dumped["completion_tokens_details"]["reasoning_tokens"], 55
++                )
++                self.assertLessEqual(
++                    usage.completion_tokens_details.reasoning_tokens,
++                    usage.completion_tokens,
++                )
++
++    def test_completion_tokens_details_present_without_reasoning(self):
++        # Always an object (OpenAI types it as one, not nullable), with 0 reasoning tokens.
++        for usage in (
++            UsageProcessor.calculate_response_usage(
++                [{"meta_info": {"completion_tokens": 3}}]
++            ),
++            UsageProcessor.calculate_streaming_usage(
++                prompt_tokens={0: 1},
++                reasoning_tokens={0: 0},
++                completion_tokens={0: 3},
++                cached_tokens={0: 0},
++                n_choices=1,
++            ),
++            UsageProcessor.calculate_token_usage(prompt_tokens=1, completion_tokens=3),
++        ):
++            with self.subTest(usage=usage):
++                self.assertEqual(usage.reasoning_tokens, 0)
++                self.assertEqual(
++                    usage.model_dump()["completion_tokens_details"],
++                    {"reasoning_tokens": 0},
++                )
++
++    def test_completion_tokens_details_sums_parallel_choices(self):
++        # n=2: like completion_tokens, the detail aggregates every choice.
++        usages = (
++            UsageProcessor.calculate_response_usage(
++                [
++                    {"meta_info": {"completion_tokens": 9, "reasoning_tokens": 5}},
++                    {"meta_info": {"completion_tokens": 11, "reasoning_tokens": 7}},
++                ],
++                n_choices=2,
++            ),
++            UsageProcessor.calculate_streaming_usage(
++                prompt_tokens={0: 4, 1: 4},
++                reasoning_tokens={0: 5, 1: 7},
++                completion_tokens={0: 9, 1: 11},
++                cached_tokens={0: 0, 1: 0},
++                n_choices=2,
++            ),
++        )
++        for usage in usages:
++            with self.subTest(usage=usage):
++                self.assertEqual(usage.completion_tokens, 20)
++                self.assertEqual(usage.completion_tokens_details.reasoning_tokens, 12)
++                self.assertEqual(usage.reasoning_tokens, 12)
++
++    def test_usage_without_generation_omits_completion_tokens_details(self):
++        # Embeddings, score and classify build UsageInfo directly; the key is left
++        # out rather than sent as null, which OpenAI's schema does not allow.
++        usage = UsageInfo(prompt_tokens=3, total_tokens=3)
++        self.assertNotIn("completion_tokens_details", usage.model_dump())
++        self.assertNotIn("completion_tokens_details", usage.model_dump_json())
++
++    def test_chat_response_and_final_stream_chunk_carry_the_detail(self):
++        # The serialized wire shapes, not only the UsageInfo helper.
++        usage = UsageProcessor.calculate_token_usage(
++            prompt_tokens=45, completion_tokens=58, reasoning_tokens=55
++        )
++        response = ChatCompletionResponse(
++            id="x",
++            model="m",
++            choices=[
++                ChatCompletionResponseChoice(
++                    index=0,
++                    message=ChatMessage(role="assistant", content="ok"),
++                    finish_reason="stop",
++                )
++            ],
++            usage=usage,
++        )
++        chunk = ChatCompletionStreamResponse(id="x", model="m", choices=[], usage=usage)
++        for payload in (response.model_dump_json(), chunk.model_dump_json()):
++            with self.subTest(payload=payload[:40]):
++                self.assertEqual(
++                    json.loads(payload)["usage"]["completion_tokens_details"],
++                    {"reasoning_tokens": 55},
++                )
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
