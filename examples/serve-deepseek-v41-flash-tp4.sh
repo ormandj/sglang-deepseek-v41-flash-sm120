@@ -5,7 +5,7 @@ set -euo pipefail
 : "${MODEL_DIR:?set MODEL_DIR to the local deepseek-ai/DeepSeek-V4.1-Flash checkpoint}"
 : "${CACHE_DIR:?set CACHE_DIR to a version-specific persistent cache directory}"
 
-IMAGE=${IMAGE:-ghcr.io/ormandj/sglang-deepseek-v41-flash-sm120:v0.4.2}
+IMAGE=${IMAGE:-ghcr.io/ormandj/sglang-deepseek-v41-flash-sm120:v0.4.3}
 PORT=${PORT:-8000}
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 TP_SIZE=${TP_SIZE:-4}

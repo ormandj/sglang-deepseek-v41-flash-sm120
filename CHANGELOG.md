@@ -1,12 +1,20 @@
 # Changelog
 
-## v0.4.3-rc.1
+## v0.4.3 (stable; 2026-10-19)
 
-0.4.2 with the image path warmed before serving. Same sources and stack otherwise.
+0.4.2 with the image path warmed before serving. The sources other than patch 17, the stack, the model and the runtime configuration are unchanged.
 
 ### Changes
 
-- The `serving_coverage` warmup (patch 17, [sgl-project/sglang#37541](https://github.com/sgl-project/sglang/pull/37541)) now sends its image request under encoder SWA bounded replay on CUDA, which serves image requests since 0.4.2. In 0.4.2 it skipped the image phase, so the first user image loaded the vision kernels while serving.
+- The `serving_coverage` warmup (patch 17, [sgl-project/sglang#37541](https://github.com/sgl-project/sglang/pull/37541)) sends its image request under encoder SWA bounded replay on CUDA, which serves image requests since 0.4.2. 0.4.2 skipped the image phase, so the first user image loaded the vision kernels while serving.
+
+### Upgrade
+
+Start the `v0.4.3` image with the 0.4.2 launcher settings; it can share 0.4.2's kernel cache directory. The first start measures the speculative-decoding cost table again (about 7 minutes after warmup).
+
+### Measurements
+
+The serving code is the same as 0.4.2's, so 0.4.2's measurements apply. On the hardware below, the 0.4.3 warmup log shows the image phase, and a first user image request loads no kernels after the server is ready.
 
 ## v0.4.2 (stable; 2026-10-19)
 
