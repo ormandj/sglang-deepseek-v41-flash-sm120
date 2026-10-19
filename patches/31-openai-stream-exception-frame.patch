@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/entrypoints/openai/serving_base.py b/python/sglang/srt/entrypoints/openai/serving_base.py
-index 92134d2878103d43aa3d8352db7d4a744fda8c4f..704f326cd9b334beb5e2053ac91da994318d485e 100644
+index 92134d2878..704f326cd9 100644
 --- a/python/sglang/srt/entrypoints/openai/serving_base.py
 +++ b/python/sglang/srt/entrypoints/openai/serving_base.py
 @@ -249,6 +249,20 @@ class OpenAIServingBase(ABC):
@@ -24,7 +24,7 @@ index 92134d2878103d43aa3d8352db7d4a744fda8c4f..704f326cd9b334beb5e2053ac91da994
          if (
              not self.allowed_custom_labels
 diff --git a/python/sglang/srt/entrypoints/openai/serving_chat.py b/python/sglang/srt/entrypoints/openai/serving_chat.py
-index 7a5d92b02086b259c6bde9dec8448de704ab2dd0..1d2e707d58cabc752b9dc41418aee9a3e3d52d15 100644
+index 7a5d92b020..1d2e707d58 100644
 --- a/python/sglang/srt/entrypoints/openai/serving_chat.py
 +++ b/python/sglang/srt/entrypoints/openai/serving_chat.py
 @@ -2295,10 +2295,10 @@ class OpenAIServingChat(OpenAIServingBase):
@@ -41,7 +41,7 @@ index 7a5d92b02086b259c6bde9dec8448de704ab2dd0..1d2e707d58cabc752b9dc41418aee9a3
  
          yield "data: [DONE]\n\n"
 diff --git a/python/sglang/srt/entrypoints/openai/serving_completions.py b/python/sglang/srt/entrypoints/openai/serving_completions.py
-index 70c93d5b6af67339365252036feb44a9857842f5..ac3afd06ae3ff5db4b69da99860dbe7b5aac95a8 100644
+index 70c93d5b6a..ac3afd06ae 100644
 --- a/python/sglang/srt/entrypoints/openai/serving_completions.py
 +++ b/python/sglang/srt/entrypoints/openai/serving_completions.py
 @@ -497,7 +497,7 @@ class OpenAIServingCompletion(OpenAIServingBase):
@@ -54,7 +54,7 @@ index 70c93d5b6af67339365252036feb44a9857842f5..ac3afd06ae3ff5db4b69da99860dbe7b
  
          yield "data: [DONE]\n\n"
 diff --git a/test/registered/unit/entrypoints/openai/test_serving_chat.py b/test/registered/unit/entrypoints/openai/test_serving_chat.py
-index fe71f36aea3fbd5a7396f24f7c2ddf0f5fc82f2b..b281f76a2217940ad47413540d09a02709cf0c90 100644
+index fe71f36aea..b281f76a22 100644
 --- a/test/registered/unit/entrypoints/openai/test_serving_chat.py
 +++ b/test/registered/unit/entrypoints/openai/test_serving_chat.py
 @@ -3768,6 +3768,124 @@ class ServingChatTestCase(CustomTestCase):
@@ -183,7 +183,7 @@ index fe71f36aea3fbd5a7396f24f7c2ddf0f5fc82f2b..b281f76a2217940ad47413540d09a027
          req = ChatCompletionRequest(
              model="x",
 diff --git a/test/registered/unit/entrypoints/openai/test_serving_completions.py b/test/registered/unit/entrypoints/openai/test_serving_completions.py
-index a133f6d201f0793080e59b3d27a9e6f7242a4d4f..c9e57ecab9e4c0871422683290c093c5fd4f47bf 100644
+index a133f6d201..c9e57ecab9 100644
 --- a/test/registered/unit/entrypoints/openai/test_serving_completions.py
 +++ b/test/registered/unit/entrypoints/openai/test_serving_completions.py
 @@ -504,6 +504,56 @@ class ServingCompletionTestCase(unittest.TestCase):

@@ -1,9 +1,9 @@
 diff --git a/python/sglang/kernels/ops/gemm/__init__.py b/python/sglang/kernels/ops/gemm/__init__.py
-index 1f7e96b73f..4b5727b917 100644
+index 7f992e9224..04dfc2b0d8 100644
 --- a/python/sglang/kernels/ops/gemm/__init__.py
 +++ b/python/sglang/kernels/ops/gemm/__init__.py
-@@ -500,6 +500,19 @@ register_kernel(
-         capabilities=frozenset({CapabilityRequirement.CUDA}),
+@@ -371,6 +371,14 @@ register_kernel(
+         capabilities=CUDA_ONLY,
      )
  )
 +register_kernel(
@@ -11,12 +11,7 @@ index 1f7e96b73f..4b5727b917 100644
 +        op="gemm.bf16_skinny_gemm",
 +        backend=KernelBackend.TRITON,
 +        target="sglang.kernels.ops.gemm.bf16_skinny_gemm:bf16_skinny_gemm",
-+        capabilities=_CUDA,
-+        format_signature=FormatSignature(
-+            supported_dtypes=("bfloat16",),
-+            description="[m, k] @ [n, k].T for m <= 16, k % 128 == 0; batch-invariant rows",
-+        ),
-+        description="Weight-streaming BF16 GEMM for decode-sized LM heads (Triton).",
++        capabilities=CUDA_ONLY,
 +    )
 +)
  register_kernel(
@@ -24,10 +19,10 @@ index 1f7e96b73f..4b5727b917 100644
          op="gemm.hopper_bf16_gemv",
 diff --git a/python/sglang/kernels/ops/gemm/bf16_skinny_gemm.py b/python/sglang/kernels/ops/gemm/bf16_skinny_gemm.py
 new file mode 100644
-index 0000000000..364a0f30bb
+index 0000000000..3044dd60ea
 --- /dev/null
 +++ b/python/sglang/kernels/ops/gemm/bf16_skinny_gemm.py
-@@ -0,0 +1,107 @@
+@@ -0,0 +1,104 @@
 +"""BF16 out[M, N] = x[M, K] @ weight[N, K].T for decode-sized M (<= 16) and large N.
 +
 +A weight-streaming kernel for wide, bandwidth-bound projections such as a vocab-parallel
@@ -105,14 +100,11 @@ index 0000000000..364a0f30bb
 +
 +
 +def bf16_skinny_gemm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-+    assert bf16_skinny_supported(x, weight), (
-+        x.shape,
-+        x.dtype,
-+        x.device,
-+        weight.shape,
-+        weight.dtype,
-+        weight.device,
-+    )
++    if not bf16_skinny_supported(x, weight):
++        raise ValueError(
++            "unsupported operands: "
++            f"{(x.shape, x.dtype, x.device, weight.shape, weight.dtype, weight.device)}"
++        )
 +    m, k = x.shape
 +    n = weight.shape[0]
 +    out = torch.empty((m, n), dtype=x.dtype, device=x.device)
@@ -136,24 +128,24 @@ index 0000000000..364a0f30bb
 +        )
 +    return out
 diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
-index 6727780fe2..79990eafb7 100644
+index ddce934266..9958c8e7a9 100644
 --- a/python/sglang/srt/environ.py
 +++ b/python/sglang/srt/environ.py
-@@ -547,6 +547,9 @@ class Envs:
-     # Argmax every draft row, sampling requests included, accepted as a one-hot
-     # draft: no step logits kept, lower acceptance at high temperatures.
-     SGLANG_DSPARK_USE_GREEDY_DRAFT = EnvBool(False)
+@@ -1416,6 +1416,9 @@ class Envs:
+     # materializing the full-vocab log-softmax. Escape hatch only; the two
+     # paths are mathematically identical.
+     SGLANG_ENABLE_FAST_INPUT_LOGPROBS = EnvBool(True)
 +    # BF16 LM head (target and DSpark draft) at <= 16 rows through a weight-streaming
 +    # Triton kernel instead of cuBLAS; each row's result is independent of the batch.
 +    SGLANG_ENABLE_BF16_SKINNY_LM_HEAD = EnvBool(False)
-     SGLANG_DSPARK_FOLDED_PROPOSAL = EnvBool(True)
-     SGLANG_DSPARK_STACKED_CTX_KV = EnvBool(True)
-     SGLANG_DSPARK_EMBED_IN_GRAPH = EnvBool(True)
+ 
+     # ===================================================================
+     # Deterministic inference and all-reduce
 diff --git a/python/sglang/srt/layers/logits_processor.py b/python/sglang/srt/layers/logits_processor.py
-index b9a49fc8be..912dcd741c 100644
+index 6f17ce881f..73cb481885 100644
 --- a/python/sglang/srt/layers/logits_processor.py
 +++ b/python/sglang/srt/layers/logits_processor.py
-@@ -119,6 +119,21 @@ class SamplingMaskOutput:
+@@ -123,6 +123,21 @@ class SamplingMaskOutput:
              self.num_accept_tokens = fn(self.num_accept_tokens)
  
  
@@ -175,7 +167,7 @@ index b9a49fc8be..912dcd741c 100644
  def _trace_e2e_logits(stage: str, **fields) -> None:
      if not envs.SGLANG_TRACE_LOGITS_E2E.get():
          return
-@@ -1015,9 +1030,7 @@ class LogitsProcessor(nn.Module):
+@@ -1104,9 +1119,7 @@ class LogitsProcessor(nn.Module):
                      hidden_states.bfloat16(), lm_head.weight.T.bfloat16()
                  )
              else:
@@ -214,16 +206,16 @@ index 81ceb973ab..6a535abd0d 100644
  class VocabShard(msgspec.Struct, frozen=True):
 diff --git a/test/registered/kernels/ops/gemm/test_bf16_skinny_gemm.py b/test/registered/kernels/ops/gemm/test_bf16_skinny_gemm.py
 new file mode 100644
-index 0000000000..7d979e8069
+index 0000000000..f645223d50
 --- /dev/null
 +++ b/test/registered/kernels/ops/gemm/test_bf16_skinny_gemm.py
-@@ -0,0 +1,153 @@
+@@ -0,0 +1,139 @@
 +"""Weight-streaming BF16 GEMM for decode-sized LM heads.
 +
 +A row's tiling and FP32 accumulation order depend only on (N, K), so a row must give
 +the same bits alone or in any batch of up to 16 rows, also under CUDA graph replay.
-+Row offsets are 64-bit, and the launch follows the operands' device. The LM-head
-+dispatch is tested in test/registered/unit/layers/test_logits_processor_bf16_lm_head.py.
++Row offsets are 64-bit. The launch device is tested in test_bf16_skinny_gemm_multi_gpu.py
++and the LM-head dispatch in test/registered/unit/layers/test_logits_processor_bf16_lm_head.py.
 +"""
 +
 +import unittest
@@ -266,7 +258,9 @@ index 0000000000..7d979e8069
 +    return ref, gamma * (x.double().abs() @ w.double().abs().T) + ulp
 +
 +
-+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
++@unittest.skipUnless(
++    torch.cuda.is_available() and torch.version.hip is None, "CUDA required"
++)
 +class TestBf16SkinnyGemm(CustomTestCase):
 +    def test_within_fp32_accumulation_bound(self):
 +        for n, k in SHAPES:
@@ -333,24 +327,6 @@ index 0000000000..7d979e8069
 +            )
 +        )
 +
-+    @unittest.skipUnless(torch.cuda.device_count() >= 2, "needs two GPUs")
-+    def test_operands_on_a_non_current_device(self):
-+        x, w = _inputs(6, 1000, 256, seed=6)
-+        ref, bound = _error_bound(x, w)
-+        x1, w1 = x.to("cuda:1"), w.to("cuda:1")
-+        torch.cuda.synchronize(0)
-+        torch.cuda.synchronize(1)
-+        with torch.cuda.device(0):
-+            # Keep device 0 busy, so a launch on its stream instead of device 1's
-+            # would not have run when device 1 is synchronized below.
-+            torch.cuda._sleep(2**31)
-+            out = bf16_skinny_gemm(x1, w1)
-+        torch.cuda.synchronize(1)
-+        self.assertEqual(out.device, x1.device)
-+        err = (out.cpu().double() - ref.cpu()).abs()
-+        self.assertTrue(bool((err <= bound.cpu()).all()))
-+        torch.cuda.synchronize(0)
-+
 +    def test_supported_inputs(self):
 +        x, w = _inputs(4, 1000, 256)
 +        self.assertTrue(bf16_skinny_supported(x, w))
@@ -367,10 +343,82 @@ index 0000000000..7d979e8069
 +                self.assertFalse(bf16_skinny_supported(a, b))
 +        with self.subTest("ROCm"), mock.patch.object(torch.version, "hip", "6.4"):
 +            self.assertFalse(bf16_skinny_supported(x, w))
++        with self.subTest("raises"), self.assertRaises(ValueError):
++            bf16_skinny_gemm(x.half(), w.half())
 +
 +
 +if __name__ == "__main__":
 +    unittest.main()
+diff --git a/test/registered/kernels/ops/gemm/test_bf16_skinny_gemm_multi_gpu.py b/test/registered/kernels/ops/gemm/test_bf16_skinny_gemm_multi_gpu.py
+new file mode 100644
+index 0000000000..0512b83b76
+--- /dev/null
++++ b/test/registered/kernels/ops/gemm/test_bf16_skinny_gemm_multi_gpu.py
+@@ -0,0 +1,47 @@
++"""The BF16 skinny GEMM launches on its operands' device, not the current one."""
++
++import unittest
++
++import torch
++
++from sglang.kernels.ops.gemm.bf16_skinny_gemm import bf16_skinny_gemm
++from sglang.test.ci.ci_register import register_cuda_ci
++from sglang.test.test_utils import CustomTestCase
++
++register_cuda_ci(est_time=15, stage="base-b", runner_config="2-gpu-large")
++
++
++def _error_bound(x, w):
++    """FP64 result and the bound for an FP32-accumulated dot product rounded once to
++    BF16, as in test_bf16_skinny_gemm.py."""
++    ref = x.double() @ w.double().T
++    k = x.shape[1]
++    gamma = k * 2.0**-24 / (1 - k * 2.0**-24)
++    ulp = torch.exp2(torch.floor(torch.log2(ref.abs().clamp_min(2.0**-126))) - 7)
++    return ref, gamma * (x.double().abs() @ w.double().abs().T) + ulp
++
++
++@unittest.skipUnless(
++    torch.cuda.device_count() >= 2 and torch.version.hip is None, "needs two CUDA GPUs"
++)
++class TestBf16SkinnyGemmMultiGpu(CustomTestCase):
++    def test_operands_on_a_non_current_device(self):
++        g = torch.Generator(device="cuda:1").manual_seed(6)
++        x = torch.randn(6, 256, device="cuda:1", generator=g).bfloat16()
++        w = (torch.randn(1000, 256, device="cuda:1", generator=g) / 16).bfloat16()
++        ref, bound = _error_bound(x, w)
++        torch.cuda.synchronize(0)
++        torch.cuda.synchronize(1)
++        with torch.cuda.device(0):
++            # Keep device 0 busy, so a launch on its stream instead of device 1's
++            # would not have run when device 1 is synchronized below.
++            torch.cuda._sleep(2**31)
++            out = bf16_skinny_gemm(x, w)
++        torch.cuda.synchronize(1)
++        self.assertEqual(out.device, x.device)
++        self.assertTrue(bool(((out.double() - ref).abs() <= bound).all()))
++        torch.cuda.synchronize(0)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/test/registered/unit/kernels/test_kernels_namespace.py b/test/registered/unit/kernels/test_kernels_namespace.py
+index c12429fa18..327757d525 100644
+--- a/test/registered/unit/kernels/test_kernels_namespace.py
++++ b/test/registered/unit/kernels/test_kernels_namespace.py
+@@ -332,5 +332,12 @@ def test_deep_select_spec_matches_wrapper_architectures():
+     )
+ 
+ 
++def test_bf16_skinny_gemm_spec_is_cuda_only():
++    spec = K.registry.get_backend("gemm.bf16_skinny_gemm", KernelBackend.TRITON)
++    assert spec.target == "sglang.kernels.ops.gemm.bf16_skinny_gemm:bf16_skinny_gemm"
++    assert K.capabilities_satisfied(spec.capabilities, _SM90)
++    assert not K.capabilities_satisfied(spec.capabilities, _HIP)
++
++
+ if __name__ == "__main__":
+     sys.exit(pytest.main([__file__]))
 diff --git a/test/registered/unit/layers/test_logits_processor_bf16_lm_head.py b/test/registered/unit/layers/test_logits_processor_bf16_lm_head.py
 new file mode 100644
 index 0000000000..7a71726392

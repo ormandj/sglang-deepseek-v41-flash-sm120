@@ -1,5 +1,22 @@
+diff --git a/docs/docs/advanced_features/server_arguments.mdx b/docs/docs/advanced_features/server_arguments.mdx
+index 2e6e8ed3c8..4b0e28477d 100644
+--- a/docs/docs/advanced_features/server_arguments.mdx
++++ b/docs/docs/advanced_features/server_arguments.mdx
+@@ -1721,6 +1721,12 @@ Combining `--enable-response-store` with `--disaggregation-mode=prefill` or `dec
+       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Maximum suffix length stored and matched by the ngram trie.</td>
+       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}>`18`</td>
+       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Type: int</td>
++    </tr>
++        <tr>
++      <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}>`--speculative-dspark-sps-autotune`</td>
++      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>DSPARK compact ragged-verify only. Fit the SPS cost table at startup from timed decode steps. 'auto' loads a cached table for the same configuration or measures and caches one; --speculative-dspark-sps-table-path takes precedence. 'force' always measures. 'off' disables it.</td>
++      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}>`off`</td>
++      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}><code>off</code>, <code>auto</code>, <code>force</code></td>
+     </tr>
+         <tr>
+       <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}>`--speculative-ngram-capacity`</td>
 diff --git a/python/sglang/srt/arg_groups/fields/spec.py b/python/sglang/srt/arg_groups/fields/spec.py
-index b7367a447a..3b2cc855f8 100644
+index d86620d28a..39130c9f2d 100644
 --- a/python/sglang/srt/arg_groups/fields/spec.py
 +++ b/python/sglang/srt/arg_groups/fields/spec.py
 @@ -106,6 +106,24 @@ class Spec(msgspec.Struct):
@@ -28,10 +45,10 @@ index b7367a447a..3b2cc855f8 100644
          float,
          "Accept a draft token if its probability in the target model is greater than this threshold.",
 diff --git a/python/sglang/srt/arg_groups/speculative_hook.py b/python/sglang/srt/arg_groups/speculative_hook.py
-index 0c975873c1..d66968fd88 100644
+index 40995d45ea..f316f8a802 100644
 --- a/python/sglang/srt/arg_groups/speculative_hook.py
 +++ b/python/sglang/srt/arg_groups/speculative_hook.py
-@@ -819,6 +819,15 @@ def _handle_dspark(server_args: ServerArgs) -> None:
+@@ -813,6 +813,15 @@ def _handle_dspark(server_args: ServerArgs) -> None:
              "scheduler, which is off under SGLANG_RAGGED_VERIFY_MODE=static; it "
              "will be a no-op."
          )
@@ -65,10 +82,10 @@ index 5bb8ca4289..c374c9a8b4 100644
      # either still runs the finally cleanup below. Native gRPC is enabled via
      # --grpc-port / SGLANG_GRPC_PORT; only the single-tokenizer process is
 diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
-index 79990eafb7..f912e2dd01 100644
+index 9958c8e7a9..b59491da51 100644
 --- a/python/sglang/srt/environ.py
 +++ b/python/sglang/srt/environ.py
-@@ -563,6 +563,21 @@ class Envs:
+@@ -560,6 +560,21 @@ class Envs:
      SGLANG_DSPARK_NVLINK_VOCAB_GATHER = EnvBool(True)
      SGLANG_DSPARK_ENABLE_MULTI_STREAM = EnvBool(True)
      SGLANG_DSPARK_CONFIDENCE_RELAY_LAG_STEPS = EnvInt(2)
@@ -91,10 +108,10 @@ index 79990eafb7..f912e2dd01 100644
      # ===================================================================
      # Memory pools and KV-cache sizing
 diff --git a/python/sglang/srt/managers/scheduler.py b/python/sglang/srt/managers/scheduler.py
-index c5824e0e68..b310d541f0 100644
+index 30d0506c1b..f4bcac2b12 100644
 --- a/python/sglang/srt/managers/scheduler.py
 +++ b/python/sglang/srt/managers/scheduler.py
-@@ -1168,6 +1168,11 @@ class Scheduler(
+@@ -1176,6 +1176,11 @@ class Scheduler(
  
          refresh_deep_gemm_layout_memory_budget(model_runner, only_if_initialized=True)
  
@@ -168,10 +185,10 @@ index 3e5c36e21f..e0e3283383 100644
          if not self.scheduler.spec_algorithm.is_dspark() or not hasattr(
              self.scheduler.draft_worker, command
 diff --git a/python/sglang/srt/speculative/base_spec_worker.py b/python/sglang/srt/speculative/base_spec_worker.py
-index 891956ca89..cb9eebb6fd 100644
+index c2f4f2a2b4..d25e88a5ca 100644
 --- a/python/sglang/srt/speculative/base_spec_worker.py
 +++ b/python/sglang/srt/speculative/base_spec_worker.py
-@@ -231,6 +231,9 @@ class BaseSpecWorker(ABC):
+@@ -237,6 +237,9 @@ class BaseSpecWorker(ABC):
      def prewarm_sampling(self) -> SamplingPrewarmResult:
          return self.target_worker.model_runner.prewarm_sampling()
  
@@ -222,18 +239,18 @@ index 1f964fd512..039a241b8b 100644
          if self._block_accept_recorder is None:
              return None
 diff --git a/python/sglang/srt/speculative/dspark_components/dspark_planner.py b/python/sglang/srt/speculative/dspark_components/dspark_planner.py
-index 542a102170..3e984a984e 100644
+index 00c8187dd6..c66fef358f 100644
 --- a/python/sglang/srt/speculative/dspark_components/dspark_planner.py
 +++ b/python/sglang/srt/speculative/dspark_components/dspark_planner.py
-@@ -9,6 +9,7 @@ import torch
- from sglang.kernels.ops.speculative.cache_locs import assign_extend_cache_locs_func
+@@ -8,6 +8,7 @@ import torch
+ 
  from sglang.kernels.ops.speculative.dspark.dspark_schedule import (
      ScheduleVerifyLensTopk,
 +    _value_independent_descending_order,
      compute_sort_survival,
  )
  from sglang.srt.distributed.utils import all_gather_single
-@@ -66,6 +67,16 @@ class VerifyWindow(msgspec.Struct, frozen=True):
+@@ -65,6 +66,16 @@ class VerifyWindow(msgspec.Struct, frozen=True):
      kv_loc_plan: KVLocPlan
  
  
@@ -250,7 +267,7 @@ index 542a102170..3e984a984e 100644
  class DSparkVerifyPlanner:
      def __init__(
          self,
-@@ -134,6 +145,8 @@ class DSparkVerifyPlanner:
+@@ -133,6 +144,8 @@ class DSparkVerifyPlanner:
          self._dynamic_graph_tier = False
          self._dp_tier_gather_enabled = False
          self._is_verify_all = True
@@ -259,7 +276,7 @@ index 542a102170..3e984a984e 100644
          self._uniform_layout_cache: dict = {}
          if self._ragged_verify_mode is not RaggedVerifyMode.STATIC:
              if self._confidence_head is None:
-@@ -164,6 +177,9 @@ class DSparkVerifyPlanner:
+@@ -163,6 +176,9 @@ class DSparkVerifyPlanner:
                  model_runner=self.model_runner,
                  relay_lag_steps=relay_lag_steps,
              )
@@ -269,7 +286,7 @@ index 542a102170..3e984a984e 100644
              self._dynamic_graph_tier = not is_dp_attention_enabled()
              self._dp_tier_gather_enabled = (
                  self._ragged_verify_mode is RaggedVerifyMode.COMPACT
-@@ -259,7 +275,9 @@ class DSparkVerifyPlanner:
+@@ -257,7 +273,9 @@ class DSparkVerifyPlanner:
              return
          resolved = future_map.resolve_confidence_cpu(batch)
          draft_input.verify_token_budget = self._budget_from_resolved(
@@ -280,7 +297,7 @@ index 542a102170..3e984a984e 100644
          )
          batch.spec_verify_tier_num_tokens = local_verify_tier_num_tokens(
              bs=batch.batch_size(),
-@@ -295,12 +313,48 @@ class DSparkVerifyPlanner:
+@@ -293,12 +311,48 @@ class DSparkVerifyPlanner:
          if self._budget_planner is not None:
              self._budget_planner.forced_budget_frac = frac
  
@@ -329,7 +346,7 @@ index 542a102170..3e984a984e 100644
      ) -> Optional[int]:
          del prefix_lens
          if self._budget_planner is None:
-@@ -314,7 +368,33 @@ class DSparkVerifyPlanner:
+@@ -312,7 +366,33 @@ class DSparkVerifyPlanner:
              generation=generation,
          )
          return self._budget_from_resolved(
@@ -364,7 +381,7 @@ index 542a102170..3e984a984e 100644
          )
  
      def resolve_verify_token_budget(
-@@ -324,6 +404,7 @@ class DSparkVerifyPlanner:
+@@ -322,6 +402,7 @@ class DSparkVerifyPlanner:
          confidence: Optional[torch.Tensor],
          prefix_lens: torch.Tensor,
          req_pool_indices: torch.Tensor,
@@ -372,7 +389,7 @@ index 542a102170..3e984a984e 100644
      ) -> Optional[int]:
          """Per-step verify-token budget: under overlap it was precomputed into
          the draft input by prepare_verify_budget; otherwise compute it now."""
-@@ -338,6 +419,7 @@ class DSparkVerifyPlanner:
+@@ -336,6 +417,7 @@ class DSparkVerifyPlanner:
              confidence=confidence,
              prefix_lens=prefix_lens,
              req_pool_indices=req_pool_indices,
@@ -380,7 +397,7 @@ index 542a102170..3e984a984e 100644
          )
          return draft_input.verify_token_budget
  
-@@ -351,6 +433,7 @@ class DSparkVerifyPlanner:
+@@ -349,6 +431,7 @@ class DSparkVerifyPlanner:
          *,
          resolved: Optional[ResolvedConfidence],
          req_pool_indices_cpu: torch.Tensor,
@@ -388,7 +405,7 @@ index 542a102170..3e984a984e 100644
      ) -> Optional[int]:
          if resolved is None:
              self._budget_planner.note_non_decode_step()
-@@ -364,6 +447,7 @@ class DSparkVerifyPlanner:
+@@ -362,6 +445,7 @@ class DSparkVerifyPlanner:
                  generation=resolved.generation,
                  current_generation=current_generation,
                  req_pool_indices_cpu=req_pool_indices_cpu,
@@ -396,7 +413,7 @@ index 542a102170..3e984a984e 100644
              )
          )
  
-@@ -873,6 +957,8 @@ def compute_verify_token_budget(
+@@ -862,6 +946,8 @@ def compute_verify_token_budget(
      history_survival_probs: torch.Tensor,
      sps_table: Union[SpsCostTable, SpsAdditiveCostTable],
      cfg: DSparkScheduleConfig,
@@ -405,7 +422,7 @@ index 542a102170..3e984a984e 100644
  ) -> VerifyBudgetDecision:
      num_requests = history_survival_probs.shape[0]
      max_len = cfg.resolved_max_verify_len()
-@@ -890,6 +976,18 @@ def compute_verify_token_budget(
+@@ -879,6 +965,18 @@ def compute_verify_token_budget(
              table=sps_table,
              num_requests=int(num_requests),
              num_budgets=int(tau_star.numel()),
@@ -424,7 +441,7 @@ index 542a102170..3e984a984e 100644
          )
          theta = tau_star / step_time
          idx = int(torch.argmax(theta))
-@@ -918,9 +1016,51 @@ def _lookup_sps_tensor(
+@@ -907,9 +1005,51 @@ def _lookup_sps_tensor(
      return sps[idx]
  
  
@@ -477,7 +494,7 @@ index 542a102170..3e984a984e 100644
      floor = table.bias_seconds + _interp_clamped(
          table.bs_probes, table.alpha_seconds, float(num_requests)
      )
-@@ -934,7 +1074,27 @@ def _additive_step_time_tensor(
+@@ -923,7 +1063,27 @@ def _additive_step_time_tensor(
      span = (m_probes[hi] - m_probes[lo]).clamp_(min=1e-9)
      frac = (m - m_probes[lo]) / span
      theta_at_m = theta_vals[lo] + frac * (theta_vals[hi] - theta_vals[lo])
@@ -506,7 +523,7 @@ index 542a102170..3e984a984e 100644
  
  
  class HostConfidenceBudgetPlanner:
-@@ -951,6 +1111,7 @@ class HostConfidenceBudgetPlanner:
+@@ -940,6 +1100,7 @@ class HostConfidenceBudgetPlanner:
          self.cfg = cfg
          self._model_runner = model_runner
          self.forced_budget_frac: Optional[float] = None
@@ -514,7 +531,7 @@ index 542a102170..3e984a984e 100644
          self.last_decision: Optional[VerifyBudgetDecision] = None
          self.lag_steps = max(
              int(envs.SGLANG_DSPARK_CONFIDENCE_RELAY_LAG_STEPS.get()), 1
-@@ -967,6 +1128,7 @@ class HostConfidenceBudgetPlanner:
+@@ -956,6 +1117,7 @@ class HostConfidenceBudgetPlanner:
          generation: torch.Tensor,
          current_generation: torch.Tensor,
          req_pool_indices_cpu: torch.Tensor,
@@ -522,7 +539,7 @@ index 542a102170..3e984a984e 100644
      ) -> int:
          lagged_confidence, lagged_generation = self._shift_to_lag(
              confidence=confidence,
-@@ -988,6 +1150,8 @@ class HostConfidenceBudgetPlanner:
+@@ -977,6 +1139,8 @@ class HostConfidenceBudgetPlanner:
              history_survival_probs=survival,
              sps_table=self.sps_table,
              cfg=self.cfg,
@@ -2598,7 +2615,7 @@ index 2e3289cc24..da060e2bc7 100644
              simulate_bonus_sampling_info=simulate_bonus_sampling_info,
          )
 diff --git a/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py b/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
-index e9e9d0116a..3402c2bdad 100644
+index 93cc9dfbcf..680b560051 100644
 --- a/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
 +++ b/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
 @@ -157,6 +157,8 @@ class DSparkWorkerV2(BaseSpecWorker):
@@ -2683,7 +2700,7 @@ index e9e9d0116a..3402c2bdad 100644
      def set_dspark_forced_budget_frac(self, frac: Optional[float]) -> None:
          if not self._hosts_draft:
              return
-@@ -910,6 +978,7 @@ class DSparkWorkerV2(BaseSpecWorker):
+@@ -913,6 +981,7 @@ class DSparkWorkerV2(BaseSpecWorker):
              confidence=confidence,
              prefix_lens=prefix_lens,
              req_pool_indices=batch.req_pool_indices,
@@ -2691,7 +2708,7 @@ index e9e9d0116a..3402c2bdad 100644
          )
  
          layout = self._verify_planner.schedule_layout(
-@@ -948,6 +1017,9 @@ class DSparkWorkerV2(BaseSpecWorker):
+@@ -951,6 +1020,9 @@ class DSparkWorkerV2(BaseSpecWorker):
                  simulate_bonus_sampling_info is None
                  or self._verify_executor.verify_epilogue.simulate_fold
              )

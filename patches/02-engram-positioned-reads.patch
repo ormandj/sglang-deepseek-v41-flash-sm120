@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/layers/engram.py b/python/sglang/srt/layers/engram.py
-index 024a4b9fb2..0b56ff3d30 100644
+index 453d63811d..57f16c77ae 100644
 --- a/python/sglang/srt/layers/engram.py
 +++ b/python/sglang/srt/layers/engram.py
-@@ -850,11 +850,20 @@ class EngramEmbedding(nn.Module):
+@@ -857,11 +857,20 @@ class EngramEmbedding(nn.Module):
          return self._host_table_ptrs
  
      def _load_rows(self, param: nn.Parameter, loaded_weight: torch.Tensor):
@@ -27,7 +27,7 @@ index 024a4b9fb2..0b56ff3d30 100644
              self.host_table.dirty = True
  
 diff --git a/python/sglang/srt/model_loader/loader.py b/python/sglang/srt/model_loader/loader.py
-index 019792e13f..27fefcc805 100644
+index 64d82d8738..a744bfa6c3 100644
 --- a/python/sglang/srt/model_loader/loader.py
 +++ b/python/sglang/srt/model_loader/loader.py
 @@ -119,6 +119,7 @@ from sglang.srt.model_loader.weight_utils import (

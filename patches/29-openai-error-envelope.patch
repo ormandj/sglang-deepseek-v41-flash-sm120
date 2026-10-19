@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/entrypoints/anthropic/serving.py b/python/sglang/srt/entrypoints/anthropic/serving.py
-index 722389b74a851e1193d0b1ef1ea20639360adc38..8ee7e4e37de5c224b8694e327d33c7edb994c6a6 100644
+index 722389b74a..8ee7e4e37d 100644
 --- a/python/sglang/srt/entrypoints/anthropic/serving.py
 +++ b/python/sglang/srt/entrypoints/anthropic/serving.py
 @@ -83,6 +83,15 @@ ERROR_TYPE_MAP = {
@@ -44,7 +44,7 @@ index 722389b74a851e1193d0b1ef1ea20639360adc38..8ee7e4e37de5c224b8694e327d33c7ed
              )
              return error_type, str(upstream_message)
 diff --git a/python/sglang/srt/entrypoints/http_server.py b/python/sglang/srt/entrypoints/http_server.py
-index 81d476fe11794aa53cdea750e092c02560661f03..2ad85195301acacf9a9c1426f92b72ebcc3da4b6 100644
+index c79a3746cb..031b3aab24 100644
 --- a/python/sglang/srt/entrypoints/http_server.py
 +++ b/python/sglang/srt/entrypoints/http_server.py
 @@ -102,6 +102,8 @@ from sglang.srt.entrypoints.openai.protocol import (
@@ -56,7 +56,7 @@ index 81d476fe11794aa53cdea750e092c02560661f03..2ad85195301acacf9a9c1426f92b72eb
  )
  from sglang.srt.entrypoints.openai.serving_classify import OpenAIServingClassify
  from sglang.srt.entrypoints.openai.serving_completions import OpenAIServingCompletion
-@@ -568,6 +570,11 @@ def _anthropic_error_response(*, status_code: int, error_type: str, message: str
+@@ -569,6 +571,11 @@ def _anthropic_error_response(*, status_code: int, error_type: str, message: str
      )
  
  
@@ -68,7 +68,7 @@ index 81d476fe11794aa53cdea750e092c02560661f03..2ad85195301acacf9a9c1426f92b72eb
  @app.exception_handler(HTTPException)
  async def validation_exception_handler(request: Request, exc: HTTPException):
      """Enrich HTTP exception with status code and other details.
-@@ -575,6 +582,7 @@ async def validation_exception_handler(request: Request, exc: HTTPException):
+@@ -576,6 +583,7 @@ async def validation_exception_handler(request: Request, exc: HTTPException):
      For /v1/responses, emit OpenAI-style nested error envelope:
      {"error": {"message": "...", "type": "...", "param": null, "code": <status>}}
      For /v1/messages, emit Anthropic-style envelope so SDK clients can parse it.
@@ -76,7 +76,7 @@ index 81d476fe11794aa53cdea750e092c02560661f03..2ad85195301acacf9a9c1426f92b72eb
      """
      if request.url.path.startswith("/v1/messages"):
          # Map HTTP status to Anthropic error.type; fall back to api_error.
-@@ -615,6 +623,12 @@ async def validation_exception_handler(request: Request, exc: HTTPException):
+@@ -616,6 +624,12 @@ async def validation_exception_handler(request: Request, exc: HTTPException):
              content={"error": nested_error}, status_code=exc.status_code
          )
  
@@ -89,7 +89,7 @@ index 81d476fe11794aa53cdea750e092c02560661f03..2ad85195301acacf9a9c1426f92b72eb
      error = ErrorResponse(
          object="error",
          message=exc.detail,
-@@ -633,7 +647,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
+@@ -634,7 +648,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
      file paths or Python internals from the default ``str(exc)`` representation
      never reach the client. For /v1/responses, keep OpenAI-style. For
      /v1/systemone, keep the 422 detail list that the System One API documents.
@@ -99,7 +99,7 @@ index 81d476fe11794aa53cdea750e092c02560661f03..2ad85195301acacf9a9c1426f92b72eb
      """
      if request.url.path.startswith("/v1/messages"):
          return _anthropic_error_response(
-@@ -673,6 +688,12 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
+@@ -674,6 +689,12 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
          }
          return ORJSONResponse(status_code=400, content={"error": nested_error})
  
@@ -112,7 +112,7 @@ index 81d476fe11794aa53cdea750e092c02560661f03..2ad85195301acacf9a9c1426f92b72eb
      err = ErrorResponse(
          message=message,
          type=HTTPStatus.BAD_REQUEST.phrase,
-@@ -1897,11 +1918,11 @@ async def openai_v1_audio_transcriptions(
+@@ -1898,11 +1919,11 @@ async def openai_v1_audio_transcriptions(
      """OpenAI-compatible audio transcription endpoint."""
      if response_format not in ["json", "text", "verbose_json"]:
          return ORJSONResponse(
@@ -129,7 +129,7 @@ index 81d476fe11794aa53cdea750e092c02560661f03..2ad85195301acacf9a9c1426f92b72eb
              status_code=400,
          )
  
-@@ -1972,14 +1993,12 @@ async def retrieve_model(model: str):
+@@ -1973,14 +1994,12 @@ async def retrieve_model(model: str):
      if model not in served_model_names:
          return ORJSONResponse(
              status_code=404,
@@ -151,7 +151,7 @@ index 81d476fe11794aa53cdea750e092c02560661f03..2ad85195301acacf9a9c1426f92b72eb
  
      return ModelCard(
 diff --git a/python/sglang/srt/entrypoints/openai/protocol.py b/python/sglang/srt/entrypoints/openai/protocol.py
-index c189ea9ac6a9336b90ac57f65dd8ae39377a0e81..b3ad83ac3fcd089f7fa8d651656fbc16897ce3ec 100644
+index 149bab556d..b68a9b6042 100644
 --- a/python/sglang/srt/entrypoints/openai/protocol.py
 +++ b/python/sglang/srt/entrypoints/openai/protocol.py
 @@ -20,6 +20,7 @@ import time
@@ -232,7 +232,7 @@ index c189ea9ac6a9336b90ac57f65dd8ae39377a0e81..b3ad83ac3fcd089f7fa8d651656fbc16
  class ParsedResponseFields(Protocol):
      """Protocol for parsed response fields from custom renderers."""
 diff --git a/python/sglang/srt/entrypoints/openai/serving_base.py b/python/sglang/srt/entrypoints/openai/serving_base.py
-index 04dfe2cab62b36cf3ee9ed918c81e9a22033c995..92134d2878103d43aa3d8352db7d4a744fda8c4f 100644
+index 04dfe2cab6..92134d2878 100644
 --- a/python/sglang/srt/entrypoints/openai/serving_base.py
 +++ b/python/sglang/srt/entrypoints/openai/serving_base.py
 @@ -12,7 +12,11 @@ from fastapi import HTTPException, Request
@@ -300,7 +300,7 @@ index 04dfe2cab62b36cf3ee9ed918c81e9a22033c995..92134d2878103d43aa3d8352db7d4a74
              object="error",
              message=message,
 diff --git a/python/sglang/srt/entrypoints/openai/serving_chat.py b/python/sglang/srt/entrypoints/openai/serving_chat.py
-index ec56b6f709486349b367ecec091360bffcf1888a..f6424339a9829e1aa8bc720bc72a0827ab7e526c 100644
+index ec56b6f709..f6424339a9 100644
 --- a/python/sglang/srt/entrypoints/openai/serving_chat.py
 +++ b/python/sglang/srt/entrypoints/openai/serving_chat.py
 @@ -272,6 +272,8 @@ def _build_video_config(request: ChatCompletionRequest) -> dict[str, Any] | None
@@ -324,7 +324,7 @@ index ec56b6f709486349b367ecec091360bffcf1888a..f6424339a9829e1aa8bc720bc72a0827
              # Handle reasoning content
              reasoning_text = None
 diff --git a/python/sglang/srt/entrypoints/openai/serving_completions.py b/python/sglang/srt/entrypoints/openai/serving_completions.py
-index e381ddc3962333250fb0d5c72b1a84816db5c1d2..84ee1ff32467e6e3844a29a56c9ca147e0747b4c 100644
+index e381ddc396..84ee1ff324 100644
 --- a/python/sglang/srt/entrypoints/openai/serving_completions.py
 +++ b/python/sglang/srt/entrypoints/openai/serving_completions.py
 @@ -49,6 +49,8 @@ logger = logging.getLogger(__name__)
@@ -337,7 +337,7 @@ index e381ddc3962333250fb0d5c72b1a84816db5c1d2..84ee1ff32467e6e3844a29a56c9ca147
          self,
          tokenizer_manager: TokenizerManager,
 diff --git a/python/sglang/srt/entrypoints/openai/serving_embedding.py b/python/sglang/srt/entrypoints/openai/serving_embedding.py
-index ed52ef8323b14afe89330afbcf0610e8635f9418..316dbaf102d9520f20f69fe950c3ab359a30a019 100644
+index ed52ef8323..316dbaf102 100644
 --- a/python/sglang/srt/entrypoints/openai/serving_embedding.py
 +++ b/python/sglang/srt/entrypoints/openai/serving_embedding.py
 @@ -30,6 +30,8 @@ if TYPE_CHECKING:
@@ -350,7 +350,7 @@ index ed52ef8323b14afe89330afbcf0610e8635f9418..316dbaf102d9520f20f69fe950c3ab35
          self,
          tokenizer_manager: TokenizerManager,
 diff --git a/python/sglang/srt/entrypoints/openai/serving_responses.py b/python/sglang/srt/entrypoints/openai/serving_responses.py
-index d4e4c2d300cffe86ede5e6a8a73fe6bd22621d1a..f1bcc5f1cbfb574b66168ee206e5a4a45776d778 100644
+index d4e4c2d300..f1bcc5f1cb 100644
 --- a/python/sglang/srt/entrypoints/openai/serving_responses.py
 +++ b/python/sglang/srt/entrypoints/openai/serving_responses.py
 @@ -159,6 +159,9 @@ def _should_emit_normal_text_as_message(
@@ -364,7 +364,7 @@ index d4e4c2d300cffe86ede5e6a8a73fe6bd22621d1a..f1bcc5f1cbfb574b66168ee206e5a4a4
          self,
          tokenizer_manager: TokenizerManager,
 diff --git a/python/sglang/srt/entrypoints/openai/serving_transcription.py b/python/sglang/srt/entrypoints/openai/serving_transcription.py
-index 7d07c07623e3c26b055a6de9a28d5c93b80e2914..38c1102ffef5e70724cf1051e300396219a65bb3 100644
+index 7d07c07623..38c1102ffe 100644
 --- a/python/sglang/srt/entrypoints/openai/serving_transcription.py
 +++ b/python/sglang/srt/entrypoints/openai/serving_transcription.py
 @@ -66,6 +66,8 @@ logger = logging.getLogger(__name__)
@@ -377,7 +377,7 @@ index 7d07c07623e3c26b055a6de9a28d5c93b80e2914..38c1102ffef5e70724cf1051e3003962
          super().__init__(tokenizer_manager)
          model_config = tokenizer_manager.model_config
 diff --git a/python/sglang/srt/utils/auth.py b/python/sglang/srt/utils/auth.py
-index df6811179e5df519c55ce1b98e6f6f4a5fbca988..ffa5cad87d9a4dc611d6d5b41ce8282b848ecfc6 100644
+index df6811179e..ffa5cad87d 100644
 --- a/python/sglang/srt/utils/auth.py
 +++ b/python/sglang/srt/utils/auth.py
 @@ -162,6 +162,11 @@ def add_api_key_middleware(
@@ -417,7 +417,7 @@ index df6811179e5df519c55ce1b98e6f6f4a5fbca988..ffa5cad87d9a4dc611d6d5b41ce8282b
                  )
                  await response(scope, receive, send)
 diff --git a/rust/sglang-processor/src/openai/chat.rs b/rust/sglang-processor/src/openai/chat.rs
-index 80bfbc5e8c03af89b44accddc445bc061011d075..5d75491054ea0b49fc37a720d12b3c50dcf16d2d 100644
+index 80bfbc5e8c..5d75491054 100644
 --- a/rust/sglang-processor/src/openai/chat.rs
 +++ b/rust/sglang-processor/src/openai/chat.rs
 @@ -13,7 +13,7 @@ use super::request::{
@@ -455,7 +455,7 @@ index 80bfbc5e8c03af89b44accddc445bc061011d075..5d75491054ea0b49fc37a720d12b3c50
              self.finish_reasons.push((index, finish_reason.clone()));
          }
 diff --git a/rust/sglang-processor/src/openai/completions.rs b/rust/sglang-processor/src/openai/completions.rs
-index 236a92f775b6a78044c33bc1b9fc8a2a44d070e0..ac658e20f5c7ca09dfa5a5d01468640f040ee421 100644
+index 236a92f775..ac658e20f5 100644
 --- a/rust/sglang-processor/src/openai/completions.rs
 +++ b/rust/sglang-processor/src/openai/completions.rs
 @@ -11,7 +11,7 @@ use super::request::{
@@ -493,7 +493,7 @@ index 236a92f775b6a78044c33bc1b9fc8a2a44d070e0..ac658e20f5c7ca09dfa5a5d01468640f
  
          let mut choice = json!({
 diff --git a/rust/sglang-processor/src/openai/wire.rs b/rust/sglang-processor/src/openai/wire.rs
-index 9cfd0d3c5ecb783c2333906759ec389a414de3e2..57c38dfc6f7a2594a32ac12be1f792b177a28518 100644
+index 9cfd0d3c5e..57c38dfc6f 100644
 --- a/rust/sglang-processor/src/openai/wire.rs
 +++ b/rust/sglang-processor/src/openai/wire.rs
 @@ -13,59 +13,67 @@ pub struct Reply {
@@ -654,7 +654,7 @@ index 9cfd0d3c5ecb783c2333906759ec389a414de3e2..57c38dfc6f7a2594a32ac12be1f792b1
      fn cache_report_keeps_zero_cached_tokens() {
          let details = |cached| usage(3, 2, 0, cached)["prompt_tokens_details"].clone();
 diff --git a/rust/sglang-processor/tests/fixtures/openai_parity/deepseek-v4-flash-0731.json b/rust/sglang-processor/tests/fixtures/openai_parity/deepseek-v4-flash-0731.json
-index 51cddea83deab5263de638507d1b22dcc0980769..100ab71442fa2d6aaae30ff026de21b12c2d3724 100644
+index 51cddea83d..100ab71442 100644
 --- a/rust/sglang-processor/tests/fixtures/openai_parity/deepseek-v4-flash-0731.json
 +++ b/rust/sglang-processor/tests/fixtures/openai_parity/deepseek-v4-flash-0731.json
 @@ -1290,11 +1290,12 @@
@@ -712,7 +712,7 @@ index 51cddea83deab5263de638507d1b22dcc0980769..100ab71442fa2d6aaae30ff026de21b1
            "[DONE]"
          ]
 diff --git a/rust/sglang-server/src/api_server/http/openai.rs b/rust/sglang-server/src/api_server/http/openai.rs
-index cbdc48ce8acfcae94a453e87e49bb94f73e13aab..9a3467bcfa83ae9d9c42eeb3172c10a922a67b62 100644
+index cbdc48ce8a..9a3467bcfa 100644
 --- a/rust/sglang-server/src/api_server/http/openai.rs
 +++ b/rust/sglang-server/src/api_server/http/openai.rs
 @@ -87,23 +87,26 @@ fn unix_seconds_u32() -> u32 {
@@ -756,12 +756,12 @@ index cbdc48ce8acfcae94a453e87e49bb94f73e13aab..9a3467bcfa83ae9d9c42eeb3172c10a9
      })
  }
 diff --git a/rust/sglang-server/src/api_server/http/openai/models.rs b/rust/sglang-server/src/api_server/http/openai/models.rs
-index 124366c07d312c3e25160823b97db5951792b601..9e2e572cb7be7a4ba5e9ef525c4657b660ea4ca2 100644
+index d41d94db1a..63bfd1cb99 100644
 --- a/rust/sglang-server/src/api_server/http/openai/models.rs
 +++ b/rust/sglang-server/src/api_server/http/openai/models.rs
-@@ -9,7 +9,8 @@ use axum::{
- };
- use std::sync::Arc;
+@@ -11,7 +11,8 @@ use std::sync::Arc;
+ 
+ use sglang_api_types::api::v1 as api;
  
 -use super::{AppState, openai_error, unix_seconds_u32};
 +use super::{AppState, error_payload, unix_seconds_u32};
@@ -769,10 +769,10 @@ index 124366c07d312c3e25160823b97db5951792b601..9e2e572cb7be7a4ba5e9ef525c4657b6
  
  pub(super) fn routes() -> Router<Arc<AppState>> {
      Router::new()
-@@ -26,11 +27,13 @@ async fn available_models(State(state): State<Arc<AppState>>) -> Response {
- 
- async fn retrieve_model(State(state): State<Arc<AppState>>, Path(model): Path<String>) -> Response {
-     if model != state.server_args.served_model_name {
+@@ -38,11 +39,13 @@ async fn retrieve_model(State(state): State<Arc<AppState>>, Path(model): Path<St
+         .into_iter()
+         .find(|card| card.id == model)
+     else {
 -        return openai_error(
 +        let mut payload = error_payload(
              StatusCode::NOT_FOUND,
@@ -782,14 +782,14 @@ index 124366c07d312c3e25160823b97db5951792b601..9e2e572cb7be7a4ba5e9ef525c4657b6
 +        payload["error"]["param"] = "model".into();
 +        payload["error"]["code"] = "model_not_found".into();
 +        return error_response(StatusCode::NOT_FOUND, payload, false);
-     }
-     Json(model_card(&state)).into_response()
+     };
+     Json(model_card(card)).into_response()
  }
 diff --git a/rust/sglang-server/src/api_server/http/openai/test_utils.rs b/rust/sglang-server/src/api_server/http/openai/test_utils.rs
-index c6dcbd412c4a30951afe98b36ba747a9ac89a6cb..fbc4a8ce7a5631756c0ace1ab2b56ed7711455fc 100644
+index fd950dbc90..00aa098ce4 100644
 --- a/rust/sglang-server/src/api_server/http/openai/test_utils.rs
 +++ b/rust/sglang-server/src/api_server/http/openai/test_utils.rs
-@@ -246,10 +246,15 @@ async fn openai_error_response_covers_unary_and_sse() {
+@@ -250,10 +250,15 @@ async fn openai_error_response_covers_unary_and_sse() {
      let unary = openai_error(StatusCode::BAD_REQUEST, "bad input", false);
      assert_eq!(unary.status(), StatusCode::BAD_REQUEST);
      let value = body_json(unary).await;
@@ -809,7 +809,7 @@ index c6dcbd412c4a30951afe98b36ba747a9ac89a6cb..fbc4a8ce7a5631756c0ace1ab2b56ed7
  
      let streamed = openai_error(StatusCode::BAD_REQUEST, "bad input", true);
      assert_eq!(streamed.status(), StatusCode::OK);
-@@ -265,7 +270,7 @@ async fn openai_error_response_covers_unary_and_sse() {
+@@ -269,7 +274,7 @@ async fn openai_error_response_covers_unary_and_sse() {
          .unwrap();
      let frame: serde_json::Value = serde_json::from_str(frame).unwrap();
      assert_eq!(frame["error"]["message"], "bad input");
@@ -818,7 +818,7 @@ index c6dcbd412c4a30951afe98b36ba747a9ac89a6cb..fbc4a8ce7a5631756c0ace1ab2b56ed7
      assert!(text.contains("[DONE]"));
  }
  
-@@ -420,7 +425,7 @@ async fn streaming_submit_failure_answers_inside_the_stream() {
+@@ -424,7 +429,7 @@ async fn streaming_submit_failure_answers_inside_the_stream() {
          .unwrap();
      let frame: serde_json::Value = serde_json::from_str(frame).unwrap();
      assert_eq!(frame["error"]["message"], "service unavailable");
@@ -829,7 +829,7 @@ index c6dcbd412c4a30951afe98b36ba747a9ac89a6cb..fbc4a8ce7a5631756c0ace1ab2b56ed7
      assert!(text.contains("[DONE]"));
  }
 diff --git a/test/registered/unit/entrypoints/anthropic/test_serving.py b/test/registered/unit/entrypoints/anthropic/test_serving.py
-index 5f8295d6a379655adbb76d3e9775ac46f54eaa26..dfe744ab9e6f7d9117c7d0fa59e121007df7c983 100644
+index 5f8295d6a3..dfe744ab9e 100644
 --- a/test/registered/unit/entrypoints/anthropic/test_serving.py
 +++ b/test/registered/unit/entrypoints/anthropic/test_serving.py
 @@ -1286,28 +1286,35 @@ class TestAnthropicServing(unittest.TestCase):
@@ -892,7 +892,7 @@ index 5f8295d6a379655adbb76d3e9775ac46f54eaa26..dfe744ab9e6f7d9117c7d0fa59e12100
          """Unparsable mid-stream chunk must still close any open content_block."""
 diff --git a/test/registered/unit/entrypoints/openai/test_openai_error_envelope.py b/test/registered/unit/entrypoints/openai/test_openai_error_envelope.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..6147921ff555dcabc107585ea39f4428f7c53833
+index 0000000000..6147921ff5
 --- /dev/null
 +++ b/test/registered/unit/entrypoints/openai/test_openai_error_envelope.py
 @@ -0,0 +1,326 @@
@@ -1223,7 +1223,7 @@ index 0000000000000000000000000000000000000000..6147921ff555dcabc107585ea39f4428
 +if __name__ == "__main__":
 +    unittest.main()
 diff --git a/test/registered/unit/entrypoints/openai/test_serving_chat.py b/test/registered/unit/entrypoints/openai/test_serving_chat.py
-index d28d6663c0f3d77909a09c16f5296a3ef8c3727f..b716603169089a37983f4c44525042b044683738 100644
+index d28d6663c0..b716603169 100644
 --- a/test/registered/unit/entrypoints/openai/test_serving_chat.py
 +++ b/test/registered/unit/entrypoints/openai/test_serving_chat.py
 @@ -549,9 +549,9 @@ class ServingChatTestCase(CustomTestCase):
@@ -1259,7 +1259,7 @@ index d28d6663c0f3d77909a09c16f5296a3ef8c3727f..b716603169089a37983f4c44525042b0
      def test_streaming_error_abort_still_finalizes_other_choices(self):
          """An error abort ends generation but still runs finalization, so a
 diff --git a/test/registered/unit/entrypoints/openai/test_serving_completions.py b/test/registered/unit/entrypoints/openai/test_serving_completions.py
-index 2ce597b1fecfa74d9b97c6879410d45d5503e30d..bb2e314908da97641660d0c79925f12d29e06bc1 100644
+index 2ce597b1fe..bb2e314908 100644
 --- a/test/registered/unit/entrypoints/openai/test_serving_completions.py
 +++ b/test/registered/unit/entrypoints/openai/test_serving_completions.py
 @@ -310,7 +310,8 @@ class ServingCompletionTestCase(unittest.TestCase):
@@ -1273,7 +1273,7 @@ index 2ce597b1fecfa74d9b97c6879410d45d5503e30d..bb2e314908da97641660d0c79925f12d
          # Ensure the stream stops after the abort error
          # The last chunk should be "data: [DONE]\n\n"
 diff --git a/test/registered/unit/entrypoints/openai/test_serving_transcription.py b/test/registered/unit/entrypoints/openai/test_serving_transcription.py
-index 531a7a0780d2e22cd5189573a5257ad50f2f9ed4..7abb5bd4fa7bda7dd5a1101db070f63514c4a528 100644
+index 531a7a0780..7abb5bd4fa 100644
 --- a/test/registered/unit/entrypoints/openai/test_serving_transcription.py
 +++ b/test/registered/unit/entrypoints/openai/test_serving_transcription.py
 @@ -427,7 +427,9 @@ class TestLongAudioChunkedNonStreaming(CustomTestCase):

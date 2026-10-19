@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/deepseek_v4.py
-index b3f80c147a..1ab2f9618d 100644
+index 6350bfa25c..48b6f39c46 100644
 --- a/python/sglang/srt/models/deepseek_v4.py
 +++ b/python/sglang/srt/models/deepseek_v4.py
-@@ -3307,6 +3307,25 @@ class DeepseekV4DecoderLayerBase(nn.Module):
+@@ -3319,6 +3319,27 @@ class DeepseekV4DecoderLayerBase(nn.Module):
              and mhc.can_fuse_post(self.hc_cfg)
          )
  
@@ -12,7 +12,8 @@ index b3f80c147a..1ab2f9618d 100644
 +        TP4 attention all-reduce the transport completes. `mhc.use_prefill_stats_overlap`
 +        is the per-forward half."""
 +        return (
-+            self.hc_stats_stream is not None
++            self.boundary_pre_from_prev
++            and self.hc_stats_stream is not None
 +            and get_parallel().tp_size == self.self_attn.attn_tp_size == 4
 +        )
 +
@@ -20,7 +21,8 @@ index b3f80c147a..1ab2f9618d 100644
 +    def _can_overlap_ffn_stats(self) -> bool:
 +        """The MoE counterpart of `_can_overlap_attn_stats`."""
 +        return (
-+            self.hc_stats_stream is not None
++            self.boundary_pre_from_prev
++            and self.hc_stats_stream is not None
 +            and self.mlp.tp_size == 4
 +            and get_moe_a2a_backend().is_none()
 +        )
@@ -29,7 +31,7 @@ index b3f80c147a..1ab2f9618d 100644
  def _gather_late_layer_ids(
      input_ids: torch.Tensor, counts: List[int], forward_batch: ForwardBatch
 diff --git a/python/sglang/srt/models/deepseek_v4_boundary.py b/python/sglang/srt/models/deepseek_v4_boundary.py
-index 033e88d8f7..09070f1111 100644
+index 033e88d8f7..91f308a988 100644
 --- a/python/sglang/srt/models/deepseek_v4_boundary.py
 +++ b/python/sglang/srt/models/deepseek_v4_boundary.py
 @@ -59,6 +59,9 @@ class ReadState(msgspec.Struct):
@@ -101,14 +103,22 @@ index 033e88d8f7..09070f1111 100644
          self.return_moe_output = self.defers_sum = (
              layer.boundary_mhc_fusions
              and layer.boundary_pre_from_prev
-@@ -534,6 +561,10 @@ class MoeTransport(MoeRowTransport):
+@@ -526,6 +553,9 @@ class MoeTransport(MoeRowTransport):
+ 
+     def prepare_output(self, hidden_states):
+         self.input = None
++        owes_sum = self.rows.group is not None and not self.mlp_reduce_scatter
++        if owes_sum and not self.defers_sum and self.layer._can_overlap_ffn_stats:
++            _issue_prefill_stats(self.layer, self.batch, attention=False)
+         if isinstance(hidden_states, MoEOutput):
+             completion = MoeFinalize(hidden_states)
+             return (
+@@ -533,7 +563,7 @@ class MoeTransport(MoeRowTransport):
+                 if self.mlp_reduce_scatter
                  else completion
              )
-         if self.rows.group is not None and not self.mlp_reduce_scatter:
-+            # Wide prefill (no fused post): the experts merged their output and
-+            # the all-reduce is still owed.
-+            if self.layer._can_overlap_ffn_stats:
-+                _issue_prefill_stats(self.layer, self.batch, attention=False)
+-        if self.rows.group is not None and not self.mlp_reduce_scatter:
++        if owes_sum:
              return MoeFinalize(partial=hidden_states)
          return hidden_states
  
@@ -166,12 +176,27 @@ index 965ee296e2..e1dfd50790 100644
  def use_stats_stream(cfg: HcConfig, forward_batch: ForwardBatch, x: torch.Tensor):
      if not cfg.pre_from_prev:
          return False
+diff --git a/test/registered/unit/models/test_deepseek_v4_boundary.py b/test/registered/unit/models/test_deepseek_v4_boundary.py
+index 94fe68b27e..6060f24a01 100644
+--- a/test/registered/unit/models/test_deepseek_v4_boundary.py
++++ b/test/registered/unit/models/test_deepseek_v4_boundary.py
+@@ -132,7 +132,9 @@ class TestAttentionCompletion(unittest.TestCase):
+         torch.nn.Module.__init__(attention)
+         attention.attn_tp_size = 2
+         attention.wo_b = Projection()
+-        layer = SimpleNamespace(boundary_mhc_fusions=False)
++        layer = SimpleNamespace(
++            boundary_mhc_fusions=False, _can_overlap_attn_stats=False
++        )
+         value = torch.arange(12.0).view(3, 4)
+         rows = TransportRows(
+             Layout(frozenset()),
 diff --git a/test/registered/unit/models/test_deepseek_v4_mhc_prefill_overlap.py b/test/registered/unit/models/test_deepseek_v4_mhc_prefill_overlap.py
 new file mode 100644
-index 0000000000..e8fe138908
+index 0000000000..0d6f21a69e
 --- /dev/null
 +++ b/test/registered/unit/models/test_deepseek_v4_mhc_prefill_overlap.py
-@@ -0,0 +1,331 @@
+@@ -0,0 +1,352 @@
 +"""DeepSeek-V4.1 mHC: in wide target prefill (4096 to 65536 rows) each sublayer's
 +triplet runs on the stats stream beside that sublayer's TP all-reduce. The boundary
 +transport forks the stream right before the sum it is about to complete (attention
@@ -192,6 +217,7 @@ index 0000000000..e8fe138908
 +from sglang.srt.layers.layer_boundary.layout import SumGroup
 +from sglang.srt.model_executor.forward_batch_info import ForwardMode
 +from sglang.srt.models import deepseek_v4_boundary as hc_boundary
++from sglang.srt.models.deepseek_v2 import MoEOutput
 +from sglang.srt.runtime_context import override_platform
 +from sglang.test.ci.ci_register import register_cpu_ci
 +from sglang.test.test_utils import CustomTestCase
@@ -243,11 +269,21 @@ index 0000000000..e8fe138908
 +    )
 +
 +
++class _Pieces(MoEOutput):
++    """Unmerged expert output, the shape the V4 MoE hands its transport."""
++
++    __slots__ = ()
++
++    def get_merged(self):
++        return self.routed
++
++
 +class _Run:
 +    """One sublayer's transport exit and post, recording stream order."""
 +
-+    def __init__(self, rows, mode, *, attention):
++    def __init__(self, rows, mode, *, attention, merged_moe=False):
 +        self.rows = rows
++        self.merged_moe = merged_moe
 +        self.attention = attention
 +        self.name = "attn" if attention else "ffn"
 +        self.events = []
@@ -336,9 +372,12 @@ index 0000000000..e8fe138908
 +    ):
 +        layer = self._layer(stats_stream=stats_stream, cp_prefill=cp_prefill)
 +        transport = self._transport(layer)
-+        output = (
-+            deepseek_v4_mhc.AttnOutput(self.partial) if self.attention else self.partial
-+        )
++        if self.attention:
++            output = deepseek_v4_mhc.AttnOutput(self.partial)
++        elif self.merged_moe:
++            output = self.partial
++        else:
++            output = _Pieces(self.partial, None, None, 1.0, False)
 +        with ExitStack() as stack:
 +            stack.enter_context(
 +                override_platform(is_blackwell=is_blackwell, is_sm90=False)
@@ -410,11 +449,13 @@ index 0000000000..e8fe138908
 +        self.assertIsNone(run.state.stats_join)
 +
 +    def test_wide_prefill_runs_stats_beside_each_all_reduce(self):
-+        for attention in (True, False):
++        sublayers = {"attention": {"attention": True}, "moe": {"attention": False}}
++        sublayers["merged_moe"] = {"attention": False, "merged_moe": True}
++        for name, kwargs in sublayers.items():
 +            for mode in PREFILL_MODES:
 +                for rows in WIDE_ROWS:
-+                    with self.subTest(attention=attention, mode=mode.name, rows=rows):
-+                        run = _Run(rows, mode, attention=attention)
++                    with self.subTest(sublayer=name, mode=mode.name, rows=rows):
++                        run = _Run(rows, mode, **kwargs)
 +                        self.assertEqual(run(), _overlapped(run.name))
 +                        self._assert_side_stream_lifetimes(run)
 +
@@ -426,7 +467,8 @@ index 0000000000..e8fe138908
 +                    self._assert_in_line(run, run())
 +
 +    def test_decode_and_verify_compute_stats_in_line_here(self):
-+        # Decode and verify fork before the combine instead (use_stats_stream).
++        # The prefill overlap stays off; their fork before the combine
++        # (use_stats_stream) is unchanged and not exercised here.
 +        for mode in (ForwardMode.DECODE, ForwardMode.TARGET_VERIFY):
 +            with self.subTest(mode=mode.name):
 +                run = _Run(8192, mode, attention=True)
@@ -464,8 +506,9 @@ index 0000000000..e8fe138908
 +class TestMhcPrefillStatsOverlapGates(CustomTestCase):
 +    _cls = deepseek_v4.DeepseekV4DecoderLayerBase
 +
-+    def _attn_gate(self, *, tp_size=4, attn_tp_size=4, stats_stream=True):
++    def _attn_gate(self, *, tp_size=4, attn_tp_size=4, stats_stream=True, lagged=True):
 +        layer = SimpleNamespace(
++            boundary_pre_from_prev=lagged,
 +            hc_stats_stream=object() if stats_stream else None,
 +            self_attn=SimpleNamespace(attn_tp_size=attn_tp_size),
 +        )
@@ -476,8 +519,9 @@ index 0000000000..e8fe138908
 +        ):
 +            return self._cls._can_overlap_attn_stats.func(layer)
 +
-+    def _ffn_gate(self, *, tp_size=4, a2a_none=True, stats_stream=True):
++    def _ffn_gate(self, *, tp_size=4, a2a_none=True, stats_stream=True, lagged=True):
 +        layer = SimpleNamespace(
++            boundary_pre_from_prev=lagged,
 +            hc_stats_stream=object() if stats_stream else None,
 +            mlp=SimpleNamespace(tp_size=tp_size),
 +        )
@@ -493,12 +537,14 @@ index 0000000000..e8fe138908
 +        self.assertFalse(self._attn_gate(tp_size=8, attn_tp_size=4))
 +        self.assertFalse(self._attn_gate(tp_size=2, attn_tp_size=2))
 +        self.assertFalse(self._attn_gate(stats_stream=False))
++        self.assertFalse(self._attn_gate(lagged=False))
 +
 +    def test_moe_gate(self):
 +        self.assertTrue(self._ffn_gate())
 +        self.assertFalse(self._ffn_gate(tp_size=2))
 +        self.assertFalse(self._ffn_gate(a2a_none=False))
 +        self.assertFalse(self._ffn_gate(stats_stream=False))
++        self.assertFalse(self._ffn_gate(lagged=False))
 +
 +
 +if __name__ == "__main__":

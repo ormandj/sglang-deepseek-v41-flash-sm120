@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
-index f912e2dd01..d7238175d9 100644
+index b59491da51..a9a74098ca 100644
 --- a/python/sglang/srt/environ.py
 +++ b/python/sglang/srt/environ.py
-@@ -1483,6 +1483,9 @@ class Envs:
+@@ -1490,6 +1490,9 @@ class Envs:
      SGLANG_LILICORR_REQUIRE_SAMPLING = EnvBool(False)
      SGLANG_RAGGED_VERIFY_MODE = EnvStr("static")
      SGLANG_TEST_RAGGED_VERIFY_FORCE_UNIFORM_CAPTURE = EnvBool(False)
@@ -13,7 +13,7 @@ index f912e2dd01..d7238175d9 100644
      # Saves the per-step draft forward, but the draft KV goes stale: an upshift
      # back to steps>0 starts from a cold draft state (low accept until it recovers).
 diff --git a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
-index 39400e8565..7d53352c43 100644
+index 7750bf21bb..1c57b9e400 100644
 --- a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
 +++ b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
 @@ -110,6 +110,7 @@ from sglang.srt.speculative.ragged_verify import resolve_ragged_verify_layout
@@ -35,7 +35,7 @@ index 39400e8565..7d53352c43 100644
      def __init__(
          self,
          model_runner: ModelRunner,
-@@ -567,10 +572,37 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+@@ -559,10 +564,37 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
              self.model_runner.shared_read_done_event = read_done
  
      def _build_ragged_verify_token_buckets(self) -> list[int]:
@@ -74,7 +74,7 @@ index 39400e8565..7d53352c43 100644
      def _autotune_buffers(self):
          """Reuse these static decode buffers (sized to max_bs) for the warmup
          flashinfer-autotune dummy forward instead of allocating a throwaway set
-@@ -843,15 +875,17 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+@@ -835,15 +867,17 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
          stream_idx: Optional[int],
          variant_label: Optional[str],
          attention_variant: Optional[str],
@@ -94,7 +94,7 @@ index 39400e8565..7d53352c43 100644
          if attention_variant is not None:
              parts.append(attention_variant)
          if variant_label is not None:
-@@ -1187,18 +1221,15 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+@@ -1179,18 +1213,15 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
              empty_cache=False,
          )
          # Reverse so cuda graphs share memory better.
@@ -116,7 +116,7 @@ index 39400e8565..7d53352c43 100644
              attention_variants = (
                  variants.capture_labels if variants is not None else (None,)
              )
-@@ -1208,8 +1239,9 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+@@ -1200,8 +1231,9 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
                      self.model_runner.gpu_id,
                      empty_cache=False,
                  )
@@ -127,7 +127,7 @@ index 39400e8565..7d53352c43 100644
                  )
  
              for variant_label, _variant_has_lora in lora_variants:
-@@ -1217,20 +1249,31 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+@@ -1209,20 +1241,31 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
                  for attention_variant in attention_variants:
                      _set_capture_attention_variant(attention_variant)
                      self._set_profile_trace_tag(
@@ -162,7 +162,7 @@ index 39400e8565..7d53352c43 100644
                          )
          _set_capture_attention_variant(None)
  
-@@ -1241,8 +1284,13 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+@@ -1233,8 +1276,13 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
          stream_idx: Optional[int] = None,
          variant_label: Optional[str] = None,
          attention_variant: Optional[str] = None,

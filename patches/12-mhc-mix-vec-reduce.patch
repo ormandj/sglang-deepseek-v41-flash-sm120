@@ -1,8 +1,8 @@
 diff --git a/python/sglang/kernels/ops/layernorm/mhc.py b/python/sglang/kernels/ops/layernorm/mhc.py
-index bc7c7035c3..eae5961c8c 100644
+index 9ae2485876..977856d667 100644
 --- a/python/sglang/kernels/ops/layernorm/mhc.py
 +++ b/python/sglang/kernels/ops/layernorm/mhc.py
-@@ -2326,11 +2326,17 @@ def _block_m_for(m: int) -> int:
+@@ -2299,11 +2299,17 @@ def _block_m_for(m: int) -> int:
      return _HC_MIX_BLOCK_M
  
  
@@ -23,7 +23,7 @@ index bc7c7035c3..eae5961c8c 100644
          if blocks % n == 0:
              return n
      return 1
-@@ -2459,6 +2465,82 @@ def _hc_mix_reduce_sinkhorn_kernel(
+@@ -2432,6 +2438,82 @@ def _hc_mix_reduce_sinkhorn_kernel(
      tl.store(comb_ptr + row * HC * HC + jj * HC + kk, comb)
  
  
@@ -106,7 +106,7 @@ index bc7c7035c3..eae5961c8c 100644
  def hc_mix_stats_sinkhorn(
      x_flat: torch.Tensor,
      hc_fn: torch.Tensor,
-@@ -2468,11 +2550,14 @@ def hc_mix_stats_sinkhorn(
+@@ -2441,11 +2523,14 @@ def hc_mix_stats_sinkhorn(
      sinkhorn_iters: int,
      rms_eps: float,
      hc_eps: float,
@@ -122,7 +122,7 @@ index bc7c7035c3..eae5961c8c 100644
      """
      assert x_flat.dim() == 2 and hc_fn.dim() == 2
      assert x_flat.stride(1) == 1 and hc_fn.stride(1) == 1
-@@ -2487,7 +2572,7 @@ def hc_mix_stats_sinkhorn(
+@@ -2460,7 +2545,7 @@ def hc_mix_stats_sinkhorn(
      if m == 0:
          return pre, post, comb
  
@@ -131,7 +131,7 @@ index bc7c7035c3..eae5961c8c 100644
      mix_pad = max(16, triton.next_power_of_2(mix))
      part_mix = torch.empty((num_slices, m, mix), dtype=torch.float32, device=dev)
      part_sq = torch.empty((num_slices, m), dtype=torch.float32, device=dev)
-@@ -2528,7 +2613,8 @@ def hc_mix_stats_sinkhorn(
+@@ -2501,7 +2586,8 @@ def hc_mix_stats_sinkhorn(
              hc_eps=hc_eps,
          )
          return pre, post, comb
@@ -141,7 +141,7 @@ index bc7c7035c3..eae5961c8c 100644
          part_mix,
          part_sq,
          hc_scale.float().contiguous(),
-@@ -2545,6 +2631,7 @@ def hc_mix_stats_sinkhorn(
+@@ -2518,6 +2604,7 @@ def hc_mix_stats_sinkhorn(
          ITERS=sinkhorn_iters,
          EPS=hc_eps,
          num_warps=1,
@@ -149,7 +149,7 @@ index bc7c7035c3..eae5961c8c 100644
      )
      return pre, post, comb
  
-@@ -2715,7 +2802,8 @@ def hc_mix_stats_sinkhorn_deepgemm(
+@@ -2688,7 +2775,8 @@ def hc_mix_stats_sinkhorn_deepgemm(
      # sq depends only on x_flat, so the second projection recomputes the same
      # values; overwriting it avoids a throwaway (slices, m) scratch, 4 MiB at m=65536.
      tf32_hc_prenorm_gemm(x_flat, low, mix_lo, sq, slices)
@@ -159,7 +159,7 @@ index bc7c7035c3..eae5961c8c 100644
          mix_hi,
          sq,
          hc_scale,
-@@ -2731,8 +2819,8 @@ def hc_mix_stats_sinkhorn_deepgemm(
+@@ -2704,8 +2792,8 @@ def hc_mix_stats_sinkhorn_deepgemm(
          NUM_SLICES=slices,
          ITERS=sinkhorn_iters,
          EPS=hc_eps,

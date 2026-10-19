@@ -73,7 +73,7 @@ index b24711a14b..a55d6574a3 100644
      for offset in range(0, rows, rows_per_chunk):
          tile = slice(offset, min(offset + rows_per_chunk, rows))
 diff --git a/python/sglang/srt/layers/attention/deepseek_v4_backend.py b/python/sglang/srt/layers/attention/deepseek_v4_backend.py
-index fda802adaa..bb273f8d71 100644
+index 0ac54d0ad8..4c9dab0867 100644
 --- a/python/sglang/srt/layers/attention/deepseek_v4_backend.py
 +++ b/python/sglang/srt/layers/attention/deepseek_v4_backend.py
 @@ -90,6 +90,9 @@ from sglang.srt.layers.attention.dsv4.v41_indexer import (
@@ -83,10 +83,10 @@ index fda802adaa..bb273f8d71 100644
 +from sglang.srt.layers.attention.dsv4.v41_indexer.scoring import (
 +    prefill_score_budget_bytes,
 +)
- from sglang.srt.layers.attention.verify_mask import (
-     VerifyMask,
-     maybe_create_verify_mask,
-@@ -1026,6 +1029,9 @@ class DSV4Metadata:
+ from sglang.srt.layers.attention.dsv4.v41_indexer.sparse_table import (
+     SparseTableBackend,
+ )
+@@ -1052,6 +1055,9 @@ class DSV4Metadata:
      # What the candidate-source layer published for the index-source layers after
      # it, in the implementation's own type; never copied from the host.
      candidate_metadata: Optional[CandidateMetadata] = None
@@ -96,15 +96,15 @@ index fda802adaa..bb273f8d71 100644
  
      # Built at the runner's prefill WAR boundary when the fast path is on,
      # otherwise lazily by ``_forward_prefill_sparse``.
-@@ -1053,6 +1059,7 @@ class DSV4Metadata:
+@@ -1079,6 +1085,7 @@ class DSV4Metadata:
          )
          self.sparse_prefill_cache = None
          self.prefill_shared_reads_snapshotted = False
 +        self.low_ratio_score_budget_bytes = None
  
-     def refresh_for_breakable_cuda_graph_replay_(self, static_metadata: DSV4Metadata):
-         self.core_attn_metadata.refresh_for_breakable_cuda_graph_replay_(
-@@ -1085,6 +1092,7 @@ class DSV4Metadata:
+     def refresh_for_breakable_cuda_graph_replay_(
+         self,
+@@ -1124,6 +1131,7 @@ class DSV4Metadata:
              )
          self.sparse_prefill_cache = None
          self.prefill_shared_reads_snapshotted = False
@@ -112,10 +112,10 @@ index fda802adaa..bb273f8d71 100644
  
  
  @dataclass
-@@ -1994,6 +2002,10 @@ class DeepseekV4AttnBackend(
-                 if tail.real_rows_count is not None:
-                     rows = rows[: tail.real_rows_count]
-                 tail_buf[: rows.shape[0]].copy_(rows)
+@@ -2046,6 +2054,10 @@ class DeepseekV4AttnBackend(
+                 forward_batch.global_num_token_non_padded = bound
+                 forward_batch.num_token_non_padded = bound
+         tail_core = tail_metadata.core_attn_metadata
 +        if tail_metadata.low_ratio_score_budget_bytes is None:
 +            tail_metadata.low_ratio_score_budget_bytes = saved[
 +                0
@@ -123,7 +123,7 @@ index fda802adaa..bb273f8d71 100644
          self.forward_metadata = tail_metadata
          if self.token_to_kv_pool.request_window is not None:
              self.token_to_kv_pool.request_window.activate(
-@@ -3641,6 +3653,18 @@ class DeepseekV4AttnBackend(
+@@ -3779,6 +3791,18 @@ class DeepseekV4AttnBackend(
          else:
              rows_per_request = _as_int_list(forward_batch.extend_seq_lens_cpu)
              rows_per_request_device = forward_batch.extend_seq_lens
@@ -142,7 +142,7 @@ index fda802adaa..bb273f8d71 100644
          return PrefillInputs(
              indexer=layer.indexer,
              layer_id=layer.layer_id,
-@@ -3652,7 +3676,7 @@ class DeepseekV4AttnBackend(
+@@ -3790,7 +3814,7 @@ class DeepseekV4AttnBackend(
              req_rows=req,
              req_pool_indices=forward_batch.req_pool_indices,
              kv_page_table=core.page_table,
@@ -151,7 +151,7 @@ index fda802adaa..bb273f8d71 100644
              rows_per_request=rows_per_request,
              rows_per_request_device=rows_per_request_device,
              out_raw_indices=core.sparse_raw_indices(layer.compress_ratio),
-@@ -3661,6 +3685,7 @@ class DeepseekV4AttnBackend(
+@@ -3799,6 +3823,7 @@ class DeepseekV4AttnBackend(
                  if self._low_ratio_prefill_reads_page_indices(forward_batch)
                  else None
              ),
@@ -160,7 +160,7 @@ index fda802adaa..bb273f8d71 100644
  
      def _low_ratio_prefill_reads_page_indices(self, forward_batch: ForwardBatch):
 diff --git a/python/sglang/srt/layers/attention/dsv4/v41_indexer/dense_blocks.py b/python/sglang/srt/layers/attention/dsv4/v41_indexer/dense_blocks.py
-index 1e2394a1f9..70b0f18e76 100644
+index 1e2394a1f9..5d0ac36e88 100644
 --- a/python/sglang/srt/layers/attention/dsv4/v41_indexer/dense_blocks.py
 +++ b/python/sglang/srt/layers/attention/dsv4/v41_indexer/dense_blocks.py
 @@ -246,7 +246,13 @@ def _publish_prefill_blocks(
@@ -211,10 +211,10 @@ index 1e2394a1f9..70b0f18e76 100644
 +    width: int, block_size: int, topk_blocks: int
 +) -> Tuple[int, int]:
 +    """Scratch of ``_publish_tile_blocks`` for a tile ``width`` wide, as bytes a
-+    row and bytes a tile. A row: the bool causal mask (a byte a column), the fp32
-+    block maxima, their masked copy and the newest-block mask (9 bytes a block),
-+    and the top-k over the blocks with its sort (32 bytes a kept block). A tile:
-+    one request's int64 column or block indices at a time (8 bytes a column)."""
++    row and bytes a tile. A row: the bool causal mask (a byte a column), the block
++    maxima (counted as fp32), their masked copy and the newest-block mask (9 bytes
++    a block), and the top-k over the blocks with its sort (32 bytes a kept block).
++    A tile: one request's int64 column or block indices at a time (8 bytes a column)."""
 +    num_blocks = -(-width // block_size)
 +    per_row = width + 9 * num_blocks + 32 * min(topk_blocks, num_blocks)
 +    return per_row, 8 * width
@@ -233,7 +233,7 @@ index 1e2394a1f9..70b0f18e76 100644
      start = 0
      for num_rows, lc in zip(data.rows_per_request, data.lens_per_request):
 diff --git a/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py b/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py
-index 0b97025587..bb422f9a54 100644
+index 0b97025587..163959a934 100644
 --- a/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py
 +++ b/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py
 @@ -5,7 +5,7 @@ a selection back into pool slots."""
@@ -257,11 +257,11 @@ index 0b97025587..bb422f9a54 100644
 +from sglang.srt.model_executor.runner_backend_utils.tc_piecewise_cuda_graph import (
 +    is_in_tc_piecewise_cuda_graph,
 +)
-+from sglang.srt.model_executor.runner_utils.capture_mode import get_is_capture_mode
++from sglang.srt.model_executor.runner_utils import capture_mode
  from sglang.srt.runtime_context import get_platform
  from sglang.srt.utils.common import async_h2d
  
-@@ -31,11 +40,26 @@ if TYPE_CHECKING:
+@@ -31,11 +40,28 @@ if TYPE_CHECKING:
      from sglang.srt.layers.attention.dsv4.dsv41_sparse import DeepseekV41Indexer
      from sglang.srt.mem_cache.deepseek_v4_memory_pool import DeepSeekV4TokenToKVPool
  
@@ -278,8 +278,10 @@ index 0b97025587..bb422f9a54 100644
 +    cap = _DEEP_GEMM_SCORE_BUDGET_BYTES
 +    if not mqa_logits_needs_budget_check(num_rows=num_rows, num_cols=max_seq_len):
 +        return cap
++    # Not get_is_capture_mode(): breakable-graph replay runs this eagerly and
++    # can afford the free-memory query.
 +    if (
-+        get_is_capture_mode()
++        capture_mode.is_capture_mode
 +        or torch.cuda.is_current_stream_capturing()
 +        or is_in_tc_piecewise_cuda_graph()
 +    ):
@@ -290,7 +292,7 @@ index 0b97025587..bb422f9a54 100644
  class DeepGEMMDecodeData(msgspec.Struct, frozen=True):
      q_fp4: torch.Tensor  # [rows, 1, heads, 64] int8, packed fp4
      q_sf: torch.Tensor  # [rows, 1, heads] int32, packed ue8m0
-@@ -55,6 +79,8 @@ class DeepGEMMPrefillData(msgspec.Struct, frozen=True):
+@@ -55,6 +81,8 @@ class DeepGEMMPrefillData(msgspec.Struct, frozen=True):
      q_fp4: torch.Tensor  # [rows, heads, 64] int8, packed fp4
      q_sf: torch.Tensor  # [rows, heads] int32, packed ue8m0
      weights: torch.Tensor  # [rows, heads] fp32 head weights
@@ -299,7 +301,7 @@ index 0b97025587..bb422f9a54 100644
  
      @property
      def num_rows(self) -> int:
-@@ -205,10 +231,19 @@ def get_deep_gemm_prefill_data(
+@@ -205,10 +233,19 @@ def get_deep_gemm_prefill_data(
          q_fp4=q_fp4,
          q_sf=q_sf,
          weights=weights,
@@ -320,7 +322,7 @@ index 0b97025587..bb422f9a54 100644
      yield from flat_index_logits_tiles(
          q=(data.q_fp4, data.q_sf),
          kv=kv,
-@@ -216,7 +251,8 @@ def score_tiles(data: DeepGEMMPrefillData, kv: Tuple[torch.Tensor, torch.Tensor]
+@@ -216,7 +253,8 @@ def score_tiles(data: DeepGEMMPrefillData, kv: Tuple[torch.Tensor, torch.Tensor]
          starts=data.request_starts,
          lengths=data.compress_lens,
          context_lengths=data.lens_per_request,
@@ -331,10 +333,10 @@ index 0b97025587..bb422f9a54 100644
  
  
 diff --git a/python/sglang/srt/layers/attention/dsv4/v41_indexer/sparse_table.py b/python/sglang/srt/layers/attention/dsv4/v41_indexer/sparse_table.py
-index efc7ede22c..7827d7a14b 100644
+index cbdca3e415..66e4cca3b2 100644
 --- a/python/sglang/srt/layers/attention/dsv4/v41_indexer/sparse_table.py
 +++ b/python/sglang/srt/layers/attention/dsv4/v41_indexer/sparse_table.py
-@@ -397,6 +397,11 @@ def _row_pair_ids(rows_per_request: List[int], *, device: torch.device) -> torch
+@@ -486,6 +486,11 @@ def _row_pair_ids(rows_per_request: List[int], *, device: torch.device) -> torch
      return (row - ((row - first_row[request]) & 1)).to(torch.int32)
  
  
@@ -346,7 +348,7 @@ index efc7ede22c..7827d7a14b 100644
  # TODO(dark): support fusion of publish + topk of publish layer
  def publish_prefill_table(
      *,
-@@ -416,7 +421,9 @@ def publish_prefill_table(
+@@ -505,7 +510,9 @@ def publish_prefill_table(
      blocks = torch.empty(rows, topk_blocks, dtype=torch.int32, device=device)
      zero_offsets = torch.zeros(rows, dtype=torch.int32, device=device)
      # the block keys read the score rows through 32-byte vectors
@@ -357,7 +359,7 @@ index efc7ede22c..7827d7a14b 100644
          lens = data.compress_lens[tile]
          topk_ragged(logits, lens, out=out_positions[tile], offsets=zero_offsets[tile])
          # keys past a row's block count stay unset; the top-k reads a row
-@@ -434,6 +441,8 @@ def publish_prefill_table(
+@@ -523,6 +530,8 @@ def publish_prefill_table(
              out_offsets=zero_offsets[: logits.shape[0]],
              out_indices=blocks[tile],
          )
@@ -381,10 +383,10 @@ index 7800b366ac..9965b4c27d 100644
          self.out_raw_indices.fill_(-1)
          if self.out_page_indices is not None:
 diff --git a/test/registered/kernels/ops/attention/test_dense_prefill_indexer.py b/test/registered/kernels/ops/attention/test_dense_prefill_indexer.py
-index 77df9c4670..ed69b2622b 100644
+index 77df9c4670..a6657c3a72 100644
 --- a/test/registered/kernels/ops/attention/test_dense_prefill_indexer.py
 +++ b/test/registered/kernels/ops/attention/test_dense_prefill_indexer.py
-@@ -3,12 +3,15 @@ from unittest.mock import patch
+@@ -3,12 +3,16 @@ from unittest.mock import patch
  
  import torch
  
@@ -392,6 +394,7 @@ index 77df9c4670..ed69b2622b 100644
 +    select_candidate_block_ids,
 +)
  from sglang.kernels.ops.attention.dsv4.fp4_indexer import quantize_fp4_indexer_tensor
++from sglang.kernels.ops.attention.dsv4.index_logits import FLAT_LOGITS_WIDTH_ALIGN
  from sglang.srt.layers.attention.dsv4.v41_indexer import dense_blocks, scoring
  from sglang.test.ci.ci_register import register_cuda_ci
  from sglang.test.test_utils import CustomTestCase
@@ -401,7 +404,7 @@ index 77df9c4670..ed69b2622b 100644
  
  
  def make_inputs(request_lengths, ratio=1, zero_queries=False, seed=17):
-@@ -48,10 +51,8 @@ def make_inputs(request_lengths, ratio=1, zero_queries=False, seed=17):
+@@ -48,10 +52,8 @@ def make_inputs(request_lengths, ratio=1, zero_queries=False, seed=17):
      )
  
  
@@ -414,7 +417,7 @@ index 77df9c4670..ed69b2622b 100644
          k_slots=torch.arange(inputs["kv"][0].shape[0], device="cuda"),
          request_starts=inputs["starts"],
          lens_per_request=[n for _, n in inputs["request_lengths"]],
-@@ -61,6 +62,12 @@ def run_dense(inputs, *, publish_candidates, candidates):
+@@ -61,6 +63,12 @@ def run_dense(inputs, *, publish_candidates, candidates):
          q_sf=inputs["q"][1],
          weights=inputs["weights"],
      )
@@ -427,16 +430,7 @@ index 77df9c4670..ed69b2622b 100644
      if publish_candidates:
          selected, blocks = dense_blocks._publish_prefill_blocks(
              data=data,
-@@ -327,7 +334,7 @@ class TestDensePrefillIndexer(CustomTestCase):
-                 self.assert_topk(inputs, selected, expected)
- 
-     def test_score_memory_is_bounded(self):
--        for context, limit_gib in ((65536, 3), (65535, 5)):
-+        for context, limit_gib in ((65536, 3), (65535, 3)):
-             with self.subTest(context=context):
-                 inputs = make_inputs([(16384, context)])
-                 inputs["candidate_topk_blocks"] = 2048
-@@ -368,5 +375,154 @@ class TestDensePrefillIndexer(CustomTestCase):
+@@ -368,5 +376,154 @@ class TestDensePrefillIndexer(CustomTestCase):
                  del inputs, candidates
  
  
@@ -535,7 +529,7 @@ index 77df9c4670..ed69b2622b 100644
 +        data = prefill_data(inputs)
 +        rows = data.num_rows
 +        group = 128 // inputs["q"][0].shape[1]
-+        width = -(-485_123 // 8) * 8
++        width = -(-485_123 // FLAT_LOGITS_WIDTH_ALIGN) * FLAT_LOGITS_WIDTH_ALIGN
 +        logits = group * 4 * (-(-width // 256) * 256)
 +
 +        def peak_past(baseline, held):
@@ -593,10 +587,10 @@ index 77df9c4670..ed69b2622b 100644
      unittest.main()
 diff --git a/test/registered/unit/layers/test_dsv41_prefill_score_tiles.py b/test/registered/unit/layers/test_dsv41_prefill_score_tiles.py
 new file mode 100644
-index 0000000000..4987bdd700
+index 0000000000..e080b6002c
 --- /dev/null
 +++ b/test/registered/unit/layers/test_dsv41_prefill_score_tiles.py
-@@ -0,0 +1,610 @@
+@@ -0,0 +1,616 @@
 +"""CPU checks for prefill tile budgets and selection equivalence."""
 +
 +import contextlib
@@ -1010,7 +1004,6 @@ index 0000000000..4987bdd700
 +
 +CAPTURE_STATES = {
 +    "model_capture": lambda: patch.object(capture_mode, "is_capture_mode", True),
-+    "breakable": enable_breakable_cuda_graph,
 +    "stream": lambda: patch.object(
 +        torch.cuda, "is_current_stream_capturing", lambda: True
 +    ),
@@ -1072,6 +1065,10 @@ index 0000000000..4987bdd700
 +            with self.subTest(capturing=name):
 +                self.assertEqual(self.budget(capturing=name), 2 << 30)
 +                self.assertEqual(self.budget(capturing=name, static=1 << 30), 1 << 30)
++
++    def test_breakable_replay_queries_free_memory(self):
++        with enable_breakable_cuda_graph():
++            self.assertEqual(self.budget(free=400 << 20), 400 << 20)
 +
 +    def test_small_forward_skips_the_query(self):
 +        with patch.object(
@@ -1196,12 +1193,15 @@ index 0000000000..4987bdd700
 +        self.assertEqual(data.score_budget_bytes, 123 << 20)
 +
 +    def test_graph_replay_copies_clear_the_budget(self):
-+        for method in ("copy_", "refresh_for_breakable_cuda_graph_replay_"):
++        for method, kwargs in (
++            ("copy_", {}),
++            ("refresh_for_breakable_cuda_graph_replay_", {"two_level": False}),
++        ):
 +            with self.subTest(method=method):
 +                metadata = fake_metadata()
 +                metadata.low_ratio_score_budget_bytes = 1 << 20
 +                setattr(metadata.core_attn_metadata, method, lambda other: None)
-+                getattr(metadata, method)(fake_metadata())
++                getattr(metadata, method)(fake_metadata(), **kwargs)
 +                self.assertIsNone(metadata.low_ratio_score_budget_bytes)
 +
 +

@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/layers/attention/dsv4/dsv41_sparse.py b/python/sglang/srt/layers/attention/dsv4/dsv41_sparse.py
-index 7a32a5a107..ac8f264ff9 100644
+index 7a32a5a107..717b0fb555 100644
 --- a/python/sglang/srt/layers/attention/dsv4/dsv41_sparse.py
 +++ b/python/sglang/srt/layers/attention/dsv4/dsv41_sparse.py
 @@ -20,6 +20,10 @@ from sglang.kernels.ops.gemm.router_gemv_hip import rocm_gemv_split_k_max_tokens
@@ -13,13 +13,14 @@ index 7a32a5a107..ac8f264ff9 100644
  from sglang.srt.utils import add_prefix, is_gfx95_supported
  
  
-@@ -75,6 +79,13 @@ def token_req_indices(forward_batch, *, num_tokens=None) -> torch.Tensor:
+@@ -75,6 +79,14 @@ def token_req_indices(forward_batch, *, num_tokens=None) -> torch.Tensor:
      if forward_batch.forward_mode.is_decode():
          return req
      if forward_batch.forward_mode.is_target_verify():
 +        layout = resolve_ragged_verify_layout(forward_batch)
 +        if layout is not None:
-+            # Graph padding maps to row bs, i.e. pool slot 0 like padded dense rows.
++            # Tokens past qo_indptr[-1] map to row bs (pool slot 0); padding the
++            # staged layout gave to padding rows or the last real row follows them.
 +            rows = ragged_verify_token_rows(
 +                layout, layout.graph_num_tokens if num_tokens is None else num_tokens
 +            )
@@ -28,7 +29,7 @@ index 7a32a5a107..ac8f264ff9 100644
              req, int(forward_batch.spec_info.draft_token_num), output_size=num_tokens
          )
 diff --git a/python/sglang/srt/layers/engram.py b/python/sglang/srt/layers/engram.py
-index 0b56ff3d30..67c34a7164 100644
+index 57f16c77ae..fe7996dad9 100644
 --- a/python/sglang/srt/layers/engram.py
 +++ b/python/sglang/srt/layers/engram.py
 @@ -53,6 +53,10 @@ from sglang.srt.layers.quantization.base_config import QuantizationConfig
@@ -42,7 +43,7 @@ index 0b56ff3d30..67c34a7164 100644
  from sglang.srt.utils import add_prefix, is_cuda, is_gfx95_supported, is_hip
  from sglang.srt.utils.hf_transformers.tokenizer import get_tokenizer
  
-@@ -346,12 +350,21 @@ class EngramHasher(nn.Module):
+@@ -353,12 +357,22 @@ class EngramHasher(nn.Module):
              kmode = MODE_DECODE
              commit_rows, commit_last = req_slots, None
          elif mode.is_target_verify():
@@ -62,8 +63,9 @@ index 0b56ff3d30..67c34a7164 100644
 +                kmode = MODE_VERIFY
 +            else:
 +                # Packed (compact) verify: each request's run starts at its
-+                # qo_indptr entry. Graph padding hashes as part of the last row;
-+                # those rows are discarded and verify commits no history.
++                # qo_indptr entry. Graph padding hashes with the row the layout
++                # gives it (the tail with the last row); padding outputs are
++                # discarded and verify commits no history.
 +                row = ragged_verify_token_rows(layout, num_tokens).clamp_max(bs - 1)
 +                starts = layout.qo_indptr_device[:-1]
 +                kmode = MODE_EXTEND

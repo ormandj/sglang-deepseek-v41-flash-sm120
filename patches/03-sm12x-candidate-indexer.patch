@@ -36,10 +36,10 @@ index 4423b2033c..2916d1a94e 100644
      assert pos.shape[0] == bs, (
          f"decode expects one token per request, {pos.shape=} {bs=}"
 diff --git a/test/registered/kernels/ops/attention/test_fp4_indexer.py b/test/registered/kernels/ops/attention/test_fp4_indexer.py
-index 42154a7d48..cbcbf39a52 100644
+index 83aced3ca5..328223494d 100644
 --- a/test/registered/kernels/ops/attention/test_fp4_indexer.py
 +++ b/test/registered/kernels/ops/attention/test_fp4_indexer.py
-@@ -591,11 +591,12 @@ def test_fp4_paged_logits_replay(batch, ratio, width, masked):
+@@ -578,11 +578,12 @@ def test_fp4_paged_logits_replay(batch, ratio, width, masked):
  
  
  @pytest.mark.skipif(

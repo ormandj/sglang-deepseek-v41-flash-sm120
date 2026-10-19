@@ -1,8 +1,8 @@
 diff --git a/python/sglang/kernels/ops/gemm/__init__.py b/python/sglang/kernels/ops/gemm/__init__.py
-index 47b4a0e4ad..1f7e96b73f 100644
+index 515d4c943e..7f992e9224 100644
 --- a/python/sglang/kernels/ops/gemm/__init__.py
 +++ b/python/sglang/kernels/ops/gemm/__init__.py
-@@ -574,6 +574,21 @@ register_kernel(
+@@ -430,6 +430,14 @@ register_kernel(
          ),
      )
  )
@@ -12,13 +12,6 @@ index 47b4a0e4ad..1f7e96b73f 100644
 +        backend=KernelBackend.TRITON,
 +        target="sglang.kernels.ops.gemm.sm120_mxfp8_skinny_gemm:mxfp8_skinny_gemm",
 +        capabilities=_SM120,
-+        format_signature=FormatSignature(
-+            supported_dtypes=("float8_e4m3fn", "bfloat16", "float16", "float32"),
-+            description=(
-+                "split-K MXFP8 [m, k] @ [n, k].T for m <= 128 with 32x32 "
-+                "power-of-two weight block scales"
-+            ),
-+        ),
 +    )
 +)
  register_kernel(
@@ -26,7 +19,7 @@ index 47b4a0e4ad..1f7e96b73f 100644
          op="gemm.gptq_marlin_gemm",
 diff --git a/python/sglang/kernels/ops/gemm/sm120_mxfp8_skinny_gemm.py b/python/sglang/kernels/ops/gemm/sm120_mxfp8_skinny_gemm.py
 new file mode 100644
-index 0000000000..9889db9fc1
+index 0000000000..eb488617d6
 --- /dev/null
 +++ b/python/sglang/kernels/ops/gemm/sm120_mxfp8_skinny_gemm.py
 @@ -0,0 +1,219 @@
@@ -188,8 +181,8 @@ index 0000000000..9889db9fc1
 +    (UE8M0, FlashInfer 128x4 swizzled). weight: E4M3 [N, K].
 +    weight_block_scale: FP32 power-of-two scales [ceil(N / 32), K / 32].
 +    counters: only for shapes that split K; a contiguous int32 tensor of at
-+    least ceil(N / BN) zeros on the device of `a`, used by one stream at a
-+    time; the kernel leaves them zero.
++    least ceil(N / BN) elements on the device of `a`, used by one stream at a
++    time. They must be zero on entry (not checked); the kernel leaves them zero.
 +    """
 +    m, k = a.shape
 +    n = weight.shape[0]
@@ -216,7 +209,7 @@ index 0000000000..9889db9fc1
 +    ):
 +        raise ValueError(
 +            f"(N, K) = ({n}, {k}) splits K, so counters must be a contiguous int32 "
-+            f"tensor of at least {tiles_n} zeros on {a.device}"
++            f"tensor of at least {tiles_n} entries on {a.device}"
 +        )
 +    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 +    ws = (
@@ -250,23 +243,23 @@ index 0000000000..9889db9fc1
 +    )
 +    return out
 diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
-index 80e0077766..6727780fe2 100644
+index 268e6fad24..ddce934266 100644
 --- a/python/sglang/srt/environ.py
 +++ b/python/sglang/srt/environ.py
-@@ -1106,6 +1106,11 @@ class Envs:
+@@ -1111,6 +1111,11 @@ class Envs:
      # kernels/ops/gemm/configs/ (currently L40S), so it is a no-op on
      # any other GPU / untuned shape even when enabled.
      SGLANG_ENABLE_FP8_GEMM_CONFIG_TUNE = EnvBool(True)
 +    # SM120: block-FP8 (32x32, UE8M0) linears served as MXFP8 (needs
 +    # --fp8-gemm-backend flashinfer_cutlass or flashinfer_cutedsl) run their
-+    # tuned decode shapes at up to 16 rows on a split-K Triton GEMM instead of
++    # tuned decode shapes at up to 16 rows on a Triton GEMM instead of
 +    # FlashInfer. Set 0 to keep every row count on FlashInfer.
 +    SGLANG_ENABLE_SM120_MXFP8_SKINNY_GEMM = EnvBool(True)
  
      # ===================================================================
      # Humming quantization
 diff --git a/python/sglang/srt/layers/quantization/fp8.py b/python/sglang/srt/layers/quantization/fp8.py
-index 9d0c3e0116..bde53a8f51 100644
+index 9d0c3e0116..48403fa692 100644
 --- a/python/sglang/srt/layers/quantization/fp8.py
 +++ b/python/sglang/srt/layers/quantization/fp8.py
 @@ -5,7 +5,7 @@
@@ -312,7 +305,7 @@ index 9d0c3e0116..bde53a8f51 100644
  class Fp8LinearMethod(LinearMethodBase):
      """Linear method for FP8.
  
-@@ -979,6 +999,91 @@ class Fp8LinearMethod(LinearMethodBase):
+@@ -979,6 +999,90 @@ class Fp8LinearMethod(LinearMethodBase):
          # the swizzled copy is stored separately.
          self._process_mxfp8_linear_weight_scale(layer, scale_u8=scale_u8)
          layer.block_fp8_mxfp8_ready = True
@@ -382,7 +375,6 @@ index 9d0c3e0116..bde53a8f51 100644
 +            torch.bfloat16,
 +            torch.float16,
 +        ):
-+            # The activation dtypes the FlashInfer MXFP8 path accepts.
 +            data, a_sf = x, None
 +        else:
 +            return None
@@ -396,7 +388,7 @@ index 9d0c3e0116..bde53a8f51 100644
 +            data.reshape(rows, k),
 +            layer.weight,
 +            scale,
-+            layer.mxfp8_skinny_counters,
++            getattr(layer, "mxfp8_skinny_counters", None),
 +            a_sf=a_sf,
 +            out_dtype=data.dtype if a_sf is None else torch.bfloat16,
 +        )
@@ -404,7 +396,7 @@ index 9d0c3e0116..bde53a8f51 100644
  
      def _process_mxfp8_linear_weight_scale(
          self, layer: Module, scale_u8: Optional[torch.Tensor] = None
-@@ -1281,6 +1386,10 @@ class Fp8LinearMethod(LinearMethodBase):
+@@ -1281,6 +1385,10 @@ class Fp8LinearMethod(LinearMethodBase):
          elif self.block_fp8_as_mxfp8 and isinstance(x, tuple):
              # A legacy (q, scale) block-fp8 pair keeps the block kernel.
              mxfp8_view = False
@@ -417,10 +409,10 @@ index 9d0c3e0116..bde53a8f51 100644
              extra_kwargs = {}
 diff --git a/test/registered/kernels/ops/gemm/test_sm120_mxfp8_skinny_gemm.py b/test/registered/kernels/ops/gemm/test_sm120_mxfp8_skinny_gemm.py
 new file mode 100644
-index 0000000000..273fd9b408
+index 0000000000..6ca3556d1f
 --- /dev/null
 +++ b/test/registered/kernels/ops/gemm/test_sm120_mxfp8_skinny_gemm.py
-@@ -0,0 +1,367 @@
+@@ -0,0 +1,363 @@
 +"""SM120 small-M MXFP8 GEMM: FP64 reference, bit-identity with FlashInfer's
 +activation quantization, determinism, batch invariance, CUDA-graph replay,
 +split-K counter validation, and dispatch through Fp8LinearMethod.apply."""
@@ -507,7 +499,7 @@ index 0000000000..273fd9b408
 +        assert not counters.any(), "split-K counters must return to zero"
 +
 +
-+@pytest.mark.parametrize("n,k", [(1792, 5120), (5120, 2048)])  # split-K, BK 256
++@pytest.mark.parametrize("n,k", [(1792, 5120), (5120, 2048)])  # split-K; BK 256
 +@pytest.mark.parametrize("m", [1, MAX_M])
 +@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
 +def test_input_dtypes(n, k, m, dtype):
@@ -551,7 +543,7 @@ index 0000000000..273fd9b408
 +
 +
 +@pytest.mark.parametrize("backend", ["cute-dsl", "cuda"])
-+@pytest.mark.parametrize("m", [1, 6, 16, 48, 128])
++@pytest.mark.parametrize("m", [1, 6, 16, 32, 48, 128])
 +def test_fused_quant_matches_flashinfer(m, backend):
 +    flashinfer = pytest.importorskip("flashinfer")
 +    if backend == "cute-dsl" and not _cute_dsl_available():
@@ -708,7 +700,8 @@ index 0000000000..273fd9b408
 +    if dtype != torch.bfloat16:
 +        assert skinny_rows == [1, 6, MAX_M, 6, 6]
 +        return
-+    q, sf = flashinfer.mxfp8_quantize(x[:6], True, 32)
++    backend = "cute-dsl" if _cute_dsl_available() else "cuda"
++    q, sf = flashinfer.mxfp8_quantize(x[:6], True, 32, backend=backend)
 +    out_q = layer.quant_method.apply(layer, Mxfp8SwizzledInput(q, sf))
 +    assert torch.equal(out_q, layer(x[:6])[0])
 +    assert skinny_rows == [1, 6, MAX_M, 6, 6, 6, 6]
@@ -727,8 +720,6 @@ index 0000000000..273fd9b408
 +    ref = no_bias + layer.bias.float()
 +    err = (out.float() - ref).abs().max() / ref.abs().max()
 +    assert err < 1e-2, err
-+    # FP32 activations stay off the kernel, as FlashInfer's MXFP8 path takes
-+    # only BF16 and FP16.
 +    assert layer.quant_method._apply_mxfp8_skinny(layer, x.float()) is None
 +    assert skinny_rows == []
 +
@@ -757,12 +748,9 @@ index 0000000000..273fd9b408
 +    assert layer.mxfp8_skinny_counters is counters
 +    assert torch.equal(scale, s)
 +    assert not counters.any()
-+    # Same-size allocations that would take over buffers freed by the reload.
-+    taken = [torch.full_like(counters, 7), torch.full_like(scale, 3.0)]
 +    graph.replay()
 +    assert torch.equal(out, layer(x)[0])
 +    assert not counters.any()
-+    del taken
 +
 +
 +def test_linear_gates(build_linear, skinny_rows):

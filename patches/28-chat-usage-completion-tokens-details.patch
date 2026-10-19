@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/entrypoints/openai/protocol.py b/python/sglang/srt/entrypoints/openai/protocol.py
-index 36c1a41f6731019913b87a26f23e43e5aef275fd..c189ea9ac6a9336b90ac57f65dd8ae39377a0e81 100644
+index 641ccde476..149bab556d 100644
 --- a/python/sglang/srt/entrypoints/openai/protocol.py
 +++ b/python/sglang/srt/entrypoints/openai/protocol.py
 @@ -206,14 +206,31 @@ class PromptTokensDetails(BaseModel):
@@ -35,7 +35,7 @@ index 36c1a41f6731019913b87a26f23e43e5aef275fd..c189ea9ac6a9336b90ac57f65dd8ae39
  class StreamOptions(BaseModel):
      include_usage: Optional[bool] = False
 diff --git a/python/sglang/srt/entrypoints/openai/usage_processor.py b/python/sglang/srt/entrypoints/openai/usage_processor.py
-index 503496af54b49e3d68b20edef6a9d6189663be99..1b7c74da002375bc4a941d952a46b1ec088de68b 100644
+index 503496af54..1b7c74da00 100644
 --- a/python/sglang/srt/entrypoints/openai/usage_processor.py
 +++ b/python/sglang/srt/entrypoints/openai/usage_processor.py
 @@ -2,7 +2,11 @@ from __future__ import annotations
@@ -62,7 +62,7 @@ index 503496af54b49e3d68b20edef6a9d6189663be99..1b7c74da002375bc4a941d952a46b1ec
              reasoning_tokens=reasoning_tokens,
          )
 diff --git a/python/sglang/test/tool_call_test_runner.py b/python/sglang/test/tool_call_test_runner.py
-index b642260cbda5b9ecf0178374aa0296a66819bcce..f2516c1b269ac1d66fc298ca46bb923c0d1354a3 100644
+index b642260cbd..f2516c1b26 100644
 --- a/python/sglang/test/tool_call_test_runner.py
 +++ b/python/sglang/test/tool_call_test_runner.py
 @@ -267,7 +267,8 @@ def _test_reasoning_usage(client, model):
@@ -76,7 +76,7 @@ index b642260cbda5b9ecf0178374aa0296a66819bcce..f2516c1b269ac1d66fc298ca46bb923c
              f"expected completion_tokens_details.reasoning_tokens > 0, got {detail_reasoning}"
          )
 diff --git a/rust/sglang-processor/src/openai/wire.rs b/rust/sglang-processor/src/openai/wire.rs
-index 50fff96bd4411fa6ce9ca3b8fadd1449770c6efc..9cfd0d3c5ecb783c2333906759ec389a414de3e2 100644
+index 50fff96bd4..9cfd0d3c5e 100644
 --- a/rust/sglang-processor/src/openai/wire.rs
 +++ b/rust/sglang-processor/src/openai/wire.rs
 @@ -75,6 +75,7 @@ pub(super) fn usage(prompt: u64, completion: u64, reasoning: u64, cached: Option
@@ -88,7 +88,7 @@ index 50fff96bd4411fa6ce9ca3b8fadd1449770c6efc..9cfd0d3c5ecb783c2333906759ec389a
      })
  }
 diff --git a/rust/sglang-processor/tests/fixtures/openai_parity/deepseek-v4-flash-0731.json b/rust/sglang-processor/tests/fixtures/openai_parity/deepseek-v4-flash-0731.json
-index bbbaf63cc35dcd9629e7b41c91fecd5a30c707ab..51cddea83deab5263de638507d1b22dcc0980769 100644
+index bbbaf63cc3..51cddea83d 100644
 --- a/rust/sglang-processor/tests/fixtures/openai_parity/deepseek-v4-flash-0731.json
 +++ b/rust/sglang-processor/tests/fixtures/openai_parity/deepseek-v4-flash-0731.json
 @@ -64,6 +64,7 @@
@@ -417,7 +417,7 @@ index bbbaf63cc35dcd9629e7b41c91fecd5a30c707ab..51cddea83deab5263de638507d1b22dc
            },
            "metadata": {
 diff --git a/rust/sglang-processor/tests/fixtures/openai_parity/deepseek-v4.1-flash.json b/rust/sglang-processor/tests/fixtures/openai_parity/deepseek-v4.1-flash.json
-index 45f9909003d64ccabdf5f6684fe0a0d295b4eac8..e602f501ecaa5484ac2bb85cdab45a1406dcc56a 100644
+index 45f9909003..e602f501ec 100644
 --- a/rust/sglang-processor/tests/fixtures/openai_parity/deepseek-v4.1-flash.json
 +++ b/rust/sglang-processor/tests/fixtures/openai_parity/deepseek-v4.1-flash.json
 @@ -59,6 +59,7 @@
@@ -656,7 +656,7 @@ index 45f9909003d64ccabdf5f6684fe0a0d295b4eac8..e602f501ecaa5484ac2bb85cdab45a14
            },
            "metadata": {
 diff --git a/rust/sglang-processor/tests/fixtures/openai_parity/glm-5.3.json b/rust/sglang-processor/tests/fixtures/openai_parity/glm-5.3.json
-index 2a908d7f826b1e9d9b932079cfd0cda2ee93908a..75c49b59aa92779905a45063caafa4df85592a3b 100644
+index 2a908d7f82..75c49b59aa 100644
 --- a/rust/sglang-processor/tests/fixtures/openai_parity/glm-5.3.json
 +++ b/rust/sglang-processor/tests/fixtures/openai_parity/glm-5.3.json
 @@ -56,6 +56,7 @@
@@ -684,7 +684,7 @@ index 2a908d7f826b1e9d9b932079cfd0cda2ee93908a..75c49b59aa92779905a45063caafa4df
            },
            "metadata": {"weight_version": "default"}
 diff --git a/rust/sglang-processor/tests/fixtures/openai_parity/kimi-k3.json b/rust/sglang-processor/tests/fixtures/openai_parity/kimi-k3.json
-index 2ab71efeffa424c420648b598308cebefd474ec9..b7af0973f71feafbdc769d30718e0e3e6b3c7fe4 100644
+index 2ab71efeff..b7af0973f7 100644
 --- a/rust/sglang-processor/tests/fixtures/openai_parity/kimi-k3.json
 +++ b/rust/sglang-processor/tests/fixtures/openai_parity/kimi-k3.json
 @@ -67,6 +67,7 @@
@@ -808,7 +808,7 @@ index 2ab71efeffa424c420648b598308cebefd474ec9..b7af0973f71feafbdc769d30718e0e3e
            },
            "metadata": {"weight_version": "default"}
 diff --git a/rust/sglang-processor/tests/fixtures/openai_parity/qwen3.8-27b.json b/rust/sglang-processor/tests/fixtures/openai_parity/qwen3.8-27b.json
-index 61e24b41260e3b92cf4eed20f4db0b410a3ec895..6e4080937f2589fa96478efc84a61b3187d5059f 100644
+index 61e24b4126..6e4080937f 100644
 --- a/rust/sglang-processor/tests/fixtures/openai_parity/qwen3.8-27b.json
 +++ b/rust/sglang-processor/tests/fixtures/openai_parity/qwen3.8-27b.json
 @@ -75,6 +75,7 @@
@@ -950,7 +950,7 @@ index 61e24b41260e3b92cf4eed20f4db0b410a3ec895..6e4080937f2589fa96478efc84a61b31
            },
            "metadata": {
 diff --git a/rust/sglang-server/src/api_server/http/openai/chat.rs b/rust/sglang-server/src/api_server/http/openai/chat.rs
-index 08e0abff685e3a8d7511dfbfb18ff959f7973265..ec86c0907b09aa821096db77ba9dec9c1f795cad 100644
+index e6410f09b0..5899b4dfc6 100644
 --- a/rust/sglang-server/src/api_server/http/openai/chat.rs
 +++ b/rust/sglang-server/src/api_server/http/openai/chat.rs
 @@ -462,6 +462,7 @@ pub(super) async fn unary_chat(
@@ -1101,7 +1101,7 @@ index 08e0abff685e3a8d7511dfbfb18ff959f7973265..ec86c0907b09aa821096db77ba9dec9c
      async fn unary_chat_separates_reasoning_content_with_parser_configured() {
          let (choice, tx) = chat_submitted(0, "r0");
 diff --git a/rust/sglang-server/src/api_server/http/openai/completions.rs b/rust/sglang-server/src/api_server/http/openai/completions.rs
-index 8662315f87ceb250a3ca2edb1471dc78fdae0b10..b14c45200e8dd1464d205b41f6836bcdf0f94bc8 100644
+index 8662315f87..b14c45200e 100644
 --- a/rust/sglang-server/src/api_server/http/openai/completions.rs
 +++ b/rust/sglang-server/src/api_server/http/openai/completions.rs
 @@ -15,8 +15,8 @@ use axum::{
@@ -1318,7 +1318,7 @@ index 8662315f87ceb250a3ca2edb1471dc78fdae0b10..b14c45200e8dd1464d205b41f6836bcd
      async fn stream_uses_deltas_then_usage_and_done() {
          let (choice, tx) = submitted(0, 0, "r0");
 diff --git a/rust/sglang-server/src/api_server/http/openai/test_utils.rs b/rust/sglang-server/src/api_server/http/openai/test_utils.rs
-index f91abd6b5e547222402b08d4a9fad259219b1de1..c6dcbd412c4a30951afe98b36ba747a9ac89a6cb 100644
+index d0a9a375ae..fd950dbc90 100644
 --- a/rust/sglang-server/src/api_server/http/openai/test_utils.rs
 +++ b/rust/sglang-server/src/api_server/http/openai/test_utils.rs
 @@ -62,6 +62,28 @@ pub(super) fn chunk(rid: &str, text: &str, done: bool) -> ResponseItem {
@@ -1351,7 +1351,7 @@ index f91abd6b5e547222402b08d4a9fad259219b1de1..c6dcbd412c4a30951afe98b36ba747a9
  pub(super) fn submitted(
      index: usize,
 diff --git a/test/registered/unit/entrypoints/openai/test_usage_processor.py b/test/registered/unit/entrypoints/openai/test_usage_processor.py
-index 2d59d49793c0c5f480873caf08a9172c3fc37741..e7c9ed17af02f210295bedcb037acf906f6dd06e 100644
+index 2d59d49793..e7c9ed17af 100644
 --- a/test/registered/unit/entrypoints/openai/test_usage_processor.py
 +++ b/test/registered/unit/entrypoints/openai/test_usage_processor.py
 @@ -1,5 +1,14 @@

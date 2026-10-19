@@ -1,8 +1,8 @@
 diff --git a/python/sglang/kernels/ops/attention/__init__.py b/python/sglang/kernels/ops/attention/__init__.py
-index 4d277dd438..669589b696 100644
+index e982c4ffac..3ffd771b9c 100644
 --- a/python/sglang/kernels/ops/attention/__init__.py
 +++ b/python/sglang/kernels/ops/attention/__init__.py
-@@ -411,7 +411,11 @@ register_kernel(
+@@ -402,7 +402,11 @@ register_kernel(
      )
  )
  
@@ -321,7 +321,7 @@ index 2916d1a94e..0b97025587 100644
      inputs.reset_outputs()
      j = torch.arange(lmax, device=pos.device)
 diff --git a/test/registered/kernels/ops/attention/test_fp4_indexer.py b/test/registered/kernels/ops/attention/test_fp4_indexer.py
-index d683cf39fc..c80859a472 100644
+index ade6e92c7e..c3c301c97b 100644
 --- a/test/registered/kernels/ops/attention/test_fp4_indexer.py
 +++ b/test/registered/kernels/ops/attention/test_fp4_indexer.py
 @@ -22,6 +22,7 @@ from sglang.kernels.ops.attention.dsv4.fp4_indexer import (
@@ -332,7 +332,7 @@ index d683cf39fc..c80859a472 100644
      fp4_index_logits_decode,
      fp4_index_logits_paged,
      quantize_fp4_indexer_tensor,
-@@ -616,6 +617,81 @@ def test_fp4_paged_logits_replay(batch, ratio, width, masked):
+@@ -603,6 +604,81 @@ def test_fp4_paged_logits_replay(batch, ratio, width, masked):
                  )
  
  
@@ -414,7 +414,7 @@ index d683cf39fc..c80859a472 100644
  @pytest.mark.skipif(
      not torch.cuda.is_available()
      or torch.cuda.get_device_capability()[0] not in (9, 12),
-@@ -689,13 +765,15 @@ def test_paged_indexer_backends_replay(ratio):
+@@ -676,13 +752,15 @@ def test_paged_indexer_backends_replay(ratio):
          for i, out in enumerate(outputs)
      ]
      captured_scores = []
@@ -436,7 +436,7 @@ index d683cf39fc..c80859a472 100644
  
      def run():
          full.topk_decode(decode_inputs[0])
-@@ -706,15 +784,21 @@ def test_paged_indexer_backends_replay(ratio):
+@@ -693,15 +771,21 @@ def test_paged_indexer_backends_replay(ratio):
      for _ in range(3):
          run()
      graph = torch.cuda.CUDAGraph()
@@ -467,7 +467,7 @@ index d683cf39fc..c80859a472 100644
      for step, visible in enumerate([193, 0, 1, 7, 8, 9, 65, 193]):
          # -1 positions exercise zero-length padded rows, also for ratio 1.
          lens.copy_((visible - torch.arange(batch, device=q.device) % 6).clamp_min(0))
-@@ -751,7 +835,6 @@ def test_paged_indexer_backends_replay(ratio):
+@@ -738,7 +822,6 @@ def test_paged_indexer_backends_replay(ratio):
                      maxima.topk(min(4, nblocks)).values.sort().values,
                  )
              keep = torch.isin(torch.arange(width, device=q.device) // 8, blocks)

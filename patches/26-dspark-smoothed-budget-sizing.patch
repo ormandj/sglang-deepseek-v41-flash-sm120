@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
-index 1523c092df..0cd8a3e783 100644
+index 65b07fc4a5..b10958c50c 100644
 --- a/python/sglang/srt/environ.py
 +++ b/python/sglang/srt/environ.py
 @@ -534,6 +534,11 @@ class Envs:
@@ -15,10 +15,10 @@ index 1523c092df..0cd8a3e783 100644
      SGLANG_DSPARK_DEBUG_CONFIDENCE_METRICS = EnvBool(False)
      SGLANG_DSPARK_DEBUG_DUMP = EnvTuple(tuple())
 diff --git a/python/sglang/srt/speculative/dspark_components/dspark_planner.py b/python/sglang/srt/speculative/dspark_components/dspark_planner.py
-index 3e984a984e..70c062ae9c 100644
+index c66fef358f..97d8cecf5c 100644
 --- a/python/sglang/srt/speculative/dspark_components/dspark_planner.py
 +++ b/python/sglang/srt/speculative/dspark_components/dspark_planner.py
-@@ -305,6 +305,10 @@ class DSparkVerifyPlanner:
+@@ -303,6 +303,10 @@ class DSparkVerifyPlanner:
          all_gather_single(gathered, local_tensor, group=cpu_group)
          batch.global_spec_verify_tier_num_tokens = gathered.tolist()
  
@@ -29,7 +29,7 @@ index 3e984a984e..70c062ae9c 100644
      def note_non_decode_step(self) -> None:
          if self._budget_planner is not None:
              self._budget_planner.note_non_decode_step()
-@@ -1120,6 +1124,13 @@ class HostConfidenceBudgetPlanner:
+@@ -1109,6 +1113,13 @@ class HostConfidenceBudgetPlanner:
          self._carry_confidence: Optional[torch.Tensor] = None
          self._carry_generation: Optional[torch.Tensor] = None
          self._carry_pos = 0
@@ -43,7 +43,7 @@ index 3e984a984e..70c062ae9c 100644
  
      def compute_budget(
          self,
-@@ -1140,6 +1151,12 @@ class HostConfidenceBudgetPlanner:
+@@ -1129,6 +1140,12 @@ class HostConfidenceBudgetPlanner:
              lagged_generation=lagged_generation,
              current_generation=current_generation,
          )
@@ -56,7 +56,7 @@ index 3e984a984e..70c062ae9c 100644
          forced_frac = self.forced_budget_frac
          if forced_frac is not None:
              full_budget = int(survival[:, : self.cfg.resolved_max_verify_len()].numel())
-@@ -1164,6 +1181,14 @@ class HostConfidenceBudgetPlanner:
+@@ -1153,6 +1170,14 @@ class HostConfidenceBudgetPlanner:
      def note_non_decode_step(self) -> None:
          self.last_decision = None
  
@@ -71,7 +71,7 @@ index 3e984a984e..70c062ae9c 100644
      def _shift_to_lag(
          self,
          *,
-@@ -1197,6 +1222,37 @@ class HostConfidenceBudgetPlanner:
+@@ -1186,6 +1211,37 @@ class HostConfidenceBudgetPlanner:
          ).view(-1, 1)
          return torch.where(fresh, k_survival, torch.ones_like(k_survival))
  
@@ -110,7 +110,7 @@ index 3e984a984e..70c062ae9c 100644
          if self._carry_confidence is not None:
              return
 diff --git a/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py b/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
-index be78447311..1e99ce86b5 100644
+index 249e9beea6..ec52495c93 100644
 --- a/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
 +++ b/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
 @@ -547,7 +547,11 @@ class DSparkWorkerV2(BaseSpecWorker):

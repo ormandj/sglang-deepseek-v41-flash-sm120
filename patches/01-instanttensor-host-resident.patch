@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/model_loader/loader.py b/python/sglang/srt/model_loader/loader.py
-index a7130ec8d5..019792e13f 100644
+index 6d3a4183e3..64d82d8738 100644
 --- a/python/sglang/srt/model_loader/loader.py
 +++ b/python/sglang/srt/model_loader/loader.py
 @@ -12,6 +12,7 @@ import fnmatch
@@ -116,10 +116,10 @@ index a7130ec8d5..019792e13f 100644
              weight_loader_disable_mmap = get_model().weight_loader_disable_mmap
              configured_prefetch = get_model().weight_loader_prefetch_checkpoints
 diff --git a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/deepseek_v4.py
-index e69a4e833a..b3f80c147a 100644
+index bdb56a1bc1..6350bfa25c 100644
 --- a/python/sglang/srt/models/deepseek_v4.py
 +++ b/python/sglang/srt/models/deepseek_v4.py
-@@ -4295,6 +4295,13 @@ class DeepseekV4ForCausalLM(nn.Module):
+@@ -4360,6 +4360,13 @@ class DeepseekV4ForCausalLM(nn.Module):
          # written against different names, so only Quark checkpoints get it.
          return _QUARK_CKPT_TO_SGLANG_MAPPER if _is_quark_checkpoint(config) else None
  

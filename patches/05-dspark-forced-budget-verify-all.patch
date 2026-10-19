@@ -28,10 +28,10 @@ index 574f4a7969..3e5c36e21f 100644
      def _apply_dspark_budget_frac(self, key: str, value: Any) -> None:
          # A worker command, not a server arg: keep it out of the override.
 diff --git a/python/sglang/srt/speculative/dspark_components/dspark_planner.py b/python/sglang/srt/speculative/dspark_components/dspark_planner.py
-index f0793f3fc5..542a102170 100644
+index 17a342c721..00c8187dd6 100644
 --- a/python/sglang/srt/speculative/dspark_components/dspark_planner.py
 +++ b/python/sglang/srt/speculative/dspark_components/dspark_planner.py
-@@ -380,10 +380,15 @@ class DSparkVerifyPlanner:
+@@ -378,10 +378,15 @@ class DSparkVerifyPlanner:
      ) -> Optional[RaggedVerifyLayout]:
          if self._ragged_verify_mode is RaggedVerifyMode.STATIC:
              return None

@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/speculative/dspark_components/dspark_verify.py b/python/sglang/srt/speculative/dspark_components/dspark_verify.py
-index 255487d58c3494a7c5810f012d178741afd889bc..043ef93236e655fea31a253a83fe89e9b79d8574 100644
+index 255487d58c..043ef93236 100644
 --- a/python/sglang/srt/speculative/dspark_components/dspark_verify.py
 +++ b/python/sglang/srt/speculative/dspark_components/dspark_verify.py
 @@ -715,7 +715,9 @@ class DsparkVerifyEpilogue:
@@ -48,7 +48,7 @@ index 255487d58c3494a7c5810f012d178741afd889bc..043ef93236e655fea31a253a83fe89e9
  
 diff --git a/test/registered/unit/spec/test_dspark_read_accept_no_alias.py b/test/registered/unit/spec/test_dspark_read_accept_no_alias.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..1385b9c7b35881ff2529ea88716a6ac140ac68ef
+index 0000000000..1385b9c7b3
 --- /dev/null
 +++ b/test/registered/unit/spec/test_dspark_read_accept_no_alias.py
 @@ -0,0 +1,98 @@

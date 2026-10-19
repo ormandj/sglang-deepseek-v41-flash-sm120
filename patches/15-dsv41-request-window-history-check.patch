@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/mem_cache/dsv41_request_window.py b/python/sglang/srt/mem_cache/dsv41_request_window.py
-index 5180aec572..1f4d02a819 100644
+index e0d254e2b1..6b7e1ba9ba 100644
 --- a/python/sglang/srt/mem_cache/dsv41_request_window.py
 +++ b/python/sglang/srt/mem_cache/dsv41_request_window.py
-@@ -168,6 +168,7 @@ class RequestWindow:
+@@ -205,6 +205,7 @@ class RequestWindow:
              self._ensure_workspace(workspace_rows)
          self.layout = None
          self.prepared = None
@@ -10,7 +10,7 @@ index 5180aec572..1f4d02a819 100644
  
      def _ensure_workspace(self, rows: int) -> None:
          if self.workspace is not None and self.workspace.size >= rows:
-@@ -182,12 +183,14 @@ class RequestWindow:
+@@ -229,12 +230,14 @@ class RequestWindow:
          )
          self.tags[:, loc.flatten()] = -1
          self.prepared = None
@@ -25,7 +25,7 @@ index 5180aec572..1f4d02a819 100644
          if self.workspace is None:
              self._ensure_workspace(layout.size)
          elif self.workspace.size < layout.size:
-@@ -205,6 +208,7 @@ class RequestWindow:
+@@ -252,6 +255,7 @@ class RequestWindow:
              buf.zero_()
          self.tags[:, loc] = layout.history_pos
          self.prepared = None
@@ -33,7 +33,7 @@ index 5180aec572..1f4d02a819 100644
  
      def _history_src(self, layout):
          return torch.where(
-@@ -223,14 +227,21 @@ class RequestWindow:
+@@ -270,14 +274,21 @@ class RequestWindow:
              if layout is None:
                  raise RuntimeError("request-window metadata was not activated")
              src = self._history_src(layout)

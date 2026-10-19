@@ -1,8 +1,8 @@
 diff --git a/python/sglang/kernels/ops/speculative/__init__.py b/python/sglang/kernels/ops/speculative/__init__.py
-index 8fa7b5c2f2..b17ade6ee7 100644
+index c662f80b20..ff27c75c69 100644
 --- a/python/sglang/kernels/ops/speculative/__init__.py
 +++ b/python/sglang/kernels/ops/speculative/__init__.py
-@@ -26,6 +26,7 @@ _TRITON_KERNELS = [
+@@ -23,6 +23,7 @@ _TRITON_KERNELS = [
      ("topk1", "draft_topk1_postprocess"),
      ("ragged_verify_kernels", "pad_verify_lens_to_bucket"),
      ("ragged_verify_kernels", "build_qo_indptr"),
@@ -291,10 +291,10 @@ index da060e2bc7..339f3e1941 100644
      selected = SelectMixedAccept.execute(
          greedy_mask=greedy_mask,
 diff --git a/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py b/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
-index 3402c2bdad..be78447311 100644
+index 680b560051..249e9beea6 100644
 --- a/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
 +++ b/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
-@@ -1093,6 +1093,7 @@ class DSparkWorkerV2(BaseSpecWorker):
+@@ -1096,6 +1096,7 @@ class DSparkWorkerV2(BaseSpecWorker):
              prefix_lens=prefix_lens,
              draft_tokens=draft_tokens,
              simulate_bonus_sampling_info=simulate_bonus_sampling_info,

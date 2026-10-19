@@ -1,33 +1,33 @@
 {
   "schema": 1,
   "lineage": "dsv41-platform",
-  "candidate_tag": "v0.4.1-rc.2",
+  "candidate_tag": "v0.4.2-rc.1",
   "platform": "linux/amd64",
   "base": {
-    "tag": "docker.io/lmsysorg/sglang:nightly-dev-cu13-20261016-a93f16f0",
-    "image": "docker.io/lmsysorg/sglang@sha256:ae814587473f87b1ffb8c0a1d59c9e3653c26e9ed1db6960baea651aa0f0cc2a",
+    "tag": "docker.io/lmsysorg/sglang:nightly-dev-cu13-20261019-3c560089",
+    "image": "docker.io/lmsysorg/sglang@sha256:5513366f48d8a9416de4b3623af23e7de2e7875dc8de7c8b4fce32ee01073c03",
     "role": "CUDA 13.0.3, PyTorch and vendor runtime libraries only. SGLang (with its Rust extensions), FlashInfer with its cubin bundle and DeepGEMM are rebuilt from the sources below."
   },
   "sources": {
     "deepgemm": {
       "repository": "https://github.com/sgl-project/DeepGEMM.git",
-      "ref": "refs/heads/dev",
-      "commit": "cbe1727eacd9ad704795584ce1421dd1f5a8d67e",
-      "tree": "db497e62dd305d8c461cdd454f732651e8c77265"
+      "ref": "refs/heads/release/v0.2.3",
+      "commit": "d6fcb32f193da33537819898fae4738f8aa3160e",
+      "tree": "8c7e35622d437712b732c301f576730a48f50133"
     },
     "flashinfer": {
       "repository": "https://github.com/flashinfer-ai/flashinfer.git",
       "ref": "refs/heads/main",
-      "commit": "05041022c3b283ca49c93316b628d4179fe8a962",
-      "tree": "cdf1a6ef375ba6e83cb0925ecb344e08d82c541e",
-      "effective_tree": "24ca6c3a8971656a1b2feeb6317ff8d1c28a298f"
+      "commit": "f64b4ba8762ded12a4f4b9a2092974c9a395e7ca",
+      "tree": "551364db76ce9cbb5a1da8e2655d26879b366fde",
+      "effective_tree": "7869ad78e30064fddf7e389448fdbe1e21bc4edb"
     },
     "sglang": {
       "repository": "https://github.com/sgl-project/sglang.git",
       "ref": "refs/heads/main",
-      "commit": "4eb606b2aee8a9165e16352fd4c08d998ba37990",
-      "tree": "3aad2bbca943086354e1d9e826be7ca3702e5e29",
-      "effective_tree": "28ce597d719a6ee52703efe2d9140d6b7bb5a88e"
+      "commit": "62cee1b15c22350b17a9256fc6ad5777feb2ec70",
+      "tree": "8216c915fb861ca391b395c86e5ced1ce85c91cf",
+      "effective_tree": "f72ab1274b995dfedf606e0e68492eee5d03427a"
     },
     "triton": {
       "repository": "https://github.com/triton-lang/triton.git",
@@ -53,7 +53,7 @@
         "test/registered/unit/model_loader/test_instanttensor_loader.py"
       ],
       "path": "patches/01-instanttensor-host-resident.patch",
-      "sha256": "0e90f4ffa8e26461f66e15285e14eac8460c459248ef5dfc8fa08b1e49240a3f"
+      "sha256": "d23544559f9c4955181d523e46003e8cac1dae2eafc380cc307133cea0976633"
     },
     {
       "id": "engram-positioned-reads",
@@ -71,7 +71,7 @@
         "test/registered/unit/model_loader/test_instanttensor_loader.py"
       ],
       "path": "patches/02-engram-positioned-reads.patch",
-      "sha256": "165183e9a798c5a58414d301433f42bdcea0f2a4ebd5f77873d3a6e69ecd1371"
+      "sha256": "e5872207bc09c6d0a6e0386ded23a11e4f353798757c825173dc1200ac1fc983"
     },
     {
       "id": "sm12x-candidate-indexer",
@@ -86,24 +86,24 @@
         "test/registered/unit/layers/test_dsv41_candidate_blocks.py"
       ],
       "path": "patches/03-sm12x-candidate-indexer.patch",
-      "sha256": "3ba96c3ddd20d6e1dd47a780895c6ef19ee01ff13bc59c0c7f8c24e820b8a3b1"
+      "sha256": "d0f3b3af1f3c74813ff7bcd49ee3b1704ab60891e5e2bf08888fa4c3c09a5121"
     },
     {
       "id": "dsv41-ragged-verify-engram",
       "kind": "pr",
       "pr": 42718,
-      "head": "08767482e4b5391c151b7924ef9072451fcec1e1",
+      "head": "e238d2f6c1af43b428271cc9a33e3bf9400f3bf8",
       "upstream_pr": "https://github.com/sgl-project/sglang/pull/42718",
       "purpose": "Map packed compact-verify tokens to their requests for Engram hashing (replaces sgl-project/sglang#40567).",
-      "note": "Carries the PR's own commits 656f3759e4 and 08767482e4; the #42709 commit between them is in main.",
-      "base": "9ddbba50dd8c8f1a05b2970a997350d9c5844e91",
+      "note": "#42709, which the PR used to carry, is in main.",
+      "base": "62cee1b15c22350b17a9256fc6ad5777feb2ec70",
       "applied": "clean",
       "cpu_tests": [
         "test/registered/kernels/ops/attention/dsv4/test_dsv41_compact_verify.py",
         "test/registered/spec/dspark/test_ragged_verify.py"
       ],
       "path": "patches/04-dsv41-ragged-verify-engram.patch",
-      "sha256": "84e3a9bdff529b64fea8ac2d4de2891c4f7974cecf7e8f1f1f1630de97cd8a53"
+      "sha256": "f484e3704e97ac28c176962457cb1fb006d7e2e13beb197a51b43faf2c06ae35"
     },
     {
       "id": "dspark-forced-budget-verify-all",
@@ -118,7 +118,7 @@
         "test/registered/spec/dspark/test_dspark_scheduler.py"
       ],
       "path": "patches/05-dspark-forced-budget-verify-all.patch",
-      "sha256": "bfb5b50c9b9394848a25a2bcc713bd349045381569e66379204938a77542d27f"
+      "sha256": "706b525a851125566fac5f6a7e936f107dc874dca52d16b5799f8da40aa776e2"
     },
     {
       "id": "flash-mla-sm120-split-buffers",
@@ -160,23 +160,23 @@
         "test/registered/spec/dspark/test_ragged_verify.py"
       ],
       "path": "patches/08-forced-uniform-capture-token-key.patch",
-      "sha256": "9777dd57823a10045a0e7123549cf834df43eb0c0402acd2d421a4f7aff84a53"
+      "sha256": "557cc3e7353371f001cf9a0f04349cdb0b45abebe88ad228a18505d0136e07e4"
     },
     {
       "id": "dspark-sts-accept-labels",
       "kind": "pr",
       "pr": 42712,
-      "head": "529a4c9ac6ed87b3c712070ac9d01520299cb44d",
+      "head": "b1587bd9a16b0d18c69eed606a6541ccf4d3f572",
       "upstream_pr": "https://github.com/sgl-project/sglang/pull/42712",
       "purpose": "DSpark STS calibration labels come from the actual acceptance, with unverified positions masked out.",
-      "resolution": "Main (#43790) passes confidence_raw to the step observers: the STS recorder takes it from the caller and labels with correct_len; the test passes confidence_raw.",
-      "base": "9ddbba50dd8c8f1a05b2970a997350d9c5844e91",
-      "applied": "three-way",
+      "base": "62cee1b15c22350b17a9256fc6ad5777feb2ec70",
+      "applied": "clean",
       "cpu_tests": [
         "test/registered/spec/dspark/test_dspark_sts.py"
       ],
       "path": "patches/09-dspark-sts-accept-labels.patch",
-      "sha256": "0c943fcb4fba04f606a597ec72f6383a3d4afcd9a72d36a0408b05b192d92efe"
+      "sha256": "4586aab347a04ad99de790283b647d1593e18f656467793ab02b28c3e3e30074",
+      "note": "Main (#43790) passes confidence_raw to the step observers: the STS recorder takes it from the caller and labels with correct_len."
     },
     {
       "id": "dsv4-fp4-indexer-exp2-free",
@@ -189,20 +189,23 @@
       "applied": "clean",
       "cpu_tests": [],
       "path": "patches/10-dsv4-fp4-indexer-exp2-free.patch",
-      "sha256": "f5ad9ec5324e4a75a9d0710be650551cf08733e6a703de39f1ff298785e85a2b"
+      "sha256": "e8025f1d24c8345863a229361e6a5cd69dafced0aa8b49b4c9a0476a5d524714"
     },
     {
       "id": "sm120-mxfp8-skinny",
       "kind": "pr",
       "pr": 42865,
-      "head": "1a5573c0e356bacc6843c98ccdd8ba8ac6ff3107",
+      "head": "b7dd852790eb8f047250999e0d76444578881ad8",
       "upstream_pr": "https://github.com/sgl-project/sglang/pull/42865",
       "purpose": "Split-K MXFP8 GEMM for tuned decode-sized linears at up to 16 rows (SGLANG_ENABLE_SM120_MXFP8_SKINNY_GEMM, default on).",
-      "base": "5cbf949839b1fc73802d20670943ccbeb805d3f2",
+      "base": "62cee1b15c22350b17a9256fc6ad5777feb2ec70",
       "applied": "clean",
-      "cpu_tests": [],
+      "cpu_tests": [
+        "test/registered/unit/kernels/test_kernels_namespace.py"
+      ],
       "path": "patches/11-sm120-mxfp8-skinny.patch",
-      "sha256": "99e8fb4c652e562cb1845c42c588c697d7ff2fa34c7a50df1f8f3a837ab47bda"
+      "sha256": "73b142313aa4083fd3e45682e6ace1ce19b795605baa8a4586b8d4ace271b2fb",
+      "note": "Registered with main's slimmer KernelSpec (#44690)."
     },
     {
       "id": "mhc-mix-vec-reduce",
@@ -218,23 +221,24 @@
         "test/registered/unit/models/test_deepseek_v4_mhc_decode_split.py"
       ],
       "path": "patches/12-mhc-mix-vec-reduce.patch",
-      "sha256": "ff0d827e9f02f9dee0c06accb524f9327cc17097dac2e7c2c28c696f732b79d3"
+      "sha256": "5ff4a06df133c43f67d3bb9b0c1e57fa6be9e678fd9d7fc33d5ba592716c749b"
     },
     {
       "id": "mhc-prefill-stats-overlap",
       "kind": "pr",
       "pr": 42985,
-      "head": "9486c1c0f457dde7e1edde915b6f5471ddc150fe",
+      "head": "e8d8efd95c762baea4033cb7912f824b9d02849c",
       "upstream_pr": "https://github.com/sgl-project/sglang/pull/42985",
       "purpose": "Wide prefill computes the mHC mix stats while the TP all-reduce runs again (restores the overlap #42245 removed).",
-      "resolution": "Ported to the layer-boundary transports of #43607, which complete the TP all-reduces in TransportExit.finish: AttentionTransport and MoeTransport fork the stats stream and issue the triplet in prepare_output right before the owed sum, and HcUpdate.post joins it. Same gating as the PR; the unit test is rewritten for the transports.",
-      "base": "9ddbba50dd8c8f1a05b2970a997350d9c5844e91",
+      "base": "62cee1b15c22350b17a9256fc6ad5777feb2ec70",
       "applied": "three-way",
       "cpu_tests": [
-        "test/registered/unit/models/test_deepseek_v4_mhc_prefill_overlap.py"
+        "test/registered/unit/models/test_deepseek_v4_mhc_prefill_overlap.py",
+        "test/registered/unit/models/test_deepseek_v4_boundary.py"
       ],
       "path": "patches/13-mhc-prefill-stats-overlap.patch",
-      "sha256": "dfb4515ba183f5ba487b4ae602bfa8542bb829992baac69d9381f466bf9f3004"
+      "sha256": "a0deacd00ffcaa8076038a5ce3dc96f10f31be4e67139b24c2aa4d503d94c548",
+      "resolution": "Ported to the layer-boundary transports of #43607: AttentionTransport and MoeTransport issue the triplet on the stats stream in prepare_output right before the owed sum, and HcUpdate.post joins it. main's boundary test stub sets the new gate."
     },
     {
       "id": "pcie-ipc-gather",
@@ -249,7 +253,7 @@
         "test/registered/unit/distributed/test_pcie_ipc_gather_selection.py"
       ],
       "path": "patches/14-pcie-ipc-gather.patch",
-      "sha256": "84e312169ea5b8b8ba7a4197e4533df1e8cde169ff6de42f0ea548743f3983fd"
+      "sha256": "5e64356d3efb02c0eb03a291553ee739fe1bb4322039cfe6bea272eed5a25679"
     },
     {
       "id": "dsv41-request-window-history-check",
@@ -263,23 +267,24 @@
       "applied": "three-way",
       "cpu_tests": [],
       "path": "patches/15-dsv41-request-window-history-check.patch",
-      "sha256": "cff704512134b293562a0d1fb19d0db9f0b3e28b74bf44cf797ace31881b8772"
+      "sha256": "bb74564daa608ad305e2d6bdf5c04fba8726d88cc81414cc66f05b4b46692c51"
     },
     {
       "id": "bf16-skinny-lm-head",
       "kind": "pr",
       "pr": 42867,
-      "head": "ca8c33877dfeabf73fc1f0dfa4c2f33ae6113a6a",
+      "head": "3000e78d1c32bbc597185fdb528dac717f63fcd0",
       "upstream_pr": "https://github.com/sgl-project/sglang/pull/42867",
       "purpose": "Opt-in weight-streaming BF16 GEMM for LM heads at up to 16 rows (SGLANG_ENABLE_BF16_SKINNY_LM_HEAD); batch-invariant rows.",
-      "resolution": "environ.py: main dropped the folded-sampling variables next to the new one (#43668).",
-      "base": "9ddbba50dd8c8f1a05b2970a997350d9c5844e91",
-      "applied": "three-way",
+      "base": "62cee1b15c22350b17a9256fc6ad5777feb2ec70",
+      "applied": "clean",
       "cpu_tests": [
-        "test/registered/unit/layers/test_logits_processor_bf16_lm_head.py"
+        "test/registered/unit/layers/test_logits_processor_bf16_lm_head.py",
+        "test/registered/unit/kernels/test_kernels_namespace.py"
       ],
       "path": "patches/16-bf16-skinny-lm-head.patch",
-      "sha256": "30ac5c162b976ce20e5e26726bd60cdd5273f722901d3b0a6b40faa2733224cc"
+      "sha256": "c49f7f288dc8038976892d6098ef8f42425db7c4f7eb25a429b35e508435b4ca",
+      "note": "Registered with main's slimmer KernelSpec (#44690); the environment variable moves to the logits section."
     },
     {
       "id": "serving-coverage-warmup",
@@ -304,14 +309,15 @@
       "upstream_pr": "pending",
       "reason": "The branch head moved to 7957c5eadf (rebased on main 5cbf949839; the fit prices padding tokens of the executed tier and a failed measurement keeps the configured table only once the schedulers confirm its end). CPU-tested (63 tests); the upstream PR is posted with GPU measurements.",
       "purpose": "--speculative-dspark-sps-autotune off|auto|force: fit the DSpark SPS cost table at startup from real decode steps per (batch size, verify tier) plus a per-verify-token context term, cached per configuration (no manual profiling step).",
-      "resolution": "Main (#43623) applies SGLANG_SIMULATE_ACC_LEN through a one-element length buffer in build_accept_outs: the bonus-only measurement zeroes the accepted length itself, keeps the real accept's row-0 token and hands build_accept_outs no simulated length; the in-graph accept stays off while measuring.",
+      "resolution": "Main (#43623) applies SGLANG_SIMULATE_ACC_LEN through a one-element length buffer in build_accept_outs: the bonus-only measurement zeroes the accepted length itself, keeps the real accept's row-0 token and hands build_accept_outs no simulated length; the in-graph accept stays off while measuring. The flag has a row in server_arguments.mdx.",
       "base": "5cbf949839b1fc73802d20670943ccbeb805d3f2",
       "applied": "three-way",
       "cpu_tests": [
-        "test/registered/unit/spec/test_dspark_sps_autotune.py"
+        "test/registered/unit/spec/test_dspark_sps_autotune.py",
+        "test/registered/unit/server_args/test_server_args_docs_coverage.py"
       ],
       "path": "patches/18-dspark-sps-autotune.patch",
-      "sha256": "043025ec4e764be8f384991133aed872a7c111a6f7991243d84dee042c3fe012"
+      "sha256": "1759b9e0a8da42d90c8ff1a36878ea5d2965217b4eaeeda060ccfbde4dad71e9"
     },
     {
       "id": "ragged-sub-width-tiers",
@@ -329,7 +335,7 @@
         "test/registered/unit/model_executor/runner/test_decode_cuda_graph_runner.py"
       ],
       "path": "patches/19-ragged-sub-width-tiers.patch",
-      "sha256": "8e369eb15a46d225ba12c2803dd558983ef8ef7cc7b14711f907f0ef44d2605c"
+      "sha256": "06b997787c51491805e8c2a99affee36daf84e7e7424893703cfbcbf355b2b3c"
     },
     {
       "id": "dspark-verify-pad-last-row",
@@ -343,7 +349,7 @@
       "applied": "three-way",
       "cpu_tests": [],
       "path": "patches/20-dspark-verify-pad-last-row.patch",
-      "sha256": "a6535dec845efab5c7eb10a9537e7fe79f59462beb8809c582a0ae18debdaba5"
+      "sha256": "e975572831954837feee2c06bc46624cd9211153e41bec435131d7550276f113"
     },
     {
       "id": "compact-verify-committed-seq-lens",
@@ -375,55 +381,57 @@
       "applied": "three-way",
       "cpu_tests": [],
       "path": "patches/22-dsv41-candidate-scorer.patch",
-      "sha256": "2a5ad22895defc966604775bbaf942bc3f6074d42936f230f4463efacba31f4a"
+      "sha256": "e4fc355c1c406af6fd55e1986e3886311498c4a66c7ef8c4a3eda2447a152f6d"
     },
     {
       "id": "dsv41-wo-a-fp8-weight",
       "kind": "pr",
       "pr": 43008,
-      "head": "58adb15f18cff50f0ccb22ea776441129a46abf0",
+      "head": "5c62f33509a40ab2525b6afab364c43466469a53",
       "upstream_pr": "https://github.com/sgl-project/sglang/pull/43008",
       "purpose": "SM120 decode/verify WO-A reads an exact FP8 copy of its BF16 weight (SGLANG_DSV41_WO_A_FP8_COPY, default on).",
-      "resolution": "gemm/__init__.py: its kernel registrations follow #42867's, as in the 0.3.0 rebased copy.",
-      "base": "9ddbba50dd8c8f1a05b2970a997350d9c5844e91",
-      "applied": "three-way",
+      "base": "62cee1b15c22350b17a9256fc6ad5777feb2ec70",
+      "applied": "clean",
       "cpu_tests": [
-        "test/registered/unit/model_executor/test_derived_weight_cache.py"
+        "test/registered/unit/model_executor/test_derived_weight_cache.py",
+        "test/registered/unit/models/test_deepseek_v4_unified_fp8_q_pair.py"
       ],
       "path": "patches/23-dsv41-wo-a-fp8-weight.patch",
-      "sha256": "9ec5c6cf8fa4a9942ccbde0436436903b69c858d7fe3007ded417cab2335909f"
+      "sha256": "52e452d954c8604f1d26d6506af98c86b5940c01ab70e27a0a227126237510da",
+      "note": "main's unified FP8 q-pair test stub sets wo_a_fp8_weight."
     },
     {
       "id": "encoder-swa-replay-multimodal",
       "kind": "pr",
       "pr": 43241,
-      "head": "986d040298175230cce94ec795834b475888b8c4",
+      "head": "c26f3755033c9f951226429d33838e89b793414e",
       "upstream_pr": "https://github.com/sgl-project/sglang/pull/43241",
-      "purpose": "Encoder SWA bounded replay accepts image requests: the replay window carries the request's own multimodal inputs, so image prompts keep HiCache host-tier hits.",
-      "resolution": "Main (#43166) folds replay rows into the extend on the DeepSeek-V4 backend and batches the other backends' replay: the folded extend already carries each request's items, the batched replay now carries them too; tests cover both.",
-      "base": "5cbf949839b1fc73802d20670943ccbeb805d3f2",
-      "applied": "three-way",
+      "purpose": "Under encoder SWA bounded replay, the image warmup runs on CUDA, where replay carries image inputs.",
+      "base": "62cee1b15c22350b17a9256fc6ad5777feb2ec70",
+      "applied": "clean",
       "cpu_tests": [
-        "test/registered/unit/model_executor/test_encoder_swa_replay_multimodal.py"
+        "test/registered/unit/entrypoints/test_http_server_warmup.py",
+        "test/registered/unit/model_executor/test_encoder_swa_replay.py"
       ],
       "path": "patches/24-encoder-swa-replay-multimodal.patch",
-      "sha256": "545c86c0c7267dd9ea2243ca140611713aa18812e6a714bd7f81cfdf273d929f"
+      "sha256": "d734f3a281390b45c9aa9b2ff671e9da0690729736b9c8e36288f1edcfd166c3",
+      "note": "Main carries image inputs through encoder replay on CUDA (#45048), so the PR is reduced to warming up the image path under encoder SWA bounded replay on CUDA."
     },
     {
       "id": "dsv41-indexer-prefill-tile-budget",
       "kind": "pr",
       "pr": 43376,
-      "head": "c65373886d52dc3d44a747da8fd7c4d2ee0eedd9",
+      "head": "ca267bda3ce9f7b362e63db0ca918c7a338e9988",
       "upstream_pr": "https://github.com/sgl-project/sglang/pull/43376",
       "purpose": "DSv4.1 prefill indexer score tiles sized from free memory with their scratch counted and no padded copy, so tile memory no longer grows with context length (OOM crash fix).",
-      "resolution": "Main (#44051) aligns every flat score tile to FLAT_LOGITS_WIDTH_ALIGN and can score in bf16: the per-scorer width_align is dropped, the publisher's block-aligned slice relies on that alignment, and the scratch-aware sizing keeps main's bf16 row estimate.",
-      "base": "9ddbba50dd8c8f1a05b2970a997350d9c5844e91",
-      "applied": "three-way",
+      "base": "62cee1b15c22350b17a9256fc6ad5777feb2ec70",
+      "applied": "clean",
       "cpu_tests": [
         "test/registered/unit/layers/test_dsv41_prefill_score_tiles.py"
       ],
       "path": "patches/25-dsv41-indexer-prefill-tile-budget.patch",
-      "sha256": "dfa594e4b2c90000fadd3f37181ecf7b3ad64927191ebd628c82bd09c337b305"
+      "sha256": "2edc4a3c5eb8902c9a62764cd0e8b2d7aeb8f0944b12d48a70f725215ba738ea",
+      "note": "Rebuilt on main's FLAT_LOGITS_WIDTH_ALIGN tiles (#44051); breakable-graph replay takes the free-memory budget, only capture takes the static one."
     },
     {
       "id": "dspark-smoothed-budget-sizing",
@@ -440,7 +448,7 @@
         "test/registered/spec/dspark/test_dspark_budget_smoothing.py"
       ],
       "path": "patches/26-dspark-smoothed-budget-sizing.patch",
-      "sha256": "183d5554fa63de8e4bbd96335e7298cbdc3db3a5d1a45a73a54c4b1d0c50704b"
+      "sha256": "ad8c31072bc1ce98cd7c1ab12a0db61574b03e26384c24d8a973b3945ea4014e"
     },
     {
       "id": "dspark-read-accept-no-alias",
@@ -459,7 +467,7 @@
         "test/registered/unit/spec/test_dspark_greedy_draft_accept.py"
       ],
       "path": "patches/27-dspark-read-accept-no-alias.patch",
-      "sha256": "f5daf80ea431f9da3a22ca9174322eece098c226ca114d7adaed805be3da9ec2"
+      "sha256": "f0b9f613872731f62532394026e4eff425d6aada7c8a2ecae1b843cdd2c3250d"
     },
     {
       "id": "chat-usage-completion-tokens-details",
@@ -475,7 +483,7 @@
         "test/registered/unit/entrypoints/openai/test_usage_processor.py"
       ],
       "path": "patches/28-chat-usage-completion-tokens-details.patch",
-      "sha256": "29a27e98e1d0dd70e2e4d3ac8d0218a618901b85a57410858d20323b5413b81a"
+      "sha256": "a51acf7bc323413033e5dd29732d9471134b32f6e22b2335e020715746f63449"
     },
     {
       "id": "openai-error-envelope",
@@ -484,7 +492,7 @@
       "head": "b18682ba709a0843df4cc41deafc89f2d8960c68",
       "upstream_pr": "https://github.com/sgl-project/sglang/pull/45130",
       "purpose": "The OpenAI routes return errors as {\"error\": {message, type, param, code}}; error.type follows the HTTP status; the serving catch-all 500 no longer includes exception text.",
-      "resolution": "sglang-server models.rs: the 0.4.0 retrieve_model (served_model_name check) keeps its structure; the parity fixture's error bodies are rewritten on top of patch 28's usage fields.",
+      "resolution": "sglang-server models.rs: main's retrieve_model looks the model up among the served cards; its not-found branch returns the OpenAI error body. The parity fixture's error bodies are rewritten on top of patch 28's usage fields.",
       "base": "4eb606b2aee8a9165e16352fd4c08d998ba37990",
       "applied": "three-way",
       "cpu_tests": [
@@ -492,7 +500,7 @@
         "test/registered/unit/entrypoints/anthropic/test_serving.py"
       ],
       "path": "patches/29-openai-error-envelope.patch",
-      "sha256": "8a6595a615670626796577d2623668381cc38b91b95d4123ed6b7d898a684562"
+      "sha256": "4d443618fe9b7b1460dc40a4704047a06f766540fa5fa3c53860ee8ff741d6a6"
     },
     {
       "id": "openai-abort-finish-reason",
@@ -502,7 +510,7 @@
       "upstream_pr": "https://github.com/sgl-project/sglang/pull/45132",
       "purpose": "Chat and completions never report finish_reason \"abort\": an abort with an error status returns that error, one without is reported as \"stop\"; grammar rejections abort with 500.",
       "note": "#45132 stacks its commit on #45130; only that commit is carried.",
-      "resolution": "test_grammar_manager.py keeps the 0.4.0 imports; sglang-server completions test imports merged with patch 28's.",
+      "resolution": "test_grammar_manager.py keeps main's imports; sglang-server completions test imports merged with patch 28's.",
       "base": "4eb606b2aee8a9165e16352fd4c08d998ba37990",
       "applied": "three-way",
       "cpu_tests": [
@@ -510,7 +518,7 @@
         "test/registered/unit/managers/test_batch_result_processor_spec_grammar.py"
       ],
       "path": "patches/30-openai-abort-finish-reason.patch",
-      "sha256": "46f08b5f59cd525d55a6955a05d39821db3a7c48f082308063e3e299105df069"
+      "sha256": "b46adb1b6b090e804f50c6f84207974b16ee22267cb2ec14fed4c0badfd46029"
     },
     {
       "id": "openai-stream-exception-frame",
@@ -528,7 +536,7 @@
         "test/registered/unit/entrypoints/openai/test_serving_completions.py"
       ],
       "path": "patches/31-openai-stream-exception-frame.patch",
-      "sha256": "21e9c4072c0c2d5a8474a0b59765a634981c720895cf484fecb8a8cd70db699f"
+      "sha256": "bd34489bff598fd2f8aac6083089f425c492fed560298b9618b66057c9b64c4e"
     },
     {
       "id": "dsv41-effort-minimal-medium",
@@ -544,13 +552,13 @@
         "test/registered/unit/entrypoints/openai/test_serving_chat.py"
       ],
       "path": "patches/32-dsv41-effort-minimal-medium.patch",
-      "sha256": "f485f3798c5b1e4b9319378455a1d820d15ec10047dc5ee4b455c15cf8d2bfc1"
+      "sha256": "53b3cb68043b38eb61b7dd215d7490ac814d7feb262626e92967ee3baa5048f7"
     }
   ],
   "packaging": {
     "flashinfer_python": "0.7.2",
-    "flashinfer_artifacts_sha256": "48e1f6b5e73d01f0ae7482224195eab33b5eda408eece5e3f7a407dc39c51d7a",
-    "sgl_deep_gemm": "0.2.2+gitcbe1727e",
+    "flashinfer_artifacts_sha256": "ee9197f9613f739877da388f85367fbe2ee7ab32b6207da235fa0be75b0fda52",
+    "sgl_deep_gemm": "0.2.3+gitd6fcb32f",
     "sglang_install_extras": [
       "typeguard==4.4.4",
       "pillow>=12.3.0"
@@ -561,7 +569,7 @@
     "remove": [
       "moviepy"
     ],
-    "rationale": "SGLang main pins the published FlashInfer 0.7.2; FlashInfer main is 0.7.2 with no wheel published for that commit, so its pin is kept at the same version and the cubin bundle is built from the same commit (its downloader verifies the source-pinned checksum manifest). DeepGEMM stays at the dev commit cbe1727e: dev has since merged an upstream release that removes the SM120 MQA-logits kernels and changes the fp8_fp4_mqa_logits signature SGLang main calls, so it gets SGLang's required version (0.2.2, which cbe1727e contains) plus a local commit suffix. typeguard 4 repairs the vendor base's typeguard conflict, Pillow stays at the vendor's patched >=12.3, NCCL keeps the vendor's deliberate 2.30.7 floor, and MoviePy is an unused diffusion extra whose Pillow<12 bound would downgrade the decoder."
+    "rationale": "SGLang main pins the published FlashInfer 0.7.2; FlashInfer main is 0.7.2 with no wheel published for that commit, so its pin is kept at the same version and the cubin bundle is built from the same commit (its downloader verifies the source-pinned checksum manifest). DeepGEMM is sgl-project's release/v0.2.3 branch, the sgl-deep-gemm 0.2.3 SGLang main requires, with a local commit suffix: it keeps the SM120 MQA-logits kernels and the fp8_fp4_mqa_logits signature SGLang main calls, which the dev branch has removed and changed. typeguard 4 repairs the vendor base's typeguard conflict, Pillow stays at the vendor's patched >=12.3, NCCL keeps the vendor's deliberate 2.30.7 floor, and MoviePy is an unused diffusion extra whose Pillow<12 bound would downgrade the decoder."
   },
   "dependency_gate": {
     "allowed_conflicts": [
@@ -617,18 +625,6 @@
       "base": "6dec771b1fb7980dad595fb59a9d490294592081",
       "applied": "clean",
       "sha256": "26b1da6e3c4ffea96d7f35766c97613e04dbfb2f8e3db415d53de110443d4541"
-    },
-    {
-      "id": "pcie-ipc-tuner-fixes",
-      "kind": "pr",
-      "pr": 6401,
-      "head": "faa7701e3a280bae1c63f2aaf6529e03904293f4",
-      "upstream_pr": "https://github.com/flashinfer-ai/flashinfer/pull/6401",
-      "purpose": "PCIe-IPC all-reduce tuner: barrier before the collective warm-up, copy-engine ring depth bounded by max_blocks, and alternating candidate order in the ranking rounds (approved upstream).",
-      "path": "patches/fi-02-pcie-ipc-tuner-fixes.patch",
-      "base": "3637083a3a3d08538cce60937cd876b17779c6f0",
-      "applied": "clean",
-      "sha256": "2efff0fc84af8e7f38cfb261e463ce10cbd94c6090d0c28597afa0634fcd4387"
     }
   ],
   "triton_patches": [

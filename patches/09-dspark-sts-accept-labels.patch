@@ -1,8 +1,8 @@
 diff --git a/python/sglang/benchmark/dspark_sts_fit.py b/python/sglang/benchmark/dspark_sts_fit.py
-index ec8f094311..ecafc9f5e8 100644
+index ec8f094311..ee0ed0c1ef 100644
 --- a/python/sglang/benchmark/dspark_sts_fit.py
 +++ b/python/sglang/benchmark/dspark_sts_fit.py
-@@ -51,12 +51,16 @@ def fit_sts_temperatures(
+@@ -51,12 +51,21 @@ def fit_sts_temperatures(
      prefix_mask: torch.Tensor,
      grid: torch.Tensor,
      num_bins: int = 15,
@@ -15,11 +15,16 @@ index ec8f094311..ecafc9f5e8 100644
          raise ValueError("fit_sts_temperatures requires at least one sample.")
 +    if observed_mask is None:
 +        observed_mask = torch.ones_like(prefix_mask)
++    if observed_mask.shape != logits.shape:
++        raise ValueError(
++            f"observed_mask shape {tuple(observed_mask.shape)} does not match "
++            f"logits shape {tuple(logits.shape)}."
++        )
 +    observed_mask = observed_mask.bool()
      grid_values = grid.to(torch.float64).tolist()
  
      temperatures: list[float] = []
-@@ -67,12 +71,18 @@ def fit_sts_temperatures(
+@@ -67,12 +76,18 @@ def fit_sts_temperatures(
      survival_fitted = torch.ones(num_samples, dtype=torch.float64)
      for position in range(gamma):
          position_logits = logits[:, position]
@@ -40,7 +45,7 @@ index ec8f094311..ecafc9f5e8 100644
                  targets=position_target,
                  num_bins=num_bins,
              )
-@@ -83,14 +93,16 @@ def fit_sts_temperatures(
+@@ -83,14 +98,16 @@ def fit_sts_temperatures(
              position_logits / best_temperature
          )
          best_ece = expected_calibration_error(
@@ -59,7 +64,7 @@ index ec8f094311..ecafc9f5e8 100644
                  targets=position_target,
                  num_bins=num_bins,
              )
-@@ -110,22 +122,33 @@ def fit_sts_temperatures(
+@@ -110,22 +127,38 @@ def fit_sts_temperatures(
      }
  
  
@@ -80,9 +85,14 @@ index ec8f094311..ecafc9f5e8 100644
          shard_logits = shard["logits"]
          shard_prefix_mask = shard["prefix_mask"]
 -        if shard_logits.shape != shard_prefix_mask.shape:
-+        # Shards without a mask are treated as fully observed.
 +        shard_observed_mask = shard.get("observed_mask")
 +        if shard_observed_mask is None:
++            logger.warning(
++                "%s has no observed_mask (collected before acceptance labels): "
++                "fitting it as fully observed, which is right only for "
++                "all-greedy runs without compact verify.",
++                shard_path,
++            )
 +            shard_observed_mask = torch.ones_like(shard_prefix_mask)
 +        if not (
 +            shard_logits.shape == shard_prefix_mask.shape == shard_observed_mask.shape
@@ -97,7 +107,7 @@ index ec8f094311..ecafc9f5e8 100644
              )
          if shard_gamma is None:
              shard_gamma = int(shard_logits.shape[1])
-@@ -136,8 +159,13 @@ def load_collected_shards(*, data_glob: str) -> tuple[torch.Tensor, torch.Tensor
+@@ -136,8 +169,13 @@ def load_collected_shards(*, data_glob: str) -> tuple[torch.Tensor, torch.Tensor
              )
          logits_shards.append(shard_logits)
          prefix_mask_shards.append(shard_prefix_mask)
@@ -112,7 +122,7 @@ index ec8f094311..ecafc9f5e8 100644
  
  
  def fit(
-@@ -147,7 +175,7 @@ def fit(
+@@ -147,7 +185,7 @@ def fit(
      num_bins: int = 15,
      gamma: Optional[int] = None,
  ) -> None:
@@ -121,7 +131,7 @@ index ec8f094311..ecafc9f5e8 100644
      resolved_gamma = int(logits.shape[1])
      if gamma is not None and gamma != resolved_gamma:
          raise ValueError(
-@@ -160,6 +188,7 @@ def fit(
+@@ -160,6 +198,7 @@ def fit(
          prefix_mask=prefix_mask,
          grid=default_temperature_grid(),
          num_bins=num_bins,
@@ -129,7 +139,7 @@ index ec8f094311..ecafc9f5e8 100644
      )
      calibration = DSparkStsCalibration(
          temperatures=result["temperatures"],
-@@ -193,7 +222,7 @@ def main() -> None:
+@@ -193,7 +232,7 @@ def main() -> None:
          "--data-glob",
          required=True,
          help="Glob of collected .pt shards, each a dict with [n, gamma] "
@@ -202,7 +212,7 @@ index ce3395ee61..1f964fd512 100644
 +            verify_lens=None if layout is None else layout.verify_lens,
          )
 diff --git a/python/sglang/srt/speculative/dspark_components/dspark_sts.py b/python/sglang/srt/speculative/dspark_components/dspark_sts.py
-index 01d1a88426..db2872c12b 100644
+index 01d1a88426..0ac81b6680 100644
 --- a/python/sglang/srt/speculative/dspark_components/dspark_sts.py
 +++ b/python/sglang/srt/speculative/dspark_components/dspark_sts.py
 @@ -1,6 +1,7 @@
@@ -230,7 +240,7 @@ index 01d1a88426..db2872c12b 100644
      ) -> None:
          logits = confidence_raw.detach().to(device="cpu", dtype=torch.float32)
          positions = torch.arange(self.gamma).view(1, -1)
-@@ -54,8 +60,19 @@ class StsDataRecorder:
+@@ -54,8 +60,18 @@ class StsDataRecorder:
              num_correct_drafts.detach().to(device="cpu", dtype=torch.int64).view(-1, 1)
          )
          prefix_mask = (positions < counts).to(torch.float32)
@@ -238,8 +248,7 @@ index 01d1a88426..db2872c12b 100644
 +            observed_mask = torch.ones_like(prefix_mask)
 +        else:
 +            # A verify window of length L checks only its first L - 1 drafts.
-+            # Later positions are unobserved for every row: keeping only rows
-+            # rejected inside the window would bias them toward rejection.
++            # Counting later positions as rejections would bias the fit.
 +            caps = (
 +                verify_lens.detach().to(device="cpu", dtype=torch.int64).view(-1, 1) - 1
 +            )
@@ -250,7 +259,7 @@ index 01d1a88426..db2872c12b 100644
          if len(self._logits_buffer) >= self.flush_every:
              self.flush()
  
-@@ -68,9 +85,11 @@ class StsDataRecorder:
+@@ -68,9 +84,11 @@ class StsDataRecorder:
              {
                  "logits": torch.cat(self._logits_buffer, dim=0),
                  "prefix_mask": torch.cat(self._prefix_mask_buffer, dim=0),

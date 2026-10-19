@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.4.2-rc.1
+
+0.4.1 rebuilt on current upstream sources. The model and the runtime configuration are unchanged.
+
+### Changes
+
+- SGLang `main` of 2026-10-19 (`62cee1b15c`) with 32 patches, FlashInfer `main` of 2026-10-19 (`f64b4ba876`, version 0.7.2) with one patch, sgl-project DeepGEMM `release/v0.2.3` (`d6fcb32f19`, the 0.2.3 SGLang `main` requires) and Triton `release/3.8.x` with its backport (unchanged), on the `lmsysorg/sglang` CUDA 13 nightly of 2026-10-19.
+- Now upstream and no longer patched: the FlashInfer PCIe-IPC all-reduce tuner fixes (flashinfer-ai/flashinfer#6401).
+- SGLang `main` carries image inputs through encoder SWA bounded replay on CUDA (sgl-project/sglang#45048); patch 24 (#43241) now only warms up the image path there.
+- The prefill indexer's score-tile budget (patch 25, #43376) uses free memory during breakable prefill CUDA-graph replay too; only graph capture uses the static budget.
+- The carried pull requests that needed it are updated on SGLang `main` (#42712, #42718, #42865, #42867, #42985, #43008, #43241, #43376).
+
 ## v0.4.1 (stable; 2026-10-19)
 
 0.4.0 with OpenAI API compatibility fixes, submitted upstream. The sources other than these patches, the model and the runtime configuration are unchanged.

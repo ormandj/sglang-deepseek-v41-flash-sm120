@@ -3,7 +3,7 @@
 # from the sources and series in stack.json (written by scripts/stack-key.sh from
 # stack.lock.json). Candidates build FROM this image (Containerfile) and reuse it
 # while its inputs are unchanged.
-ARG BASE_IMAGE=docker.io/lmsysorg/sglang@sha256:ae814587473f87b1ffb8c0a1d59c9e3653c26e9ed1db6960baea651aa0f0cc2a
+ARG BASE_IMAGE=docker.io/lmsysorg/sglang@sha256:5513366f48d8a9416de4b3623af23e7de2e7875dc8de7c8b4fce32ee01073c03
 FROM ${BASE_IMAGE} AS stack
 ARG FLASHINFER_KEY
 # libdw-dev: DeepJIT includes elfutils/libdwfl.h for native backtraces.

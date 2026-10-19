@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
-index 321379c5a4..39400e8565 100644
+index fb837274ea..7750bf21bb 100644
 --- a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
 +++ b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
-@@ -666,8 +666,9 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+@@ -658,8 +658,9 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
      def _capture_ragged_verify_layout(self, num_tokens: int):
          if not self.ragged_verify_mode:
              return None

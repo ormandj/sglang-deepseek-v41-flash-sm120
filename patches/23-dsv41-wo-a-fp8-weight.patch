@@ -1,9 +1,9 @@
 diff --git a/python/sglang/kernels/ops/gemm/__init__.py b/python/sglang/kernels/ops/gemm/__init__.py
-index 4b5727b917..6735d4b6a8 100644
+index 04dfc2b0d8..416356d518 100644
 --- a/python/sglang/kernels/ops/gemm/__init__.py
 +++ b/python/sglang/kernels/ops/gemm/__init__.py
-@@ -513,6 +513,29 @@ register_kernel(
-         description="Weight-streaming BF16 GEMM for decode-sized LM heads (Triton).",
+@@ -379,6 +379,29 @@ register_kernel(
+         capabilities=CUDA_ONLY,
      )
  )
 +register_kernel(
@@ -238,10 +238,10 @@ index 8ed5c910b1..0faeef52fe 100644
 +        _wo_a_fp8_partial(x, weight, weight_q, weight_scale, use_fp8)
 +    )
 diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
-index d7238175d9..1523c092df 100644
+index a9a74098ca..65b07fc4a5 100644
 --- a/python/sglang/srt/environ.py
 +++ b/python/sglang/srt/environ.py
-@@ -1767,6 +1767,9 @@ class Envs:
+@@ -1777,6 +1777,9 @@ class Envs:
      # _wo_a_partial, _wo_a_reduce_quant) into one cluster-launched megakernel.
      # Emits MXFP8 when wo_b supports it, otherwise BF16.
      SGLANG_DSV41_FUSED_WO_A = EnvBool(True)
@@ -252,7 +252,7 @@ index d7238175d9..1523c092df 100644
      # tuned batched_gemm_bf16 (gfx95). Off by default; see deepseek_v4.py
      # _apply_wo_a_bf16_matmul.
 diff --git a/python/sglang/srt/model_executor/model_runner_components/weight_updater.py b/python/sglang/srt/model_executor/model_runner_components/weight_updater.py
-index 46b9a74afb..d45c706586 100644
+index 75cd4c0781..ee04273580 100644
 --- a/python/sglang/srt/model_executor/model_runner_components/weight_updater.py
 +++ b/python/sglang/srt/model_executor/model_runner_components/weight_updater.py
 @@ -2,6 +2,7 @@ from __future__ import annotations
@@ -263,7 +263,7 @@ index 46b9a74afb..d45c706586 100644
  from dataclasses import dataclass, field
  from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple, Union
  
-@@ -84,6 +85,34 @@ def _unsupported_derived_weight_cache_error(
+@@ -84,6 +85,35 @@ def _unsupported_derived_weight_cache_error(
      return None
  
  
@@ -283,6 +283,7 @@ index 46b9a74afb..d45c706586 100644
 +            weakref.ref(m)
 +            for m in model.modules()
 +            if hasattr(m, "invalidate_derived_weights")
++            and hasattr(m, "refresh_derived_weights")
 +        ]
 +        _DERIVED_WEIGHT_MODULES[model] = refs
 +    for ref in refs:
@@ -298,7 +299,7 @@ index 46b9a74afb..d45c706586 100644
  @dataclass(frozen=True, slots=True, kw_only=True)
  class WeightUpdater:
      tp_rank: int
-@@ -183,6 +212,7 @@ class WeightUpdater:
+@@ -183,6 +213,7 @@ class WeightUpdater:
          error = _unsupported_derived_weight_cache_error(self.get_model())
          if error is not None:
              return False, error
@@ -306,7 +307,7 @@ index 46b9a74afb..d45c706586 100644
  
          logger.info(
              f"Update engine weights online from disk begin. "
-@@ -316,6 +346,7 @@ class WeightUpdater:
+@@ -308,6 +339,7 @@ class WeightUpdater:
          return bucket.reconstruct_tensors()
  
      def begin_weight_update(self: WeightUpdater) -> None:
@@ -314,7 +315,7 @@ index 46b9a74afb..d45c706586 100644
          DefaultModelLoader.restore_weights_before_loading(
              self.get_model(), torch.device(self.device)
          )
-@@ -326,6 +357,10 @@ class WeightUpdater:
+@@ -318,6 +350,10 @@ class WeightUpdater:
          DefaultModelLoader.postprocess_weights(
              self.get_model(), torch.device(self.device)
          )
@@ -325,7 +326,7 @@ index 46b9a74afb..d45c706586 100644
  
      def load_weights_from_distributed(
          self: WeightUpdater, named_tensors: List[Tuple[str, torch.Tensor]]
-@@ -334,6 +369,7 @@ class WeightUpdater:
+@@ -326,6 +362,7 @@ class WeightUpdater:
          error = _unsupported_derived_weight_cache_error(self.get_model())
          if error is not None:
              return False, error
@@ -333,7 +334,7 @@ index 46b9a74afb..d45c706586 100644
          try:
              self.get_model().load_weights(named_tensors)
          except Exception as e:
-@@ -357,6 +393,7 @@ class WeightUpdater:
+@@ -349,6 +386,7 @@ class WeightUpdater:
  
          monkey_patch_torch_reductions()
          self._assert_weight_cache_inactive("update_weights_from_tensor")
@@ -341,7 +342,7 @@ index 46b9a74afb..d45c706586 100644
          if load_format == "flattened_bucket":
              # Handle flattened bucket format
              return self._update_weights_from_flattened_bucket(
-@@ -424,6 +461,7 @@ class WeightUpdater:
+@@ -416,6 +454,7 @@ class WeightUpdater:
          error = _unsupported_derived_weight_cache_error(self.get_model())
          if error is not None:
              return False, error
@@ -350,7 +351,7 @@ index 46b9a74afb..d45c706586 100644
          try:
              from sglang.srt.checkpoint_engine.checkpoint_engine_worker import (
 diff --git a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/deepseek_v4.py
-index 1ab2f9618d..0f82a845af 100644
+index 48b6f39c46..aa4b0dcb9b 100644
 --- a/python/sglang/srt/models/deepseek_v4.py
 +++ b/python/sglang/srt/models/deepseek_v4.py
 @@ -35,9 +35,13 @@ from sglang.kernels.ops.attention.dsv4.wo_a import MAX_M as _FUSED_WO_A_MAX_TOKE
@@ -367,7 +368,7 @@ index 1ab2f9618d..0f82a845af 100644
  )
  from sglang.kernels.ops.quantization.fp8_kernel import (
      sglang_per_token_group_quant_fp8,
-@@ -460,6 +464,7 @@ def _apply_wo_a_bf16_matmul(
+@@ -465,6 +469,7 @@ def _apply_wo_a_bf16_matmul(
      fast_path: bool = False,
      fp8_grid: bool = False,
      emit_fp8: bool = False,
@@ -375,7 +376,7 @@ index 1ab2f9618d..0f82a845af 100644
  ) -> torch.Tensor | Mxfp8SwizzledInput | Fp8GridActivation | Mxfp8Activation:
      # o [T, G, D] @ wo_a [G, R, D] -> [T, G, R]; the fast paths below are gated
      # on the exact validated TP4 shapes and write token-major output directly.
-@@ -508,6 +513,13 @@ def _apply_wo_a_bf16_matmul(
+@@ -513,6 +518,13 @@ def _apply_wo_a_bf16_matmul(
          and o.stride(0) >= 8192
          and wo_a.is_contiguous()
      ):
@@ -389,7 +390,7 @@ index 1ab2f9618d..0f82a845af 100644
          if is_decode and o.shape[0] == 1:
              return wo_a_bf16_gemv(o, wo_a)
          if 2 <= o.shape[0] <= 8:
-@@ -942,6 +954,11 @@ class MqaAttentionBase(nn.Module):
+@@ -947,6 +959,11 @@ class MqaAttentionBase(nn.Module):
  
          self.fuse_wqa_wkv = fuse
          self.wo_a_fp8 = fp8
@@ -401,7 +402,7 @@ index 1ab2f9618d..0f82a845af 100644
  
          self.attn_sink = nn.Parameter(torch.empty(self.n_heads, dtype=torch.float32))
          self._attn_sink_local: Optional[torch.Tensor] = None
-@@ -2840,6 +2857,15 @@ class MQALayer(MqaAttentionBase):
+@@ -2852,6 +2869,15 @@ class MQALayer(MqaAttentionBase):
                              fp8_grid=_is_hip and _hip.wo_a_emits_fp8_grid(self),
                              emit_fp8=_is_hip
                              and _hip.wo_b_emits_mxfp8(self, o.shape[0]),
@@ -417,7 +418,7 @@ index 1ab2f9618d..0f82a845af 100644
                          )
                  else:
                      o = _apply_gguf_grouped_wo_a(
-@@ -2851,6 +2877,47 @@ class MQALayer(MqaAttentionBase):
+@@ -2863,6 +2889,47 @@ class MQALayer(MqaAttentionBase):
  
          return self._project_wo_b(o, defer_all_reduce)
  
@@ -465,7 +466,7 @@ index 1ab2f9618d..0f82a845af 100644
      def _project_wo_b(self, o, defer_all_reduce: bool = False):
          from sglang.srt.layers.moe.utils import should_skip_mlp_all_reduce
  
-@@ -4761,6 +4828,7 @@ class DeepseekV4ForCausalLM(nn.Module):
+@@ -4828,6 +4895,7 @@ class DeepseekV4ForCausalLM(nn.Module):
                  and not self_attn.indexer.compressor.ape_converted
              ):
                  self_attn.indexer.compressor.apply_ape_hotfix()
@@ -473,6 +474,19 @@ index 1ab2f9618d..0f82a845af 100644
              layer.refresh_mhc_norm_weight_cache()
          layers = self.model.layers
          for i, layer in enumerate(layers):
+diff --git a/python/sglang/srt/utils/weight_checker.py b/python/sglang/srt/utils/weight_checker.py
+index 0fdacbca0a..35aaaa7065 100644
+--- a/python/sglang/srt/utils/weight_checker.py
++++ b/python/sglang/srt/utils/weight_checker.py
+@@ -63,6 +63,8 @@ _NON_PERSISTENT_BUFFER_PATTERNS = (
+     "inv_freq",
+     "freqs_cis",
+     "expert_mask_gpu",
++    # DeepSeek-V4.1 WO-A FP8 copy, derived from the BF16 weight.
++    "wo_a_fp8_",
+ )
+ 
+ 
 diff --git a/test/registered/kernels/ops/gemm/test_dsv4_wo_a.py b/test/registered/kernels/ops/gemm/test_dsv4_wo_a.py
 index 8600b72665..8ef706f7ad 100644
 --- a/test/registered/kernels/ops/gemm/test_dsv4_wo_a.py
@@ -768,7 +782,7 @@ index 0000000000..96fac7da21
 +if __name__ == "__main__":
 +    sys.exit(pytest.main([__file__]))
 diff --git a/test/registered/unit/model_executor/test_derived_weight_cache.py b/test/registered/unit/model_executor/test_derived_weight_cache.py
-index 5d2f4bd6ea..b11ecc3ef5 100644
+index 5d2f4bd6ea..cf0785bd06 100644
 --- a/test/registered/unit/model_executor/test_derived_weight_cache.py
 +++ b/test/registered/unit/model_executor/test_derived_weight_cache.py
 @@ -1,6 +1,8 @@
@@ -791,7 +805,7 @@ index 5d2f4bd6ea..b11ecc3ef5 100644
  from sglang.test.ci.ci_register import register_cpu_ci
  
  register_cpu_ci(est_time=10, suite="base-a-test-cpu")
-@@ -46,6 +50,88 @@ class TestDerivedWeightCache(unittest.TestCase):
+@@ -46,6 +50,91 @@ class TestDerivedWeightCache(unittest.TestCase):
              )
          self.assertTrue(torch.equal(model[0].weight, original))
  
@@ -801,6 +815,9 @@ index 5d2f4bd6ea..b11ecc3ef5 100644
 +        class Cache(torch.nn.Module):
 +            def invalidate_derived_weights(self):
 +                seen.append(model[0].weight.detach().clone())
++
++            def refresh_derived_weights(self):
++                pass
 +
 +        model = torch.nn.Sequential(
 +            torch.nn.Linear(2, 2, bias=False, device="cpu"), Cache()
@@ -880,3 +897,100 @@ index 5d2f4bd6ea..b11ecc3ef5 100644
      def test_model_without_derived_cache_keeps_updates_enabled(self):
          model = torch.nn.Module()
          with patch(
+diff --git a/test/registered/unit/models/test_deepseek_v4_unified_fp8_q_pair.py b/test/registered/unit/models/test_deepseek_v4_unified_fp8_q_pair.py
+index ae17456fa4..233c610118 100644
+--- a/test/registered/unit/models/test_deepseek_v4_unified_fp8_q_pair.py
++++ b/test/registered/unit/models/test_deepseek_v4_unified_fp8_q_pair.py
+@@ -80,6 +80,7 @@ class _Harness(deepseek_v4.MQALayer):
+         self.dsa_enable_prefill_cp = False
+         self.use_fused_wo_a = False
+         self.use_npu_arch35_mxfp8_wo_a = False
++        self.wo_a_fp8_weight = None
+         self.compressor = object()
+         self.wo_a = SimpleNamespace(
+             weight=torch.ones(
+diff --git a/test/registered/unit/models/test_deepseek_v4_wo_a_fp8_dispatch.py b/test/registered/unit/models/test_deepseek_v4_wo_a_fp8_dispatch.py
+new file mode 100644
+index 0000000000..4b086494f3
+--- /dev/null
++++ b/test/registered/unit/models/test_deepseek_v4_wo_a_fp8_dispatch.py
+@@ -0,0 +1,79 @@
++"""DeepSeek-V4.1 WO-A takes the exact FP8 weight copy for decode and target
++verify of up to WO_A_FP8_MAX_ROWS rows on CUDA Blackwell, and the BF16 kernels
++otherwise. Kernels are stubbed; no GPU is needed."""
++
++import unittest
++from types import SimpleNamespace
++from unittest import mock
++
++import torch
++
++from sglang.srt.layers.quantization.mxfp8_input import Mxfp8SwizzledInput
++from sglang.srt.models import deepseek_v4
++from sglang.test.ci.ci_register import register_cpu_ci
++
++register_cpu_ci(est_time=5, suite="base-a-test-cpu")
++
++
++class TestWoAFp8Dispatch(unittest.TestCase):
++    def setUp(self):
++        self.wo_a = torch.empty(2, 1024, 4096, dtype=torch.bfloat16)
++        self.copy = (torch.empty(0), torch.empty(0), torch.empty(0))
++        self.calls = []
++
++        def stub(name, result):
++            def run(*args, **kwargs):
++                self.calls.append(name)
++                return result
++
++            return run
++
++        out = torch.empty(0)
++        platform = SimpleNamespace(is_blackwell=True, is_sm90=False)
++        for target, name, value in (
++            (deepseek_v4, "_is_cuda", True),
++            (deepseek_v4, "get_platform", lambda: platform),
++            (deepseek_v4, "wo_a_fp8_small_batch", stub("fp8", out)),
++            (deepseek_v4, "wo_a_fp8_small_batch_mxfp8", stub("fp8_mxfp8", (out, out))),
++            (deepseek_v4, "wo_a_bf16_gemv", stub("gemv", out)),
++            (deepseek_v4, "wo_a_bf16_small_batch", stub("bf16", out)),
++            (torch, "bmm", stub("bmm", None)),
++        ):
++            patcher = mock.patch.object(target, name, value)
++            patcher.start()
++            self.addCleanup(patcher.stop)
++
++    def _route(self, rows, *, verify=True, copy=True, mxfp8=False):
++        self.calls.clear()
++        result = deepseek_v4._apply_wo_a_bf16_matmul(
++            torch.empty(rows, 2, 4096, dtype=torch.bfloat16),
++            self.wo_a,
++            is_decode=not verify,
++            is_target_verify=verify,
++            fuse_mxfp8_quant=mxfp8,
++            fast_path=True,
++            wo_a_fp8_copy=self.copy if copy else None,
++        )
++        return self.calls, result
++
++    def test_copy_serves_decode_and_verify_up_to_the_row_limit(self):
++        self.assertEqual(self._route(1, verify=False)[0], ["fp8"])
++        for rows in (1, 8, 9, deepseek_v4.WO_A_FP8_MAX_ROWS):
++            with self.subTest(rows=rows):
++                self.assertEqual(self._route(rows)[0], ["fp8"])
++
++    def test_fused_mxfp8_output(self):
++        calls, result = self._route(9, mxfp8=True)
++        self.assertEqual(calls, ["fp8_mxfp8"])
++        self.assertIsInstance(result, Mxfp8SwizzledInput)
++
++    def test_bf16_kernels_without_the_copy_or_above_the_limit(self):
++        self.assertEqual(self._route(1, verify=False, copy=False)[0], ["gemv"])
++        self.assertEqual(self._route(8, copy=False)[0], ["bf16"])
++        self.assertEqual(self._route(9, copy=False)[0], ["bmm"])
++        rows = deepseek_v4.WO_A_FP8_MAX_ROWS + 1
++        self.assertEqual(self._route(rows)[0], ["bmm"])
++
++
++if __name__ == "__main__":
++    unittest.main()

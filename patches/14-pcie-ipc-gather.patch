@@ -1,8 +1,8 @@
 diff --git a/docs/docs/references/environment_variables.mdx b/docs/docs/references/environment_variables.mdx
-index 33c57fd0b2..f2c045d564 100644
+index c6ef4258b5..aa2e5ae557 100644
 --- a/docs/docs/references/environment_variables.mdx
 +++ b/docs/docs/references/environment_variables.mdx
-@@ -1717,7 +1717,7 @@ SGLang supports various environment variables that can be used to configure its
+@@ -1707,7 +1707,7 @@ SGLang supports various environment variables that can be used to configure its
      </tr>
      <tr>
        <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><code>SGLANG_ENABLE_PCIE_IPC_ALLREDUCE</code></td>
@@ -449,10 +449,10 @@ index 4524b21c3d..da11d29c43 100644
                  # The IPC handshake needs the CUDA (NCCL) group, not the CPU one.
                  # Autotuning is the other way round: it rendezvouses on the host.
 diff --git a/python/sglang/srt/layers/logits_processor.py b/python/sglang/srt/layers/logits_processor.py
-index f35efc4575..b9a49fc8be 100644
+index 19fd6e8ebf..6f17ce881f 100644
 --- a/python/sglang/srt/layers/logits_processor.py
 +++ b/python/sglang/srt/layers/logits_processor.py
-@@ -492,6 +492,7 @@ class LogitsProcessor(nn.Module):
+@@ -499,6 +499,7 @@ class LogitsProcessor(nn.Module):
              ),
              enabled=self.do_tensor_parallel_all_gather and not self.use_attn_tp_group,
              skip_entry_sync=True,

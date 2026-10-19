@@ -13,7 +13,7 @@ COPY patches /opt/dsv41-platform/patches
 RUN bash /opt/dsv41-platform/scripts/build-stack.sh
 LABEL org.opencontainers.image.title="DeepSeek V4.1 Flash on SM120" \
       org.opencontainers.image.description="SGLang for DeepSeek-V4.1-Flash on four RTX PRO 6000 Blackwell GPUs over PCIe" \
-      org.opencontainers.image.version="0.4.1-rc.2" \
+      org.opencontainers.image.version="0.4.2-rc.1" \
       org.opencontainers.image.source=${IMAGE_SOURCE} \
       org.opencontainers.image.revision="${IMAGE_SOURCE_REVISION}" \
       org.opencontainers.image.base.name="${STACK_IMAGE}" \

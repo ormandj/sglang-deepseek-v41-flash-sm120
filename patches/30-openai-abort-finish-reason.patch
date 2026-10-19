@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/constrained/grammar_manager.py b/python/sglang/srt/constrained/grammar_manager.py
-index 5d5d33d2963c6ebac183f0727bdf82339be2afda..17a4f66667f4a7ca0f5bdb89eb343136f17f8c01 100644
+index 7f46a437d8..ba52d70ec7 100644
 --- a/python/sglang/srt/constrained/grammar_manager.py
 +++ b/python/sglang/srt/constrained/grammar_manager.py
 @@ -3,6 +3,7 @@ from __future__ import annotations
@@ -29,7 +29,7 @@ index 5d5d33d2963c6ebac183f0727bdf82339be2afda..17a4f66667f4a7ca0f5bdb89eb343136
      def _get_request_thinking_budget(self, req: Req) -> int | None:
          custom_params = req.sampling_params.custom_params
 diff --git a/python/sglang/srt/entrypoints/anthropic/serving.py b/python/sglang/srt/entrypoints/anthropic/serving.py
-index 8ee7e4e37de5c224b8694e327d33c7edb994c6a6..38ef7cfa9f42f031d1bd2d6c12453d9f068aa013 100644
+index 8ee7e4e37d..38ef7cfa9f 100644
 --- a/python/sglang/srt/entrypoints/anthropic/serving.py
 +++ b/python/sglang/srt/entrypoints/anthropic/serving.py
 @@ -61,9 +61,9 @@ logger = logging.getLogger(__name__)
@@ -46,7 +46,7 @@ index 8ee7e4e37de5c224b8694e327d33c7edb994c6a6..38ef7cfa9f42f031d1bd2d6c12453d9f
      "stop": "end_turn",
      "length": "max_tokens",
 diff --git a/python/sglang/srt/entrypoints/openai/protocol.py b/python/sglang/srt/entrypoints/openai/protocol.py
-index b3ad83ac3fcd089f7fa8d651656fbc16897ce3ec..414cbd1f260a447f85b4a2689fef2183140110a6 100644
+index b68a9b6042..70830bd6b5 100644
 --- a/python/sglang/srt/entrypoints/openai/protocol.py
 +++ b/python/sglang/srt/entrypoints/openai/protocol.py
 @@ -573,7 +573,7 @@ class CompletionResponseChoice(BaseModel):
@@ -90,7 +90,7 @@ index b3ad83ac3fcd089f7fa8d651656fbc16897ce3ec..414cbd1f260a447f85b4a2689fef2183
      matched_stop: Union[None, int, str] = None
  
 diff --git a/python/sglang/srt/entrypoints/openai/serving_chat.py b/python/sglang/srt/entrypoints/openai/serving_chat.py
-index f6424339a9829e1aa8bc720bc72a0827ab7e526c..7a5d92b02086b259c6bde9dec8448de704ab2dd0 100644
+index f6424339a9..7a5d92b020 100644
 --- a/python/sglang/srt/entrypoints/openai/serving_chat.py
 +++ b/python/sglang/srt/entrypoints/openai/serving_chat.py
 @@ -9,7 +9,6 @@ import uuid
@@ -179,7 +179,7 @@ index f6424339a9829e1aa8bc720bc72a0827ab7e526c..7a5d92b02086b259c6bde9dec8448de7
                      finish_reason["matched"]
                      if finish_reason and "matched" in finish_reason
 diff --git a/python/sglang/srt/entrypoints/openai/serving_completions.py b/python/sglang/srt/entrypoints/openai/serving_completions.py
-index 84ee1ff32467e6e3844a29a56c9ca147e0747b4c..70c93d5b6af67339365252036feb44a9857842f5 100644
+index 84ee1ff324..70c93d5b6a 100644
 --- a/python/sglang/srt/entrypoints/openai/serving_completions.py
 +++ b/python/sglang/srt/entrypoints/openai/serving_completions.py
 @@ -3,7 +3,6 @@ from __future__ import annotations
@@ -271,7 +271,7 @@ index 84ee1ff32467e6e3844a29a56c9ca147e0747b4c..70c93d5b6af67339365252036feb44a9
                      finish_reason["matched"]
                      if finish_reason and "matched" in finish_reason
 diff --git a/python/sglang/srt/entrypoints/openai/utils.py b/python/sglang/srt/entrypoints/openai/utils.py
-index e345059eb7a668c964aafa6c88332ccc2d5cec75..9e742e8a58b28dd2ff69c2279cb87cbe94a95dd5 100644
+index e345059eb7..9e742e8a58 100644
 --- a/python/sglang/srt/entrypoints/openai/utils.py
 +++ b/python/sglang/srt/entrypoints/openai/utils.py
 @@ -264,6 +264,34 @@ def should_include_usage(
@@ -310,7 +310,7 @@ index e345059eb7a668c964aafa6c88332ccc2d5cec75..9e742e8a58b28dd2ff69c2279cb87cbe
      ret_item: dict[str, Any],
      request: ChatCompletionRequest | CompletionRequest,
 diff --git a/python/sglang/srt/managers/scheduler_components/batch_result_processor.py b/python/sglang/srt/managers/scheduler_components/batch_result_processor.py
-index acec238bac62dd630d151560b9ae17d1a2db9e34..f16b60c56e62f15040f4010304464d8f4cca1a34 100644
+index acec238bac..f16b60c56e 100644
 --- a/python/sglang/srt/managers/scheduler_components/batch_result_processor.py
 +++ b/python/sglang/srt/managers/scheduler_components/batch_result_processor.py
 @@ -723,11 +723,12 @@ class SchedulerBatchResultProcessor:
@@ -351,7 +351,7 @@ index acec238bac62dd630d151560b9ae17d1a2db9e34..f16b60c56e62f15040f4010304464d8f
  
      def advance_grammar_fsm(
 diff --git a/rust/sglang-processor/src/openai/chat.rs b/rust/sglang-processor/src/openai/chat.rs
-index 5d75491054ea0b49fc37a720d12b3c50dcf16d2d..0682c731929e3db403b40c48c921d4f1e9035d9a 100644
+index 5d75491054..0682c73192 100644
 --- a/rust/sglang-processor/src/openai/chat.rs
 +++ b/rust/sglang-processor/src/openai/chat.rs
 @@ -13,8 +13,8 @@ use super::request::{
@@ -505,7 +505,7 @@ index 5d75491054ea0b49fc37a720d12b3c50dcf16d2d..0682c731929e3db403b40c48c921d4f1
 +    }
  }
 diff --git a/rust/sglang-processor/src/openai/completions.rs b/rust/sglang-processor/src/openai/completions.rs
-index ac658e20f5c7ca09dfa5a5d01468640f040ee421..03009dea51c6ae50622068f0fc46a8cf32c465a3 100644
+index ac658e20f5..03009dea51 100644
 --- a/rust/sglang-processor/src/openai/completions.rs
 +++ b/rust/sglang-processor/src/openai/completions.rs
 @@ -11,8 +11,8 @@ use super::request::{
@@ -646,7 +646,7 @@ index ac658e20f5c7ca09dfa5a5d01468640f040ee421..03009dea51c6ae50622068f0fc46a8cf
 +    }
 +}
 diff --git a/rust/sglang-processor/src/openai/wire.rs b/rust/sglang-processor/src/openai/wire.rs
-index 57c38dfc6f7a2594a32ac12be1f792b177a28518..b0e45813b8b71e2faf048220ac5592736de81d74 100644
+index 57c38dfc6f..b0e45813b8 100644
 --- a/rust/sglang-processor/src/openai/wire.rs
 +++ b/rust/sglang-processor/src/openai/wire.rs
 @@ -68,12 +68,31 @@ pub(super) fn malformed_output_reply() -> Reply {
@@ -688,7 +688,7 @@ index 57c38dfc6f7a2594a32ac12be1f792b177a28518..b0e45813b8b71e2faf048220ac559273
  
  /// `UsageProcessor.calculate_token_usage`, dumped as `UsageInfo`.
 diff --git a/rust/sglang-processor/tests/scripts/generate_openai_parity.py b/rust/sglang-processor/tests/scripts/generate_openai_parity.py
-index 30279ce63ae9228ce0d3a1526ad8199d7537dae6..f0f2a3411a471c197d8a0d2314024e339bbe64f1 100644
+index 30279ce63a..f0f2a3411a 100644
 --- a/rust/sglang-processor/tests/scripts/generate_openai_parity.py
 +++ b/rust/sglang-processor/tests/scripts/generate_openai_parity.py
 @@ -18,7 +18,6 @@ import copy
@@ -732,7 +732,7 @@ index 30279ce63ae9228ce0d3a1526ad8199d7537dae6..f0f2a3411a471c197d8a0d2314024e33
      return generate_request
  
 diff --git a/rust/sglang-server/src/api_server/http/openai/chat.rs b/rust/sglang-server/src/api_server/http/openai/chat.rs
-index ec86c0907b09aa821096db77ba9dec9c1f795cad..12534ca73b1315c5aea493b87162c560b08f7285 100644
+index 5899b4dfc6..b20359020e 100644
 --- a/rust/sglang-server/src/api_server/http/openai/chat.rs
 +++ b/rust/sglang-server/src/api_server/http/openai/chat.rs
 @@ -1,8 +1,8 @@
@@ -829,7 +829,7 @@ index ec86c0907b09aa821096db77ba9dec9c1f795cad..12534ca73b1315c5aea493b87162c560
              let args = Arc::new(ServerArgs {
                  served_model_name: "model".into(),
                  tool_call_parser: Some("kimi_k3".into()),
-@@ -1364,8 +1379,16 @@ mod tests {
+@@ -1365,8 +1380,16 @@ mod tests {
                          .unwrap()
                          .contains("lookup")
                  );
@@ -848,7 +848,7 @@ index ec86c0907b09aa821096db77ba9dec9c1f795cad..12534ca73b1315c5aea493b87162c560
              });
              let response = post_json(super::super::routes().with_state(state), "/v1/chat/completions", serde_json::json!({
                  "model":"model", "stream":stream,
-@@ -1395,19 +1418,19 @@ mod tests {
+@@ -1396,19 +1419,19 @@ mod tests {
                      ),
                      "{text}"
                  );
@@ -876,7 +876,7 @@ index ec86c0907b09aa821096db77ba9dec9c1f795cad..12534ca73b1315c5aea493b87162c560
              responder.await.unwrap();
          }
 diff --git a/rust/sglang-server/src/api_server/http/openai/completions.rs b/rust/sglang-server/src/api_server/http/openai/completions.rs
-index b14c45200e8dd1464d205b41f6836bcdf0f94bc8..7d6dc271c38c826d91f1da806e250256b82c06ae 100644
+index b14c45200e..7d6dc271c3 100644
 --- a/rust/sglang-server/src/api_server/http/openai/completions.rs
 +++ b/rust/sglang-server/src/api_server/http/openai/completions.rs
 @@ -61,8 +61,8 @@ pub(super) struct SubmittedChoice {
@@ -941,7 +941,7 @@ index b14c45200e8dd1464d205b41f6836bcdf0f94bc8..7d6dc271c38c826d91f1da806e250256
      fn zero_top_logprobs_keeps_selected_token_and_empty_top_map() {
          let extras = ChunkExtras {
 diff --git a/rust/sglang-server/src/api_server/http/openai/tools.rs b/rust/sglang-server/src/api_server/http/openai/tools.rs
-index 58128ffe878c761683f567a6d5a6459d89dd5592..9b5de389253cc12141d62ba1c02b719fb538d2a9 100644
+index 58128ffe87..9b5de38925 100644
 --- a/rust/sglang-server/src/api_server/http/openai/tools.rs
 +++ b/rust/sglang-server/src/api_server/http/openai/tools.rs
 @@ -122,9 +122,27 @@ pub(super) fn chat_finish_reason(output: &CoreOutput) -> Option<OpenAIFinishReas
@@ -1005,26 +1005,26 @@ index 58128ffe878c761683f567a6d5a6459d89dd5592..9b5de389253cc12141d62ba1c02b719f
          assert_eq!(
              chat_finish_reason(&output(serde_json::json!({"type": "abort"}))),
 diff --git a/test/registered/unit/constrained/test_grammar_manager.py b/test/registered/unit/constrained/test_grammar_manager.py
-index 25b989471774b2b9df791bf40c796259d564a100..3ddb958c236d4d31977ee9c9f0532a6acc6409f4 100644
+index d0c8e78b15..ee9c94b12a 100644
 --- a/test/registered/unit/constrained/test_grammar_manager.py
 +++ b/test/registered/unit/constrained/test_grammar_manager.py
-@@ -16,6 +16,7 @@ Usage:
- 
+@@ -17,6 +17,7 @@ Usage:
+ import os
  import unittest
  from concurrent.futures import Future
 +from http import HTTPStatus
+ from types import SimpleNamespace
  from unittest.mock import MagicMock, patch
  
- from sglang.srt.constrained.base_grammar_backend import (
-@@ -26,6 +27,7 @@ from sglang.srt.constrained.base_grammar_backend import (
- from sglang.srt.constrained.grammar_manager import GrammarManager
- from sglang.srt.constrained.reasoner_grammar_backend import ReasonerGrammarObject
+@@ -35,6 +36,7 @@ from sglang.srt.constrained.reasoner_grammar_backend import (
+ )
+ from sglang.srt.constrained.xgrammar_backend import XGrammarGrammarBackend
  from sglang.srt.distributed.communication_tags import P2PTag
 +from sglang.srt.managers.io_struct import AbortReq
- from sglang.srt.runtime_context import (
-     SpawnRanks,
-     get_context,
-@@ -404,6 +406,33 @@ class TestAbortRequests(unittest.TestCase):
+ from sglang.srt.parser.inkling_tokenizer import (
+     CONTENT_MODEL_END_SAMPLING,
+     CONTENT_THINKING,
+@@ -472,6 +474,33 @@ class TestAbortRequests(unittest.TestCase):
          future.cancel.assert_called_once()
          req.set_finish_with_abort.assert_called_once()
  
@@ -1059,7 +1059,7 @@ index 25b989471774b2b9df791bf40c796259d564a100..3ddb958c236d4d31977ee9c9f0532a6a
          mgr = self._make_mgr_with_queue()
          req = _make_req(rid="req-999")
 diff --git a/test/registered/unit/entrypoints/anthropic/test_serving.py b/test/registered/unit/entrypoints/anthropic/test_serving.py
-index dfe744ab9e6f7d9117c7d0fa59e121007df7c983..3760ed77eca4d92cea40b326bbb6ec0b93817e85 100644
+index dfe744ab9e..3760ed77ec 100644
 --- a/test/registered/unit/entrypoints/anthropic/test_serving.py
 +++ b/test/registered/unit/entrypoints/anthropic/test_serving.py
 @@ -1673,11 +1673,11 @@ class TestAnthropicServing(unittest.TestCase):
@@ -1078,7 +1078,7 @@ index dfe744ab9e6f7d9117c7d0fa59e121007df7c983..3760ed77eca4d92cea40b326bbb6ec0b
          import logging
  
 diff --git a/test/registered/unit/entrypoints/openai/test_serving_chat.py b/test/registered/unit/entrypoints/openai/test_serving_chat.py
-index b716603169089a37983f4c44525042b044683738..fe71f36aea3fbd5a7396f24f7c2ddf0f5fc82f2b 100644
+index b716603169..fe71f36aea 100644
 --- a/test/registered/unit/entrypoints/openai/test_serving_chat.py
 +++ b/test/registered/unit/entrypoints/openai/test_serving_chat.py
 @@ -3377,6 +3377,146 @@ class ServingChatTestCase(CustomTestCase):
@@ -1229,7 +1229,7 @@ index b716603169089a37983f4c44525042b044683738..fe71f36aea3fbd5a7396f24f7c2ddf0f
          async def run_stream():
              chunks = []
 diff --git a/test/registered/unit/entrypoints/openai/test_serving_completions.py b/test/registered/unit/entrypoints/openai/test_serving_completions.py
-index bb2e314908da97641660d0c79925f12d29e06bc1..a133f6d201f0793080e59b3d27a9e6f7242a4d4f 100644
+index bb2e314908..a133f6d201 100644
 --- a/test/registered/unit/entrypoints/openai/test_serving_completions.py
 +++ b/test/registered/unit/entrypoints/openai/test_serving_completions.py
 @@ -321,6 +321,95 @@ class ServingCompletionTestCase(unittest.TestCase):
@@ -1329,7 +1329,7 @@ index bb2e314908da97641660d0c79925f12d29e06bc1..a133f6d201f0793080e59b3d27a9e6f7
          """logprobs=0 requests token logprobs without top-logprobs, so the
          scheduler never fills the top-logprob keys. The echo branch must not
 diff --git a/test/registered/unit/managers/test_batch_result_processor_spec_grammar.py b/test/registered/unit/managers/test_batch_result_processor_spec_grammar.py
-index 237827fa81c0df947dddf6cdb51cd9e4019caec2..7dbdb40f2801719856e34a1e65e5379c6e742be9 100644
+index 237827fa81..7dbdb40f28 100644
 --- a/test/registered/unit/managers/test_batch_result_processor_spec_grammar.py
 +++ b/test/registered/unit/managers/test_batch_result_processor_spec_grammar.py
 @@ -1,11 +1,13 @@

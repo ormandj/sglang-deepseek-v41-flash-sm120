@@ -48,7 +48,7 @@ These are controlled measurements and do not necessarily represent real-world pe
 
 ## Source and patches
 
-The image is built from four upstream commits, recorded in [`stack.lock.json`](stack.lock.json) with their trees and every patch's hash: SGLang `main`, FlashInfer `main`, sgl-project DeepGEMM `dev` and Triton `release/3.8.x`, on the `lmsysorg/sglang` CUDA 13 nightly, which supplies CUDA, PyTorch and runtime libraries only. SGLang, FlashInfer, DeepGEMM and Triton are rebuilt from source. [`scripts/verify-patches.sh`](scripts/verify-patches.sh) fetches the official commits, applies the series and checks every resulting tree.
+The image is built from four upstream commits, recorded in [`stack.lock.json`](stack.lock.json) with their trees and every patch's hash: SGLang `main`, FlashInfer `main`, sgl-project DeepGEMM `release/v0.2.3` and Triton `release/3.8.x`, on the `lmsysorg/sglang` CUDA 13 nightly, which supplies CUDA, PyTorch and runtime libraries only. SGLang, FlashInfer, DeepGEMM and Triton are rebuilt from source. [`scripts/verify-patches.sh`](scripts/verify-patches.sh) fetches the official commits, applies the series and checks every resulting tree.
 
 SGLang series, applied in order to the pinned SGLang commit:
 
@@ -77,7 +77,7 @@ SGLang series, applied in order to the pinned SGLang commit:
 | 21 | `21-compact-verify-committed-seq-lens.patch` | [sgl-project/sglang#43225](https://github.com/sgl-project/sglang/pull/43225) | Compact verify passes committed CPU lengths to self-adding backends |
 | 22 | `22-dsv41-candidate-scorer.patch` | [sgl-project/sglang#43401](https://github.com/sgl-project/sglang/pull/43401) | Paged decode consumer layers score only their candidate blocks |
 | 23 | `23-dsv41-wo-a-fp8-weight.patch` | [sgl-project/sglang#43008](https://github.com/sgl-project/sglang/pull/43008) | SM120 decode/verify WO-A reads an exact FP8 weight copy (`SGLANG_DSV41_WO_A_FP8_COPY`, default on) |
-| 24 | `24-encoder-swa-replay-multimodal.patch` | [sgl-project/sglang#43241](https://github.com/sgl-project/sglang/pull/43241) | Encoder SWA bounded replay accepts image requests (replay carries the request's multimodal inputs) |
+| 24 | `24-encoder-swa-replay-multimodal.patch` | [sgl-project/sglang#43241](https://github.com/sgl-project/sglang/pull/43241) | Under encoder SWA bounded replay, the server warms up the image path on CUDA, where replay carries image inputs |
 | 25 | `25-dsv41-indexer-prefill-tile-budget.patch` | [sgl-project/sglang#43376](https://github.com/sgl-project/sglang/pull/43376) | Prefill indexer score tiles sized from free memory, scratch counted, no padded copy (OOM fix) |
 | 26 | `26-dspark-smoothed-budget-sizing.patch` | not yet upstream | Host verify-budget sizing from a per-request running average of lagged survival (opt-in) |
 | 27 | `27-dspark-read-accept-no-alias.patch` | [sgl-project/sglang#42812](https://github.com/sgl-project/sglang/pull/42812), amended for #43790 | DSpark folded accept results are copied before the next verify replay, so TP ranks commit the same tokens under overlap scheduling with HiCache; the in-graph accept still writes the static buffers |
@@ -92,7 +92,6 @@ FlashInfer series, applied to the pinned FlashInfer commit:
 | # | Patch | Origin | Change |
 |---|---|---|---|
 | fi-01 | `fi-01-sm120-mxfp8-default-tactic.patch` | [flashinfer-ai/flashinfer#6162](https://github.com/flashinfer-ai/flashinfer/pull/6162) | SM120 MXFP8 GEMM calls without a tuned tactic use the swap-AB 128x32 tile |
-| fi-02 | `fi-02-pcie-ipc-tuner-fixes.patch` | [flashinfer-ai/flashinfer#6401](https://github.com/flashinfer-ai/flashinfer/pull/6401) | PCIe-IPC all-reduce tuner: barrier before the collective warm-up, copy-engine ring depth within `max_blocks`, alternating candidate order while ranking |
 
 Triton series, applied to the pinned Triton commit:
 

@@ -1,5 +1,5 @@
 diff --git a/docs/cookbook/autoregressive/DeepSeek/DeepSeek-V4_1.mdx b/docs/cookbook/autoregressive/DeepSeek/DeepSeek-V4_1.mdx
-index ef885e89b4a1b3a281990a034819b38343008c68..05688a5015056f641384b951425aa9949905a2af 100644
+index 33b5fc48e2..19b42535bd 100644
 --- a/docs/cookbook/autoregressive/DeepSeek/DeepSeek-V4_1.mdx
 +++ b/docs/cookbook/autoregressive/DeepSeek/DeepSeek-V4_1.mdx
 @@ -147,7 +147,7 @@ print("Answer:", msg.content)
@@ -12,10 +12,10 @@ index ef885e89b4a1b3a281990a034819b38343008c68..05688a5015056f641384b951425aa994
  ### 3.2 Tool Calling
  
 diff --git a/docs/docs/references/environment_variables.mdx b/docs/docs/references/environment_variables.mdx
-index f2c045d564cbeb05827d6b75adfeec8707bb0e49..ada7eb10b5f8d9c5f9b4aaa9734d98baa0d7ef7c 100644
+index aa2e5ae557..2c7553edfe 100644
 --- a/docs/docs/references/environment_variables.mdx
 +++ b/docs/docs/references/environment_variables.mdx
-@@ -767,7 +767,7 @@ SGLang supports various environment variables that can be used to configure its
+@@ -762,7 +762,7 @@ SGLang supports various environment variables that can be used to configure its
      </tr>
      <tr>
        <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><code>SGLANG_DSV41_REASONING_EFFORT</code></td>
@@ -25,7 +25,7 @@ index f2c045d564cbeb05827d6b75adfeec8707bb0e49..ada7eb10b5f8d9c5f9b4aaa9734d98ba
      </tr>
      <tr>
 diff --git a/python/sglang/srt/entrypoints/openai/chat_encoding.py b/python/sglang/srt/entrypoints/openai/chat_encoding.py
-index c5c65d561d324ad69b5c7b995a6b9d7ea6eea0e5..62c7177fe26b70d9f2575a1444081be0d211a256 100644
+index c5c65d561d..62c7177fe2 100644
 --- a/python/sglang/srt/entrypoints/openai/chat_encoding.py
 +++ b/python/sglang/srt/entrypoints/openai/chat_encoding.py
 @@ -154,11 +154,19 @@ def resolve_chat_encoding_spec(
@@ -70,7 +70,7 @@ index c5c65d561d324ad69b5c7b995a6b9d7ea6eea0e5..62c7177fe26b70d9f2575a1444081be0
      return effort
  
 diff --git a/python/sglang/srt/entrypoints/openai/serving_chat.py b/python/sglang/srt/entrypoints/openai/serving_chat.py
-index 1d2e707d58cabc752b9dc41418aee9a3e3d52d15..d9479311d11cf7b1ef052b9b34918a31d6b7b828 100644
+index 1d2e707d58..d9479311d1 100644
 --- a/python/sglang/srt/entrypoints/openai/serving_chat.py
 +++ b/python/sglang/srt/entrypoints/openai/serving_chat.py
 @@ -761,8 +761,9 @@ class OpenAIServingChat(OpenAIServingBase):
@@ -86,10 +86,10 @@ index 1d2e707d58cabc752b9dc41418aee9a3e3d52d15..d9479311d11cf7b1ef052b9b34918a31
                  self._dsv41_default_reasoning_effort,
              )
 diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
-index 0cd8a3e7831d456068d89014c1838dfe7f98344b..364b67223a34751c77357c1c26acc265650e56d0 100644
+index b10958c50c..2d9eed0269 100644
 --- a/python/sglang/srt/environ.py
 +++ b/python/sglang/srt/environ.py
-@@ -1649,7 +1649,8 @@ class Envs:
+@@ -1656,7 +1656,8 @@ class Envs:
      # Flash-0731 also accepts "low"; the active profile is checkpoint-resolved.
      SGLANG_DSV4_REASONING_EFFORT = EnvStr("")
      # DeepSeek-V4.1 default when a request carries no reasoning_effort: one of
@@ -100,7 +100,7 @@ index 0cd8a3e7831d456068d89014c1838dfe7f98344b..364b67223a34751c77357c1c26acc265
      # Quantize the SWA fp8 KV cache from bf16-rounded values (matches
      # trainer-side QAT and the DSA-CP path) instead of fp32 registers.
 diff --git a/rust/sglang-processor/src/render/models/deepseek_v41.rs b/rust/sglang-processor/src/render/models/deepseek_v41.rs
-index d0017658a2a57e3f0d36f5c9cc88415dfece2044..6d9af6dfe996b528fec96e53d7065749efc38351 100644
+index d0017658a2..6d9af6dfe9 100644
 --- a/rust/sglang-processor/src/render/models/deepseek_v41.rs
 +++ b/rust/sglang-processor/src/render/models/deepseek_v41.rs
 @@ -145,12 +145,14 @@ fn pydantic_effort(effort: &Value) -> Value {
@@ -146,7 +146,7 @@ index d0017658a2a57e3f0d36f5c9cc88415dfece2044..6d9af6dfe996b528fec96e53d7065749
 +    }
 +}
 diff --git a/rust/sglang-processor/tests/fixtures/parity/deepseek-v4.1-flash.json b/rust/sglang-processor/tests/fixtures/parity/deepseek-v4.1-flash.json
-index 4eac5e5b504185158653ffa279fdb015be899951..2ecc503e7da72ab93a6be74bfdde93f0d9cf0f4a 100644
+index 4eac5e5b50..2ecc503e7d 100644
 --- a/rust/sglang-processor/tests/fixtures/parity/deepseek-v4.1-flash.json
 +++ b/rust/sglang-processor/tests/fixtures/parity/deepseek-v4.1-flash.json
 @@ -37,8 +37,9 @@
@@ -161,7 +161,7 @@ index 4eac5e5b504185158653ffa279fdb015be899951..2ecc503e7da72ab93a6be74bfdde93f0
  {"name":"effort_zero","request":{"model":"m","messages":[{"role":"user","content":"Hi"}],"reasoning_effort":0},"prompt":"<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 1 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Hi<｜Assistant｜><think>","token_count":31,"token_sha256":"2350f65f050404c73daf902f5f532ef087deaf7334d6a2e50ac4d2c4f1fd73f2"},
  {"name":"effort_numeric_string","request":{"model":"m","messages":[{"role":"user","content":"Hi"}],"reasoning_effort":"0.5"},"prompt":"<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Hi<｜Assistant｜><think>","token_count":31,"token_sha256":"4add8297343cd581f7ded6ecba6c06c5f70f402802db9a021d469efdc2138a15"},
 diff --git a/test/registered/unit/entrypoints/openai/test_serving_chat.py b/test/registered/unit/entrypoints/openai/test_serving_chat.py
-index b281f76a2217940ad47413540d09a02709cf0c90..03add84a8b1402bf1dbccd910f2a3b7eb1a353b6 100644
+index b281f76a22..03add84a8b 100644
 --- a/test/registered/unit/entrypoints/openai/test_serving_chat.py
 +++ b/test/registered/unit/entrypoints/openai/test_serving_chat.py
 @@ -2993,6 +2993,49 @@ class ServingChatTestCase(CustomTestCase):
