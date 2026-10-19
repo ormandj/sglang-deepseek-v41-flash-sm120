@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "lineage": "dsv41-platform",
-  "candidate_tag": "v0.4.2-rc.2",
+  "candidate_tag": "v0.4.3-rc.1",
   "platform": "linux/amd64",
   "base": {
     "tag": "docker.io/lmsysorg/sglang:nightly-dev-cu13-20261019-3c560089",
@@ -27,7 +27,7 @@
       "ref": "refs/heads/main",
       "commit": "62cee1b15c22350b17a9256fc6ad5777feb2ec70",
       "tree": "8216c915fb861ca391b395c86e5ced1ce85c91cf",
-      "effective_tree": "bf8d1365fd092fc5788185efec51a63910bd29d8"
+      "effective_tree": "fe51b5fbe9394b3f1c22fd1154e0284cb455973b"
     },
     "triton": {
       "repository": "https://github.com/triton-lang/triton.git",
@@ -292,7 +292,7 @@
       "id": "serving-coverage-warmup",
       "kind": "pr",
       "pr": 37541,
-      "head": "59698efe687515e20d5d2136b5a73c07cf40a759",
+      "head": "5110645981f7a11ed23f0c9ebb73919f8b26b50e",
       "upstream_pr": "https://github.com/sgl-project/sglang/pull/37541",
       "purpose": "--warmups serving_coverage drives real requests through every serving path before the server accepts traffic, including concurrent decodes at every power-of-two batch size up to the running-request limit (replaces the carried decode_batches warmup).",
       "base": "3831e7e0918052be50ef38b3ff62154573e213d7",
@@ -301,7 +301,7 @@
         "test/registered/unit/entrypoints/test_serving_coverage_warmup.py"
       ],
       "path": "patches/17-serving-coverage-warmup.patch",
-      "sha256": "c20b23ccf61822a867b91f854ea34a72982f00b123a4c4ba53d850942317a10a"
+      "sha256": "5d74cd497d7b1a3ec0cca36bcc962cd061e461f2d3aabcb81f34cd53a57ca67d"
     },
     {
       "id": "dspark-sps-autotune",

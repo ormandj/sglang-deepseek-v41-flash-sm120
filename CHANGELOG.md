@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.3-rc.1
+
+0.4.2 with the image path warmed before serving. Same sources and stack otherwise.
+
+### Changes
+
+- The `serving_coverage` warmup (patch 17, [sgl-project/sglang#37541](https://github.com/sgl-project/sglang/pull/37541)) now sends its image request under encoder SWA bounded replay on CUDA, which serves image requests since 0.4.2. In 0.4.2 it skipped the image phase, so the first user image loaded the vision kernels while serving.
+
 ## v0.4.2 (stable; 2026-10-19)
 
 0.4.1 rebuilt on current upstream sources, with faster prefill. The model and the runtime configuration are unchanged.

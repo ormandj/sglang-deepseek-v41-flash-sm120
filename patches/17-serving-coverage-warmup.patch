@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/entrypoints/warmup.py b/python/sglang/srt/entrypoints/warmup.py
-index 2608621f6a..e29c941b6e 100644
+index 2608621f6a..6c6bcd19b8 100644
 --- a/python/sglang/srt/entrypoints/warmup.py
 +++ b/python/sglang/srt/entrypoints/warmup.py
 @@ -1,7 +1,7 @@
@@ -11,7 +11,7 @@ index 2608621f6a..e29c941b6e 100644
  
  import numpy as np
  import tqdm
-@@ -127,6 +127,499 @@ async def voice_chat(disaggregation_mode: str, tokenizer_manager: TokenizerManag
+@@ -127,6 +127,505 @@ async def voice_chat(disaggregation_mode: str, tokenizer_manager: TokenizerManag
          await tokenizer_manager.generate_request(generate_req_input, None).__anext__()
  
  
@@ -119,7 +119,12 @@ index 2608621f6a..e29c941b6e 100644
 +    """
 +    import itertools
 +
-+    from sglang.srt.runtime_context import get_exec, get_parallel, get_schedule
++    from sglang.srt.runtime_context import (
++        get_exec,
++        get_parallel,
++        get_platform,
++        get_schedule,
++    )
 +
 +    schedule = get_schedule()
 +    cap = _SERVING_COVERAGE_MAX_COHORT
@@ -426,12 +431,13 @@ index 2608621f6a..e29c941b6e 100644
 +        image_token
 +        and text_ok
 +        and get_exec().features.enable_encoder_swa_bounded_replay
++        and not get_platform().is_cuda
 +    ):
-+        # The tokenizer manager rejects every multimodal request under
++        # Off CUDA the tokenizer manager rejects multimodal requests under
 +        # encoder SWA bounded replay, so an image request would only fail.
 +        logger.info(
 +            "serving_coverage: skipping image phase: encoder SWA bounded "
-+            "replay accepts only text requests"
++            "replay accepts image requests on CUDA only"
 +        )
 +        image_token = None
 +    if image_token and text_ok:
@@ -488,7 +494,7 @@ index 2608621f6a..e29c941b6e 100644
 +    * concurrent decodes at every power-of-two batch size up to the
 +      running-request limit, half greedy and half sampled,
 +    * one image request when the model is multimodal, skipped under encoder
-+      SWA bounded replay, which accepts only text requests.
++      SWA bounded replay off CUDA, where it accepts only text requests.
 +
 +    Prompt and decode lengths are clamped to the engine's input limit; phases
 +    whose shapes cannot fit are skipped with a log line. With data
@@ -513,10 +519,10 @@ index 2608621f6a..e29c941b6e 100644
      """Warmup Triton kernels across a wide range of prefill seq_lens (up to 32K).
 diff --git a/test/registered/unit/entrypoints/test_serving_coverage_warmup.py b/test/registered/unit/entrypoints/test_serving_coverage_warmup.py
 new file mode 100644
-index 0000000000..524f6c0db5
+index 0000000000..26748fbc39
 --- /dev/null
 +++ b/test/registered/unit/entrypoints/test_serving_coverage_warmup.py
-@@ -0,0 +1,699 @@
+@@ -0,0 +1,713 @@
 +"""Unit tests for the serving_coverage warmup, no server, no model."""
 +
 +import asyncio
@@ -536,7 +542,7 @@ index 0000000000..524f6c0db5
 +    _warmup_registry,
 +    serving_coverage,
 +)
-+from sglang.srt.runtime_context import get_context
++from sglang.srt.runtime_context import get_context, override_platform
 +from sglang.test.ci.ci_register import register_cpu_ci
 +
 +register_cpu_ci(est_time=10, suite="base-a-test-cpu")
@@ -779,16 +785,22 @@ index 0000000000..524f6c0db5
 +        self.assertEqual(len(req.image_data), 1)
 +        self.assertTrue(req.image_data[0].startswith("data:image/png;base64,"))
 +
-+    async def test_encoder_swa_bounded_replay_skips_the_image_phase(self):
-+        # The tokenizer manager rejects image requests under this mode.
-+        override = get_context().override_server_args(
++    def _replay_override(self):
++        return get_context().override_server_args(
 +            max_running_requests=self.max_running_requests,
 +            chunked_prefill_size=self.chunked_prefill_size,
 +            dp_size=self.dp_size,
 +            enable_encoder_swa_bounded_replay=True,
 +        )
++
++    async def test_encoder_swa_bounded_replay_off_cuda_skips_the_image_phase(self):
++        # Off CUDA the tokenizer manager rejects image requests under this mode.
 +        tm = FakeTokenizerManager(image_token="<image>")
-+        with override, self.assertLogs(warmup_module.logger, level="INFO") as cm:
++        with (
++            self._replay_override(),
++            override_platform(is_cuda=False),
++            self.assertLogs(warmup_module.logger, level="INFO") as cm,
++        ):
 +            phases = _phases(tm)
 +            self.assertNotIn("image", phases)
 +            self.assertIn("natural-text", phases)
@@ -796,6 +808,14 @@ index 0000000000..524f6c0db5
 +        self.assertTrue(any("skipping image phase" in line for line in cm.output))
 +        self.assertTrue(tm.requests)
 +        self.assertFalse(any(r.image_data for r in tm.requests))
++
++    async def test_encoder_swa_bounded_replay_on_cuda_keeps_the_image_phase(self):
++        tm = FakeTokenizerManager(image_token="<image>")
++        with self._replay_override(), override_platform(is_cuda=True):
++            phases = _phases(tm)
++            self.assertIn("image", phases)
++            await phases["image"]()
++        self.assertTrue(any(r.image_data for r in tm.requests))
 +
 +    async def test_image_token_list_uses_its_first_entry(self):
 +        tm = FakeTokenizerManager(image_token=["<img>", "<img_end>"])
