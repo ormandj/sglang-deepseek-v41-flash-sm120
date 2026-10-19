@@ -409,10 +409,10 @@ index 9d0c3e0116..48403fa692 100644
              extra_kwargs = {}
 diff --git a/test/registered/kernels/ops/gemm/test_sm120_mxfp8_skinny_gemm.py b/test/registered/kernels/ops/gemm/test_sm120_mxfp8_skinny_gemm.py
 new file mode 100644
-index 0000000000..6ca3556d1f
+index 0000000000..d1ccc7addc
 --- /dev/null
 +++ b/test/registered/kernels/ops/gemm/test_sm120_mxfp8_skinny_gemm.py
-@@ -0,0 +1,363 @@
+@@ -0,0 +1,367 @@
 +"""SM120 small-M MXFP8 GEMM: FP64 reference, bit-identity with FlashInfer's
 +activation quantization, determinism, batch invariance, CUDA-graph replay,
 +split-K counter validation, and dispatch through Fp8LinearMethod.apply."""
@@ -499,7 +499,7 @@ index 0000000000..6ca3556d1f
 +        assert not counters.any(), "split-K counters must return to zero"
 +
 +
-+@pytest.mark.parametrize("n,k", [(1792, 5120), (5120, 2048)])  # split-K; BK 256
++@pytest.mark.parametrize("n,k", [(1792, 5120), (5120, 2048)])  # split-K, then BK 256
 +@pytest.mark.parametrize("m", [1, MAX_M])
 +@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
 +def test_input_dtypes(n, k, m, dtype):
@@ -549,15 +549,16 @@ index 0000000000..6ca3556d1f
 +    if backend == "cute-dsl" and not _cute_dsl_available():
 +        pytest.skip("FlashInfer CuTe-DSL is not installed")
 +    n, k = 8192, 1280
-+    # FlashInfer's CUDA backend flushes BF16 subnormal inputs to zero; the
-+    # CuTe-DSL backend (the one SGLang calls) and this kernel keep them.
++    # FlashInfer's CUDA backend departs from the CuTe-DSL backend (the one SGLang
++    # calls) on rows below about 2^-100, so it is compared from there up.
 +    lo = -120 if backend == "cute-dsl" else -100
 +    x = torch.randn(m, k, device="cuda")
 +    x *= torch.logspace(lo, 30, m, base=2.0, device="cuda")[:, None]
 +    x = x.bfloat16()
 +    x[0, 0:32] = 0
 +    x[0, 32:64] = 3.5  # amax / 448 is exactly 2^-7
-+    x[0, 64:96] = 448.0 * 2.0**-127  # amax / 448 at the smallest UE8M0 scale
++    # amax / 448 at UE8M0 scale byte 0: the block quantizes to zero, as in FlashInfer
++    x[0, 64:96] = 448.0 * 2.0**-127
 +    q, sf = flashinfer.mxfp8_quantize(x, True, 32, backend=backend)
 +    q_lin, sf_lin = flashinfer.mxfp8_quantize(x, False, 32, backend=backend)
 +    # Selector weight (row j picks activation j) with block scale 2^64:
@@ -732,6 +733,9 @@ index 0000000000..6ca3556d1f
 +
 +    n, k = 1792, 5120
 +    layer, _ = build_linear(n, k)
++    # The scale may alias weight_scale_inv, which the loader rewrites in place;
++    # a buffer of its own makes the reload copy the new scales into it.
++    layer.mxfp8_skinny_scale = layer.mxfp8_skinny_scale.clone()
 +    scale, counters = layer.mxfp8_skinny_scale, layer.mxfp8_skinny_counters
 +    assert counters is not None, "exercise the split-K counters"
 +    x = torch.randn(6, k, device="cuda", dtype=torch.bfloat16)

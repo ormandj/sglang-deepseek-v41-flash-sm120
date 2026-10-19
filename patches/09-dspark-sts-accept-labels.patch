@@ -1,5 +1,5 @@
 diff --git a/python/sglang/benchmark/dspark_sts_fit.py b/python/sglang/benchmark/dspark_sts_fit.py
-index ec8f094311..ee0ed0c1ef 100644
+index ec8f094311..ba02273499 100644
 --- a/python/sglang/benchmark/dspark_sts_fit.py
 +++ b/python/sglang/benchmark/dspark_sts_fit.py
 @@ -51,12 +51,21 @@ def fit_sts_temperatures(
@@ -64,7 +64,7 @@ index ec8f094311..ee0ed0c1ef 100644
                  targets=position_target,
                  num_bins=num_bins,
              )
-@@ -110,22 +127,38 @@ def fit_sts_temperatures(
+@@ -110,22 +127,39 @@ def fit_sts_temperatures(
      }
  
  
@@ -90,7 +90,8 @@ index ec8f094311..ee0ed0c1ef 100644
 +            logger.warning(
 +                "%s has no observed_mask (collected before acceptance labels): "
 +                "fitting it as fully observed, which is right only for "
-+                "all-greedy runs without compact verify.",
++                "all-greedy runs with a static verify window (no compact "
++                "verify or cap-accept).",
 +                shard_path,
 +            )
 +            shard_observed_mask = torch.ones_like(shard_prefix_mask)
@@ -107,7 +108,7 @@ index ec8f094311..ee0ed0c1ef 100644
              )
          if shard_gamma is None:
              shard_gamma = int(shard_logits.shape[1])
-@@ -136,8 +169,13 @@ def load_collected_shards(*, data_glob: str) -> tuple[torch.Tensor, torch.Tensor
+@@ -136,8 +170,13 @@ def load_collected_shards(*, data_glob: str) -> tuple[torch.Tensor, torch.Tensor
              )
          logits_shards.append(shard_logits)
          prefix_mask_shards.append(shard_prefix_mask)
@@ -122,7 +123,7 @@ index ec8f094311..ee0ed0c1ef 100644
  
  
  def fit(
-@@ -147,7 +185,7 @@ def fit(
+@@ -147,7 +186,7 @@ def fit(
      num_bins: int = 15,
      gamma: Optional[int] = None,
  ) -> None:
@@ -131,7 +132,7 @@ index ec8f094311..ee0ed0c1ef 100644
      resolved_gamma = int(logits.shape[1])
      if gamma is not None and gamma != resolved_gamma:
          raise ValueError(
-@@ -160,6 +198,7 @@ def fit(
+@@ -160,6 +199,7 @@ def fit(
          prefix_mask=prefix_mask,
          grid=default_temperature_grid(),
          num_bins=num_bins,
@@ -139,7 +140,7 @@ index ec8f094311..ee0ed0c1ef 100644
      )
      calibration = DSparkStsCalibration(
          temperatures=result["temperatures"],
-@@ -193,7 +232,7 @@ def main() -> None:
+@@ -193,7 +233,7 @@ def main() -> None:
          "--data-glob",
          required=True,
          help="Glob of collected .pt shards, each a dict with [n, gamma] "

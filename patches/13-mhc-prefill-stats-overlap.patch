@@ -176,6 +176,18 @@ index 965ee296e2..e1dfd50790 100644
  def use_stats_stream(cfg: HcConfig, forward_batch: ForwardBatch, x: torch.Tensor):
      if not cfg.pre_from_prev:
          return False
+diff --git a/test/registered/unit/layer_boundary/test_moe_output_reduction.py b/test/registered/unit/layer_boundary/test_moe_output_reduction.py
+index d71cf20a45..83dcf97a00 100644
+--- a/test/registered/unit/layer_boundary/test_moe_output_reduction.py
++++ b/test/registered/unit/layer_boundary/test_moe_output_reduction.py
+@@ -202,6 +202,7 @@ class TestModelsWithExplicitDpCompletion(CustomTestCase):
+                     model = types.SimpleNamespace(
+                         dsa_enable_prefill_cp=False,
+                         boundary_mhc_fusions=False,
++                        _can_overlap_ffn_stats=False,
+                         config=types.SimpleNamespace(model_type="deepseek_v4"),
+                         mlp=compute,
+                     )
 diff --git a/test/registered/unit/models/test_deepseek_v4_boundary.py b/test/registered/unit/models/test_deepseek_v4_boundary.py
 index 94fe68b27e..6060f24a01 100644
 --- a/test/registered/unit/models/test_deepseek_v4_boundary.py
@@ -549,3 +561,16 @@ index 0000000000..0d6f21a69e
 +
 +if __name__ == "__main__":
 +    unittest.main()
+diff --git a/test/registered/unit/models/test_deepseek_v4_pipeline.py b/test/registered/unit/models/test_deepseek_v4_pipeline.py
+index 9ffe2bc7ad..939b04cc95 100644
+--- a/test/registered/unit/models/test_deepseek_v4_pipeline.py
++++ b/test/registered/unit/models/test_deepseek_v4_pipeline.py
+@@ -38,6 +38,8 @@ class TestPipelineCompletion(unittest.TestCase):
+                         use_fused_mhc_post_pre=False,
+                         _can_fuse_ffn_mhc=fused,
+                         _can_fuse_attn_mhc=False,
++                        _can_overlap_attn_stats=False,
++                        _can_overlap_ffn_stats=False,
+                         hc_cfg=SimpleNamespace(hidden=4),
+                         mlp=SimpleNamespace(tp_size=2),
+                         ffn_hc=object(),

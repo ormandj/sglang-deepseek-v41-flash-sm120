@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.4.2-rc.2
+
+0.4.2-rc.1 with the carried pull requests at their final review revisions. Same stack.
+
+### Changes
+
+- Patch 13 (sgl-project/sglang#42985): unchanged serving behavior; two of SGLang's layer-boundary unit tests give their stub layers the overlap gates.
+- Patch 16 (#42867): the opt-in BF16 LM-head path falls back to `torch.matmul` when Triton is unavailable.
+- Patches 09 (#42712) and 11 (#42865): STS fitting validates its mask and warns on shards collected without one; the MXFP8 skinny GEMM's counter contract and tests are tightened.
+
 ## v0.4.2-rc.1
 
 0.4.1 rebuilt on current upstream sources. The model and the runtime configuration are unchanged.

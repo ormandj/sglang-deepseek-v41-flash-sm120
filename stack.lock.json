@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "lineage": "dsv41-platform",
-  "candidate_tag": "v0.4.2-rc.1",
+  "candidate_tag": "v0.4.2-rc.2",
   "platform": "linux/amd64",
   "base": {
     "tag": "docker.io/lmsysorg/sglang:nightly-dev-cu13-20261019-3c560089",
@@ -27,7 +27,7 @@
       "ref": "refs/heads/main",
       "commit": "62cee1b15c22350b17a9256fc6ad5777feb2ec70",
       "tree": "8216c915fb861ca391b395c86e5ced1ce85c91cf",
-      "effective_tree": "f72ab1274b995dfedf606e0e68492eee5d03427a"
+      "effective_tree": "bf8d1365fd092fc5788185efec51a63910bd29d8"
     },
     "triton": {
       "repository": "https://github.com/triton-lang/triton.git",
@@ -166,7 +166,7 @@
       "id": "dspark-sts-accept-labels",
       "kind": "pr",
       "pr": 42712,
-      "head": "b1587bd9a16b0d18c69eed606a6541ccf4d3f572",
+      "head": "dab01de1a941d97bd86fe200d277cc3ad480d112",
       "upstream_pr": "https://github.com/sgl-project/sglang/pull/42712",
       "purpose": "DSpark STS calibration labels come from the actual acceptance, with unverified positions masked out.",
       "base": "62cee1b15c22350b17a9256fc6ad5777feb2ec70",
@@ -175,7 +175,7 @@
         "test/registered/spec/dspark/test_dspark_sts.py"
       ],
       "path": "patches/09-dspark-sts-accept-labels.patch",
-      "sha256": "4586aab347a04ad99de790283b647d1593e18f656467793ab02b28c3e3e30074",
+      "sha256": "8e6bbc6037eb386aca66d56464a7416fcead5abbc127c6c9a8d3b3dae2c8f8a4",
       "note": "Main (#43790) passes confidence_raw to the step observers: the STS recorder takes it from the caller and labels with correct_len."
     },
     {
@@ -195,7 +195,7 @@
       "id": "sm120-mxfp8-skinny",
       "kind": "pr",
       "pr": 42865,
-      "head": "b7dd852790eb8f047250999e0d76444578881ad8",
+      "head": "7d84b0e9b3cbb1beb5bbfe151aa9ea3d2cd07d14",
       "upstream_pr": "https://github.com/sgl-project/sglang/pull/42865",
       "purpose": "Split-K MXFP8 GEMM for tuned decode-sized linears at up to 16 rows (SGLANG_ENABLE_SM120_MXFP8_SKINNY_GEMM, default on).",
       "base": "62cee1b15c22350b17a9256fc6ad5777feb2ec70",
@@ -204,7 +204,7 @@
         "test/registered/unit/kernels/test_kernels_namespace.py"
       ],
       "path": "patches/11-sm120-mxfp8-skinny.patch",
-      "sha256": "73b142313aa4083fd3e45682e6ace1ce19b795605baa8a4586b8d4ace271b2fb",
+      "sha256": "c94f71519793a435aef95674e151a7a0d36c23785e0278b172ec9f347686a156",
       "note": "Registered with main's slimmer KernelSpec (#44690)."
     },
     {
@@ -227,17 +227,19 @@
       "id": "mhc-prefill-stats-overlap",
       "kind": "pr",
       "pr": 42985,
-      "head": "e8d8efd95c762baea4033cb7912f824b9d02849c",
+      "head": "a6a64b6a945e704251c16a1face9d06a15ca5c18",
       "upstream_pr": "https://github.com/sgl-project/sglang/pull/42985",
       "purpose": "Wide prefill computes the mHC mix stats while the TP all-reduce runs again (restores the overlap #42245 removed).",
       "base": "62cee1b15c22350b17a9256fc6ad5777feb2ec70",
       "applied": "three-way",
       "cpu_tests": [
         "test/registered/unit/models/test_deepseek_v4_mhc_prefill_overlap.py",
-        "test/registered/unit/models/test_deepseek_v4_boundary.py"
+        "test/registered/unit/models/test_deepseek_v4_boundary.py",
+        "test/registered/unit/models/test_deepseek_v4_pipeline.py",
+        "test/registered/unit/layer_boundary/test_moe_output_reduction.py"
       ],
       "path": "patches/13-mhc-prefill-stats-overlap.patch",
-      "sha256": "a0deacd00ffcaa8076038a5ce3dc96f10f31be4e67139b24c2aa4d503d94c548",
+      "sha256": "3715aa5cf58e34ee1b9ae5f573a408985ccfafab901897f2a368a0da784c1c71",
       "resolution": "Ported to the layer-boundary transports of #43607: AttentionTransport and MoeTransport issue the triplet on the stats stream in prepare_output right before the owed sum, and HcUpdate.post joins it. main's boundary test stub sets the new gate."
     },
     {
@@ -273,7 +275,7 @@
       "id": "bf16-skinny-lm-head",
       "kind": "pr",
       "pr": 42867,
-      "head": "3000e78d1c32bbc597185fdb528dac717f63fcd0",
+      "head": "fc727bbefde1bd8ccec747b2a9e2d982b5278dc8",
       "upstream_pr": "https://github.com/sgl-project/sglang/pull/42867",
       "purpose": "Opt-in weight-streaming BF16 GEMM for LM heads at up to 16 rows (SGLANG_ENABLE_BF16_SKINNY_LM_HEAD); batch-invariant rows.",
       "base": "62cee1b15c22350b17a9256fc6ad5777feb2ec70",
@@ -283,7 +285,7 @@
         "test/registered/unit/kernels/test_kernels_namespace.py"
       ],
       "path": "patches/16-bf16-skinny-lm-head.patch",
-      "sha256": "c49f7f288dc8038976892d6098ef8f42425db7c4f7eb25a429b35e508435b4ca",
+      "sha256": "e8e093811f1e7db7a5e080c46721344786bfbafde91c9177b8f11e93992cc592",
       "note": "Registered with main's slimmer KernelSpec (#44690); the environment variable moves to the logits section."
     },
     {
@@ -394,7 +396,8 @@
       "applied": "clean",
       "cpu_tests": [
         "test/registered/unit/model_executor/test_derived_weight_cache.py",
-        "test/registered/unit/models/test_deepseek_v4_unified_fp8_q_pair.py"
+        "test/registered/unit/models/test_deepseek_v4_unified_fp8_q_pair.py",
+        "test/registered/unit/models/test_deepseek_v4_wo_a_fp8_dispatch.py"
       ],
       "path": "patches/23-dsv41-wo-a-fp8-weight.patch",
       "sha256": "52e452d954c8604f1d26d6506af98c86b5940c01ab70e27a0a227126237510da",
