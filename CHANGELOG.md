@@ -1,24 +1,36 @@
 # Changelog
 
-## v0.4.1-rc.2
+## v0.4.1 (stable; 2026-10-19)
 
-0.4.1-rc.1 with the OpenAI-compatibility fixes now submitted upstream.
-
-### Changes
-
-- Patch 28 is now [sgl-project/sglang#45131](https://github.com/sgl-project/sglang/pull/45131): `usage.completion_tokens_details.reasoning_tokens` is capped at `completion_tokens`.
-- [#45130](https://github.com/sgl-project/sglang/pull/45130): the OpenAI routes return errors as `{"error": {"message", "type", "param", "code"}}`. Server errors no longer include exception text.
-- [#45132](https://github.com/sgl-project/sglang/pull/45132): chat and completions never report `finish_reason: "abort"`. An abort with an error status returns that error; one without is reported as `"stop"`.
-- [#45133](https://github.com/sgl-project/sglang/pull/45133): a chat or completion stream that fails after its first chunk ends with an error frame and `[DONE]`.
-- [#45134](https://github.com/sgl-project/sglang/pull/45134): `reasoning_effort` `minimal` and `medium` map to budgets 50 and 62 instead of the default.
-
-## v0.4.1-rc.1
-
-0.4.0 with OpenAI-standard reasoning-token usage.
+0.4.0 with OpenAI API compatibility fixes, submitted upstream. The sources other than these patches, the model and the runtime configuration are unchanged.
 
 ### Changes
 
-- Chat and completions usage report reasoning tokens at `usage.completion_tokens_details.reasoning_tokens`, OpenAI's location, in non-streamed responses, the final `stream_options.include_usage` chunk and continuous usage chunks. OpenAI-compatible gateways that pass only standard usage fields dropped SGLang's top-level `usage.reasoning_tokens`, which is kept.
+- Usage reports reasoning tokens at `usage.completion_tokens_details.reasoning_tokens`, where OpenAI clients and gateways read them, capped at `completion_tokens`; SGLang's top-level `usage.reasoning_tokens` is kept ([sgl-project/sglang#45131](https://github.com/sgl-project/sglang/pull/45131)).
+- The OpenAI routes return errors as `{"error": {"message", "type", "param", "code"}}`, and server errors no longer include exception text ([#45130](https://github.com/sgl-project/sglang/pull/45130)).
+- Chat and completions never report `finish_reason: "abort"`: an abort with an error status returns that error, and one without is reported as `"stop"` ([#45132](https://github.com/sgl-project/sglang/pull/45132)).
+- A chat or completion stream that fails after its first chunk ends with an error frame and `[DONE]` ([#45133](https://github.com/sgl-project/sglang/pull/45133)).
+- `reasoning_effort` `minimal` and `medium` map to budgets 50 and 62 instead of the default ([#45134](https://github.com/sgl-project/sglang/pull/45134)).
+
+### Upgrade
+
+Clients that read the old flat error body (`body["message"]`, `body["code"]`) must read `body["error"]["message"]` and the HTTP status. Start the `v0.4.1` image with the 0.4.0 launcher settings and a new kernel cache directory: the first start measures the speculative-decoding cost table again (about 7 minutes after warmup).
+
+### Measurements
+
+Validation runs on four RTX PRO 6000 Blackwell Max-Q GPUs at 250 W each, with the privately built image of this release, at the model card's sampling (temperature 1.0, `top_p` 1.0, thinking with `reasoning_effort` high). Decode figures are the median of six repetitions per cell from two runs.
+
+| Concurrency | C1 | C2 | C4 | C8 | C16 |
+|---|---|---|---|---|---|
+| Decode output tok/s | 205 | 323 | 495 | 677 | 1,023 |
+| Accepted tokens per step | 2.39 | 2.26 | 2.16 | 2.07 | 2.09 |
+
+- Cold prefill: about 12.8K, 13.2K and 12.8K prompt tok/s at 8K, 32K and 128K tokens, with prompts sized to whole 8,192-token prefill chunks.
+- Long context at C1: 87, 84 and 83 decode steps/s at 0, 32K and 128K tokens of context.
+- Device KV pool: 2,934,016 tokens across requests; one request may use up to 1,048,576.
+- Quality: teacher-forced log-probabilities within 0.09 nats (worst prompt mean) and 0.75 nats (maximum) of a full prefill. No repetition loops in 64 sampled reasoning streams at 4 and 16 concurrent requests, or in 321 requests over 10 minutes at 8 concurrent requests.
+
+Against 0.4.0 at the same settings, every decode and prefill cell is within the run-to-run noise. These are controlled measurements and do not necessarily represent real-world performance. Output rates include reasoning tokens and depend on speculative acceptance.
 
 ## v0.4.0 (stable; 2026-10-17)
 
