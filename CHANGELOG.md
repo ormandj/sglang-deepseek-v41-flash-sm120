@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.4.1-rc.2
+
+0.4.1-rc.1 with the OpenAI-compatibility fixes now submitted upstream.
+
+### Changes
+
+- Patch 28 is now [sgl-project/sglang#45131](https://github.com/sgl-project/sglang/pull/45131): `usage.completion_tokens_details.reasoning_tokens` is capped at `completion_tokens`.
+- [#45130](https://github.com/sgl-project/sglang/pull/45130): the OpenAI routes return errors as `{"error": {"message", "type", "param", "code"}}`. Server errors no longer include exception text.
+- [#45132](https://github.com/sgl-project/sglang/pull/45132): chat and completions never report `finish_reason: "abort"`. An abort with an error status returns that error; one without is reported as `"stop"`.
+- [#45133](https://github.com/sgl-project/sglang/pull/45133): a chat or completion stream that fails after its first chunk ends with an error frame and `[DONE]`.
+- [#45134](https://github.com/sgl-project/sglang/pull/45134): `reasoning_effort` `minimal` and `medium` map to budgets 50 and 62 instead of the default.
+
 ## v0.4.1-rc.1
 
 0.4.0 with OpenAI-standard reasoning-token usage.

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "lineage": "dsv41-platform",
-  "candidate_tag": "v0.4.1-rc.1",
+  "candidate_tag": "v0.4.1-rc.2",
   "platform": "linux/amd64",
   "base": {
     "tag": "docker.io/lmsysorg/sglang:nightly-dev-cu13-20261016-a93f16f0",
@@ -27,7 +27,7 @@
       "ref": "refs/heads/main",
       "commit": "4eb606b2aee8a9165e16352fd4c08d998ba37990",
       "tree": "3aad2bbca943086354e1d9e826be7ca3702e5e29",
-      "effective_tree": "6ecb886d991e32cad1190c8ae2ac2e3d0ce84b6a"
+      "effective_tree": "28ce597d719a6ee52703efe2d9140d6b7bb5a88e"
     },
     "triton": {
       "repository": "https://github.com/triton-lang/triton.git",
@@ -463,20 +463,88 @@
     },
     {
       "id": "chat-usage-completion-tokens-details",
-      "kind": "branch",
-      "branch": "up/openai-usage-reasoning-tokens",
-      "head": "f297d19301e19f1f7af4e93f5fb11e94bbb4e0f9",
-      "upstream_pr": "pending",
-      "reason": "Prepared for sgl-project/sglang (Python, sglang-processor and sglang-server); opencode-reviewed, review findings resolved; PR awaits owner approval.",
-      "purpose": "Chat and completions usage also report reasoning tokens at usage.completion_tokens_details.reasoning_tokens, where OpenAI clients and gateways read them; the top-level usage.reasoning_tokens stays.",
+      "kind": "pr",
+      "pr": 45131,
+      "head": "79e9748b1107d08e555fbf15ef248f2e9ee28c8b",
+      "upstream_pr": "https://github.com/sgl-project/sglang/pull/45131",
+      "purpose": "Chat and completions usage also report reasoning tokens at usage.completion_tokens_details.reasoning_tokens, capped at completion_tokens, where OpenAI clients and gateways read them; the top-level usage.reasoning_tokens stays.",
+      "resolution": "PR head is on newer main; applies to the 0.4.0 series with git apply --3way.",
       "base": "4eb606b2aee8a9165e16352fd4c08d998ba37990",
       "applied": "three-way",
-      "resolution": "Applied onto the 0.4.0 series with git apply --3way; Rust test helpers and fixtures merge cleanly.",
       "cpu_tests": [
         "test/registered/unit/entrypoints/openai/test_usage_processor.py"
       ],
       "path": "patches/28-chat-usage-completion-tokens-details.patch",
-      "sha256": "a6fa72ee53f1adb682b5a0c56a2a8d5e80f95f2898285e7b01c7d0281edb86c0"
+      "sha256": "29a27e98e1d0dd70e2e4d3ac8d0218a618901b85a57410858d20323b5413b81a"
+    },
+    {
+      "id": "openai-error-envelope",
+      "kind": "pr",
+      "pr": 45130,
+      "head": "b18682ba709a0843df4cc41deafc89f2d8960c68",
+      "upstream_pr": "https://github.com/sgl-project/sglang/pull/45130",
+      "purpose": "The OpenAI routes return errors as {\"error\": {message, type, param, code}}; error.type follows the HTTP status; the serving catch-all 500 no longer includes exception text.",
+      "resolution": "sglang-server models.rs: the 0.4.0 retrieve_model (served_model_name check) keeps its structure; the parity fixture's error bodies are rewritten on top of patch 28's usage fields.",
+      "base": "4eb606b2aee8a9165e16352fd4c08d998ba37990",
+      "applied": "three-way",
+      "cpu_tests": [
+        "test/registered/unit/entrypoints/openai/test_openai_error_envelope.py",
+        "test/registered/unit/entrypoints/anthropic/test_serving.py"
+      ],
+      "path": "patches/29-openai-error-envelope.patch",
+      "sha256": "8a6595a615670626796577d2623668381cc38b91b95d4123ed6b7d898a684562"
+    },
+    {
+      "id": "openai-abort-finish-reason",
+      "kind": "pr",
+      "pr": 45132,
+      "head": "85dc25d5cc045d7e5ee30e4124c20f469c093422",
+      "upstream_pr": "https://github.com/sgl-project/sglang/pull/45132",
+      "purpose": "Chat and completions never report finish_reason \"abort\": an abort with an error status returns that error, one without is reported as \"stop\"; grammar rejections abort with 500.",
+      "note": "#45132 stacks its commit on #45130; only that commit is carried.",
+      "resolution": "test_grammar_manager.py keeps the 0.4.0 imports; sglang-server completions test imports merged with patch 28's.",
+      "base": "4eb606b2aee8a9165e16352fd4c08d998ba37990",
+      "applied": "three-way",
+      "cpu_tests": [
+        "test/registered/unit/constrained/test_grammar_manager.py",
+        "test/registered/unit/managers/test_batch_result_processor_spec_grammar.py"
+      ],
+      "path": "patches/30-openai-abort-finish-reason.patch",
+      "sha256": "46f08b5f59cd525d55a6955a05d39821db3a7c48f082308063e3e299105df069"
+    },
+    {
+      "id": "openai-stream-exception-frame",
+      "kind": "pr",
+      "pr": 45133,
+      "head": "19890ad397a0e686f88a8ea5a3018db2702b90c2",
+      "upstream_pr": "https://github.com/sgl-project/sglang/pull/45133",
+      "purpose": "Chat and completion streams that fail after the first chunk end with an error frame and [DONE]; non-ValueError exceptions are reported without their text.",
+      "note": "#45133 stacks its commit on #45130; only that commit is carried.",
+      "resolution": "Applies cleanly after patch 30.",
+      "base": "4eb606b2aee8a9165e16352fd4c08d998ba37990",
+      "applied": "three-way",
+      "cpu_tests": [
+        "test/registered/unit/entrypoints/openai/test_serving_chat.py",
+        "test/registered/unit/entrypoints/openai/test_serving_completions.py"
+      ],
+      "path": "patches/31-openai-stream-exception-frame.patch",
+      "sha256": "21e9c4072c0c2d5a8474a0b59765a634981c720895cf484fecb8a8cd70db699f"
+    },
+    {
+      "id": "dsv41-effort-minimal-medium",
+      "kind": "pr",
+      "pr": 45134,
+      "head": "40c6bf1a0e0fb5d623e4f0af42f603c279398b42",
+      "upstream_pr": "https://github.com/sgl-project/sglang/pull/45134",
+      "purpose": "DeepSeek-V4.1 maps reasoning_effort minimal to budget 50 and medium to 62 instead of falling back to high.",
+      "resolution": "Applies cleanly.",
+      "base": "4eb606b2aee8a9165e16352fd4c08d998ba37990",
+      "applied": "three-way",
+      "cpu_tests": [
+        "test/registered/unit/entrypoints/openai/test_serving_chat.py"
+      ],
+      "path": "patches/32-dsv41-effort-minimal-medium.patch",
+      "sha256": "f485f3798c5b1e4b9319378455a1d820d15ec10047dc5ee4b455c15cf8d2bfc1"
     }
   ],
   "packaging": {

@@ -81,7 +81,11 @@ SGLang series, applied in order to the pinned SGLang commit:
 | 25 | `25-dsv41-indexer-prefill-tile-budget.patch` | [sgl-project/sglang#43376](https://github.com/sgl-project/sglang/pull/43376) | Prefill indexer score tiles sized from free memory, scratch counted, no padded copy (OOM fix) |
 | 26 | `26-dspark-smoothed-budget-sizing.patch` | not yet upstream | Host verify-budget sizing from a per-request running average of lagged survival (opt-in) |
 | 27 | `27-dspark-read-accept-no-alias.patch` | [sgl-project/sglang#42812](https://github.com/sgl-project/sglang/pull/42812), amended for #43790 | DSpark folded accept results are copied before the next verify replay, so TP ranks commit the same tokens under overlap scheduling with HiCache; the in-graph accept still writes the static buffers |
-| 28 | `28-chat-usage-completion-tokens-details.patch` | not yet upstream | Usage also reports reasoning tokens at `usage.completion_tokens_details.reasoning_tokens`, where OpenAI clients and gateways read them |
+| 28 | `28-chat-usage-completion-tokens-details.patch` | [sgl-project/sglang#45131](https://github.com/sgl-project/sglang/pull/45131) | Usage also reports reasoning tokens at `usage.completion_tokens_details.reasoning_tokens`, where OpenAI clients and gateways read them |
+| 29 | `29-openai-error-envelope.patch` | [sgl-project/sglang#45130](https://github.com/sgl-project/sglang/pull/45130) | OpenAI routes return errors in OpenAI's error format |
+| 30 | `30-openai-abort-finish-reason.patch` | [sgl-project/sglang#45132](https://github.com/sgl-project/sglang/pull/45132) | Aborted requests are reported as an error or a stop, never `finish_reason: "abort"` |
+| 31 | `31-openai-stream-exception-frame.patch` | [sgl-project/sglang#45133](https://github.com/sgl-project/sglang/pull/45133) | Failed chat and completion streams end with an error frame and `[DONE]` |
+| 32 | `32-dsv41-effort-minimal-medium.patch` | [sgl-project/sglang#45134](https://github.com/sgl-project/sglang/pull/45134) | DeepSeek-V4.1 supports `reasoning_effort` `minimal` and `medium` |
 
 FlashInfer series, applied to the pinned FlashInfer commit:
 

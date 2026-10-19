@@ -1,0 +1,1380 @@
+diff --git a/python/sglang/srt/constrained/grammar_manager.py b/python/sglang/srt/constrained/grammar_manager.py
+index 5d5d33d2963c6ebac183f0727bdf82339be2afda..17a4f66667f4a7ca0f5bdb89eb343136f17f8c01 100644
+--- a/python/sglang/srt/constrained/grammar_manager.py
++++ b/python/sglang/srt/constrained/grammar_manager.py
+@@ -3,6 +3,7 @@ from __future__ import annotations
+ import logging
+ import time
+ from concurrent import futures
++from http import HTTPStatus
+ from typing import TYPE_CHECKING, List
+ 
+ import torch
+@@ -116,7 +117,16 @@ class GrammarManager:
+                 logger.debug(f"Abort grammar queue request. {req.rid=}")
+                 if isinstance(req.grammar, futures.Future) and req.grammar:
+                     req.grammar.cancel()
+-                req.set_finish_with_abort("Aborted by AbortReq.")
++                # As with running requests: a timeout's SLA message is a 503,
++                # any other abort is a deliberate stop without an error status.
++                if recv_req.abort_message:
++                    req.set_finish_with_abort(
++                        recv_req.abort_message, HTTPStatus.SERVICE_UNAVAILABLE
++                    )
++                else:
++                    req.set_finish_with_abort(
++                        "Aborted by AbortReq.", status_code=None, err_type=None
++                    )
+ 
+     def _get_request_thinking_budget(self, req: Req) -> int | None:
+         custom_params = req.sampling_params.custom_params
+diff --git a/python/sglang/srt/entrypoints/anthropic/serving.py b/python/sglang/srt/entrypoints/anthropic/serving.py
+index 8ee7e4e37de5c224b8694e327d33c7edb994c6a6..38ef7cfa9f42f031d1bd2d6c12453d9f068aa013 100644
+--- a/python/sglang/srt/entrypoints/anthropic/serving.py
++++ b/python/sglang/srt/entrypoints/anthropic/serving.py
+@@ -61,9 +61,9 @@ logger = logging.getLogger(__name__)
+ 
+ # Map OpenAI finish reasons to Anthropic stop reasons. Only the four
+ # values in ``AnthropicMessagesResponse.stop_reason``'s Literal are valid
+-# on the wire; ``content_filter`` and ``abort`` have no perfect mapping
+-# so they fall through to the ``end_turn`` default with a WARNING at the
+-# call site so operators don't lose the safety/abort signal in logs.
++# on the wire; ``content_filter`` has no perfect mapping so it falls
++# through to the ``end_turn`` default with a WARNING at the call site so
++# operators don't lose the safety signal in logs.
+ STOP_REASON_MAP = {
+     "stop": "end_turn",
+     "length": "max_tokens",
+diff --git a/python/sglang/srt/entrypoints/openai/protocol.py b/python/sglang/srt/entrypoints/openai/protocol.py
+index b3ad83ac3fcd089f7fa8d651656fbc16897ce3ec..414cbd1f260a447f85b4a2689fef2183140110a6 100644
+--- a/python/sglang/srt/entrypoints/openai/protocol.py
++++ b/python/sglang/srt/entrypoints/openai/protocol.py
+@@ -573,7 +573,7 @@ class CompletionResponseChoice(BaseModel):
+     index: int
+     text: str
+     logprobs: Optional[LogProbs] = None
+-    finish_reason: Optional[Literal["stop", "length", "content_filter", "abort"]] = None
++    finish_reason: Optional[Literal["stop", "length", "content_filter"]] = None
+     matched_stop: Union[None, int, str] = None
+     hidden_states: Optional[object] = None
+     token_ids: Optional[List[int]] = None
+@@ -613,7 +613,7 @@ class CompletionResponseStreamChoice(BaseModel):
+     index: int
+     text: str
+     logprobs: Optional[LogProbs] = None
+-    finish_reason: Optional[Literal["stop", "length", "content_filter", "abort"]] = None
++    finish_reason: Optional[Literal["stop", "length", "content_filter"]] = None
+     matched_stop: Union[None, int, str] = None
+     hidden_states: Optional[object] = None
+     token_ids: Optional[List[int]] = None
+@@ -1331,9 +1331,7 @@ class ChatCompletionResponseChoice(BaseModel):
+     message: ChatMessage
+     logprobs: Optional[Union[LogProbs, ChoiceLogprobs]] = None
+     finish_reason: Optional[
+-        Literal[
+-            "stop", "length", "tool_calls", "content_filter", "function_call", "abort"
+-        ]
++        Literal["stop", "length", "tool_calls", "content_filter", "function_call"]
+     ] = None
+     matched_stop: Union[None, int, str] = None
+     hidden_states: Optional[object] = None
+@@ -1393,9 +1391,7 @@ class ChatCompletionResponseStreamChoice(BaseModel):
+     delta: DeltaMessage
+     logprobs: Optional[Union[LogProbs, ChoiceLogprobs]] = None
+     finish_reason: Optional[
+-        Literal[
+-            "stop", "length", "tool_calls", "content_filter", "function_call", "abort"
+-        ]
++        Literal["stop", "length", "tool_calls", "content_filter", "function_call"]
+     ] = None
+     matched_stop: Union[None, int, str] = None
+ 
+diff --git a/python/sglang/srt/entrypoints/openai/serving_chat.py b/python/sglang/srt/entrypoints/openai/serving_chat.py
+index f6424339a9829e1aa8bc720bc72a0827ab7e526c..7a5d92b02086b259c6bde9dec8448de704ab2dd0 100644
+--- a/python/sglang/srt/entrypoints/openai/serving_chat.py
++++ b/python/sglang/srt/entrypoints/openai/serving_chat.py
+@@ -9,7 +9,6 @@ import uuid
+ from collections import OrderedDict
+ from collections.abc import AsyncGenerator
+ from enum import Enum
+-from http import HTTPStatus
+ from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, List, Optional, Union
+ 
+ from sglang.srt.runtime_context import get_model, get_serving
+@@ -79,6 +78,7 @@ from sglang.srt.entrypoints.openai.serving_base import OpenAIServingBase
+ from sglang.srt.entrypoints.openai.sse_utils import build_sse_content
+ from sglang.srt.entrypoints.openai.usage_processor import UsageProcessor
+ from sglang.srt.entrypoints.openai.utils import (
++    abort_error_status,
+     cached_tokens_details_from_dict,
+     process_cached_tokens_details_from_ret,
+     process_hidden_states_for_response,
+@@ -87,6 +87,7 @@ from sglang.srt.entrypoints.openai.utils import (
+     process_spec_tokens_details_from_ret,
+     should_include_usage,
+     spec_tokens_details_from_meta_info,
++    to_openai_finish_reason,
+     token_id_to_bytes,
+ )
+ from sglang.srt.entrypoints.request_headers import apply_header_overrides
+@@ -2089,16 +2090,12 @@ class OpenAIServingChat(OpenAIServingBase):
+                     # (timeout, OOM, validation): emit a streaming error chunk.
+                     # A graceful abort (no status_code, e.g. user-initiated via
+                     # /abort_request or session lifecycle cleanup) falls through
+-                    # to the normal chunk path, matching the non-stream behavior
+-                    # in tokenizer_manager._handle_abort_finish_reason.
+-                    if finish_reason_type == "abort" and isinstance(
+-                        finish_reason.get("status_code"), HTTPStatus
+-                    ):
+-                        code = finish_reason["status_code"]
++                    # to the normal chunk path and is reported as "stop".
++                    error_status = abort_error_status(finish_reason)
++                    if error_status is not None:
+                         error = self.create_streaming_error_response(
+-                            finish_reason.get("message", "Generation aborted."),
+-                            code.name,
+-                            code.value,
++                            finish_reason.get("message") or "Generation aborted.",
++                            status_code=error_status,
+                         )
+                         yield f"data: {error}\n\n"
+                         error_aborted = True
+@@ -2149,7 +2146,7 @@ class OpenAIServingChat(OpenAIServingBase):
+                 finish_reason_type = finish_reason_data["type"]
+ 
+                 # Change finish_reason to "tool_calls" if we had tool calls and stopped naturally
+-                final_finish_reason = finish_reason_type
++                final_finish_reason = to_openai_finish_reason(finish_reason_type)
+                 if has_tool_calls.get(idx, False) and finish_reason_type == "stop":
+                     final_finish_reason = "tool_calls"
+ 
+@@ -2338,6 +2335,16 @@ class OpenAIServingChat(OpenAIServingBase):
+         created: int,
+     ) -> ChatCompletionResponse | ORJSONResponse:
+         """Build chat completion response from generation results"""
++        # One choice aborted with an error status fails the whole request.
++        for ret_item in ret:
++            finish_reason = ret_item["meta_info"]["finish_reason"]
++            error_status = abort_error_status(finish_reason)
++            if error_status is not None:
++                return self.create_error_response(
++                    finish_reason.get("message") or "Generation aborted.",
++                    status_code=error_status,
++                )
++
+         if self.chat_encoding_spec == "kimi_k3":
+             ret = [
+                 {
+@@ -2485,7 +2492,11 @@ class OpenAIServingChat(OpenAIServingBase):
+                     ),
+                 ),
+                 logprobs=choice_logprobs,
+-                finish_reason=finish_reason["type"] if finish_reason else None,
++                finish_reason=(
++                    to_openai_finish_reason(finish_reason["type"])
++                    if finish_reason
++                    else None
++                ),
+                 matched_stop=(
+                     finish_reason["matched"]
+                     if finish_reason and "matched" in finish_reason
+diff --git a/python/sglang/srt/entrypoints/openai/serving_completions.py b/python/sglang/srt/entrypoints/openai/serving_completions.py
+index 84ee1ff32467e6e3844a29a56c9ca147e0747b4c..70c93d5b6af67339365252036feb44a9857842f5 100644
+--- a/python/sglang/srt/entrypoints/openai/serving_completions.py
++++ b/python/sglang/srt/entrypoints/openai/serving_completions.py
+@@ -3,7 +3,6 @@ from __future__ import annotations
+ import logging
+ import time
+ from collections.abc import AsyncGenerator
+-from http import HTTPStatus
+ from typing import TYPE_CHECKING, Any
+ 
+ from fastapi import Request
+@@ -21,6 +20,7 @@ from sglang.srt.entrypoints.openai.protocol import (
+ from sglang.srt.entrypoints.openai.serving_base import OpenAIServingBase
+ from sglang.srt.entrypoints.openai.usage_processor import UsageProcessor
+ from sglang.srt.entrypoints.openai.utils import (
++    abort_error_status,
+     cached_tokens_details_from_dict,
+     process_cached_tokens_details_from_ret,
+     process_hidden_states_for_response,
+@@ -29,6 +29,7 @@ from sglang.srt.entrypoints.openai.utils import (
+     process_spec_tokens_details_from_ret,
+     should_include_usage,
+     spec_tokens_details_from_meta_info,
++    to_openai_finish_reason,
+     to_openai_style_logprobs,
+ )
+ from sglang.srt.managers.io_struct import GenerateReqInput
+@@ -359,16 +360,12 @@ class OpenAIServingCompletion(OpenAIServingBase):
+                 # (timeout, OOM, validation): emit a streaming error chunk.
+                 # A graceful abort (no status_code, e.g. user-initiated via
+                 # /abort_request or session lifecycle cleanup) falls through
+-                # to the normal chunk path, matching the non-stream behavior
+-                # in tokenizer_manager._handle_abort_finish_reason.
+-                if finish_reason_type == "abort" and isinstance(
+-                    finish_reason.get("status_code"), HTTPStatus
+-                ):
+-                    code = finish_reason["status_code"]
++                # to the normal chunk path and is reported as "stop".
++                error_status = abort_error_status(finish_reason)
++                if error_status is not None:
+                     error = self.create_streaming_error_response(
+-                        finish_reason.get("message", "Generation aborted."),
+-                        code.name,
+-                        code.value,
++                        finish_reason.get("message") or "Generation aborted.",
++                        status_code=error_status,
+                     )
+                     yield f"data: {error}\n\n"
+                     break
+@@ -377,7 +374,7 @@ class OpenAIServingCompletion(OpenAIServingBase):
+                     index=index,
+                     text=delta,
+                     logprobs=logprobs,
+-                    finish_reason=finish_reason_type,
++                    finish_reason=to_openai_finish_reason(finish_reason_type),
+                     matched_stop=(
+                         finish_reason["matched"]
+                         if finish_reason and "matched" in finish_reason
+@@ -536,8 +533,18 @@ class OpenAIServingCompletion(OpenAIServingBase):
+         request: CompletionRequest,
+         ret: list[dict[str, Any]],
+         created: int,
+-    ) -> CompletionResponse:
++    ) -> CompletionResponse | ORJSONResponse:
+         """Build completion response from generation results"""
++        # One choice aborted with an error status fails the whole request.
++        for ret_item in ret:
++            finish_reason = ret_item["meta_info"]["finish_reason"]
++            error_status = abort_error_status(finish_reason)
++            if error_status is not None:
++                return self.create_error_response(
++                    finish_reason.get("message") or "Generation aborted.",
++                    status_code=error_status,
++                )
++
+         choices = []
+         echo = False
+ 
+@@ -614,7 +621,11 @@ class OpenAIServingCompletion(OpenAIServingBase):
+                 index=idx,
+                 text=text,
+                 logprobs=logprobs,
+-                finish_reason=finish_reason["type"] if finish_reason else None,
++                finish_reason=(
++                    to_openai_finish_reason(finish_reason["type"])
++                    if finish_reason
++                    else None
++                ),
+                 matched_stop=(
+                     finish_reason["matched"]
+                     if finish_reason and "matched" in finish_reason
+diff --git a/python/sglang/srt/entrypoints/openai/utils.py b/python/sglang/srt/entrypoints/openai/utils.py
+index e345059eb7a668c964aafa6c88332ccc2d5cec75..9e742e8a58b28dd2ff69c2279cb87cbe94a95dd5 100644
+--- a/python/sglang/srt/entrypoints/openai/utils.py
++++ b/python/sglang/srt/entrypoints/openai/utils.py
+@@ -264,6 +264,34 @@ def should_include_usage(
+     return include_usage, continuous_usage_stats
+ 
+ 
++def abort_error_status(finish_reason: dict[str, Any] | None) -> int | None:
++    """The HTTP status of an abort that carries an error status, else None.
++
++    ``status_code`` is an ``HTTPStatus`` in-process but a plain int after
++    msgpack IPC, so any int in the 4xx/5xx range counts.
++    """
++    if not finish_reason or finish_reason.get("type") != "abort":
++        return None
++    status = finish_reason.get("status_code")
++    if isinstance(status, int) and not isinstance(status, bool):
++        if 400 <= status < 600:
++            return int(status)
++    return None
++
++
++def to_openai_finish_reason(finish_reason_type: str | None) -> str | None:
++    """Map an engine finish reason onto OpenAI's finish_reason values.
++
++    An abort without an error status (``/abort_request``,
++    ``pause_generation(mode="abort")``, session replacement) is a deliberate stop
++    whose partial output is the result, so it is reported as "stop"; OpenAI
++    defines no "abort". Aborts with an error status never reach a choice.
++    """
++    if finish_reason_type == "abort":
++        return "stop"
++    return finish_reason_type
++
++
+ def process_routed_experts_from_ret(
+     ret_item: dict[str, Any],
+     request: ChatCompletionRequest | CompletionRequest,
+diff --git a/python/sglang/srt/managers/scheduler_components/batch_result_processor.py b/python/sglang/srt/managers/scheduler_components/batch_result_processor.py
+index acec238bac62dd630d151560b9ae17d1a2db9e34..f16b60c56e62f15040f4010304464d8f4cca1a34 100644
+--- a/python/sglang/srt/managers/scheduler_components/batch_result_processor.py
++++ b/python/sglang/srt/managers/scheduler_components/batch_result_processor.py
+@@ -723,11 +723,12 @@ class SchedulerBatchResultProcessor:
+             except ValueError as e:
+                 # Grammar accept_token can raise ValueError if the token is not in the
+                 # grammar. This can happen if the grammar is not set correctly or the
+-                # token is invalid.
+-                logger.error(
+-                    f"Grammar accept_token failed for req {req.rid} with token {next_token_id}: {e}"
++                # token is invalid. It is a server error, as in the PD paths.
++                error_message = f"Grammar accept_token failed for req {req.rid} with token {next_token_id}: {e}"
++                logger.error(error_message)
++                req.to_finish = FINISH_ABORT(
++                    error_message, HTTPStatus.INTERNAL_SERVER_ERROR
+                 )
+-                req.to_finish = FINISH_ABORT()
+         req.grammar.finished = req.finished()
+ 
+     def _apply_chunked_prefill_logprobs(
+@@ -862,12 +863,16 @@ class SchedulerBatchResultProcessor:
+                     break
+         except ValueError as e:
+             # accept_token raises ValueError if the token is not in the grammar
+-            # (misconfigured grammar or invalid token); abort the request.
+-            logger.error(
++            # (misconfigured grammar or invalid token); abort the request with a
++            # server error, as in the PD paths.
++            error_message = (
+                 f"Grammar accept_token failed for req {req.rid} with token "
+                 f"{tokens}: {e}"
+             )
+-            req.to_finish = FINISH_ABORT()
++            logger.error(error_message)
++            req.to_finish = FINISH_ABORT(
++                error_message, HTTPStatus.INTERNAL_SERVER_ERROR
++            )
+         return retained
+ 
+     def advance_grammar_fsm(
+diff --git a/rust/sglang-processor/src/openai/chat.rs b/rust/sglang-processor/src/openai/chat.rs
+index 5d75491054ea0b49fc37a720d12b3c50dcf16d2d..0682c731929e3db403b40c48c921d4f1e9035d9a 100644
+--- a/rust/sglang-processor/src/openai/chat.rs
++++ b/rust/sglang-processor/src/openai/chat.rs
+@@ -13,8 +13,8 @@ use super::request::{
+     format_json_schema, lora_path, one, usage_flags, yes,
+ };
+ use super::wire::{
+-    Payload, Reply, StreamState, is_abort_status, malformed_output_reply, meta_u64, now,
+-    stream_error_event, unary_reply,
++    Payload, Reply, StreamState, abort_error, error_reply, malformed_output_reply, meta_u64, now,
++    openai_finish_reason, stream_error_event, unary_reply,
+ };
+ use super::{OpenAiHeaders, OpenAiSettings, OpenAiTokenizer, Unsupported};
+ use crate::py::python_json;
+@@ -843,6 +843,13 @@ impl ChatResponder {
+         for item in &mut ret {
+             self.report_prompt_tokens(&mut item["meta_info"]);
+         }
++        // One choice aborted with an error status fails the whole request.
++        if let Some((code, message)) = ret
++            .iter()
++            .find_map(|item| abort_error(&item["meta_info"]["finish_reason"]))
++        {
++            return Some(error_reply(message, code));
++        }
+         let mut choices = Vec::with_capacity(ret.len());
+         for (index, item) in ret.iter().enumerate() {
+             let meta = &item["meta_info"];
+@@ -892,7 +899,7 @@ impl ChatResponder {
+                 "index": index,
+                 "message": message,
+                 "logprobs": logprobs,
+-                "finish_reason": finish_reason.get("type"),
++                "finish_reason": finish_reason.get("type").map(openai_finish_reason),
+                 "matched_stop": finish_reason.get("matched"),
+             }));
+         }
+@@ -959,18 +966,10 @@ impl ChatResponder {
+         }
+ 
+         let mut events = Vec::new();
+-        if let Some(finish_type) = &finish_type {
+-            // An abort carrying a status is an error; Python checks for an
+-            // `HTTPStatus`, which `/generate` serializes as its integer.
+-            if finish_type == "abort"
+-                && let Some(code) = finish_reason["status_code"].as_u64()
+-                && is_abort_status(code)
+-            {
+-                let message = finish_reason["message"]
+-                    .as_str()
+-                    .unwrap_or("Generation aborted.");
++        if finish_type.is_some() {
++            if let Some((code, message)) = abort_error(&finish_reason) {
+                 self.stream.stopped = true;
+-                return vec![stream_error_event(message, code as u16)];
++                return vec![stream_error_event(message, code)];
+             }
+             self.finish_reasons.push((index, finish_reason.clone()));
+         }
+@@ -1088,7 +1087,7 @@ impl ChatResponder {
+                 let tool_calls = self.has_tool_calls.contains(&index);
+                 chunk["choices"][0]["finish_reason"] = match reason["type"].as_str() {
+                     Some("stop") if tool_calls => "tool_calls".into(),
+-                    _ => reason["type"].clone(),
++                    _ => openai_finish_reason(&reason["type"]),
+                 };
+                 chunk["choices"][0]["matched_stop"] =
+                     reason.get("matched").cloned().unwrap_or(Value::Null);
+@@ -1321,4 +1320,84 @@ mod tests {
+         assert!(created.len() > 1, "{events:?}");
+         assert!(created.iter().all(|c| *c == json!(1)), "{created:?}");
+     }
++
++    fn responder(stream: bool, n: u64) -> ChatResponder {
++        let body = json!({
++            "model": "m",
++            "messages": [{"role": "user", "content": "hi"}],
++            "stream": stream,
++            "n": n,
++        });
++        lower_chat(
++            &serde_json::to_vec(&body).unwrap(),
++            &OpenAiHeaders::default(),
++            &OpenAiSettings::default(),
++            &ChatModel::default(),
++            |_: &Value| Some(vec![1]),
++            None,
++        )
++        .unwrap()
++        .1
++    }
++
++    fn item(finish: Value) -> Value {
++        json!({"text": "a", "output_ids": [2], "meta_info": {
++            "id": "r", "finish_reason": finish, "prompt_tokens": 1, "completion_tokens": 1,
++        }})
++    }
++
++    /// An abort without an error status is reported as "stop"; one with a
++    /// status is an error with that status, even when another choice finished.
++    #[test]
++    fn unary_abort_is_stop_or_an_error() {
++        let reply = responder(false, 1)
++            .unary(
++                item(json!({"type": "abort", "message": "Abort before prefill"}))
++                    .to_string()
++                    .as_bytes(),
++            )
++            .unwrap();
++        let body: Value = serde_json::from_str(&reply.body).unwrap();
++        assert_eq!(body["choices"][0]["finish_reason"], "stop");
++        assert!(body["choices"][0]["matched_stop"].is_null());
++
++        let ret = json!([
++            item(json!({"type": "stop"})),
++            item(json!({"type": "abort", "message": "Encoder timed out", "status_code": 504})),
++        ]);
++        let reply = responder(false, 2)
++            .unary(ret.to_string().as_bytes())
++            .unwrap();
++        assert_eq!(reply.status, 504);
++        let body: Value = serde_json::from_str(&reply.body).unwrap();
++        assert_eq!(
++            body,
++            json!({"error": {
++                "message": "Encoder timed out",
++                "type": "server_error",
++                "param": null,
++                "code": null,
++            }})
++        );
++    }
++
++    #[test]
++    fn stream_abort_without_status_finishes_with_stop() {
++        let mut responder = responder(true, 1);
++        let mut events = Vec::new();
++        for frame in [
++            item(Value::Null).to_string(),
++            item(json!({"type": "abort", "message": "Abort before prefill"})).to_string(),
++            "[DONE]".into(),
++        ] {
++            events.extend(responder.stream_data(frame.as_bytes()).unwrap());
++        }
++        let reasons: Vec<Value> = events
++            .iter()
++            .filter_map(|event| serde_json::from_str::<Value>(event.strip_prefix("data: ")?).ok())
++            .map(|chunk| chunk["choices"][0]["finish_reason"].clone())
++            .filter(|reason| !reason.is_null())
++            .collect();
++        assert_eq!(reasons, [json!("stop")], "{events:?}");
++    }
+ }
+diff --git a/rust/sglang-processor/src/openai/completions.rs b/rust/sglang-processor/src/openai/completions.rs
+index ac658e20f5c7ca09dfa5a5d01468640f040ee421..03009dea51c6ae50622068f0fc46a8cf32c465a3 100644
+--- a/rust/sglang-processor/src/openai/completions.rs
++++ b/rust/sglang-processor/src/openai/completions.rs
+@@ -11,8 +11,8 @@ use super::request::{
+     format_json_schema, lora_path, one, usage_flags, yes,
+ };
+ use super::wire::{
+-    Payload, Reply, StreamState, is_abort_status, malformed_output_reply, meta_u64, now,
+-    stream_error_event, unary_reply, without_nulls,
++    Payload, Reply, StreamState, abort_error, error_reply, malformed_output_reply, meta_u64, now,
++    openai_finish_reason, stream_error_event, unary_reply, without_nulls,
+ };
+ use super::{OpenAiHeaders, OpenAiSettings, OpenAiTokenizer, Unsupported};
+ 
+@@ -310,6 +310,13 @@ impl CompletionResponder {
+             Value::Array(items) => items,
+             item => vec![item],
+         };
++        // One choice aborted with an error status fails the whole request.
++        if let Some((code, message)) = ret
++            .iter()
++            .find_map(|item| abort_error(&item["meta_info"]["finish_reason"]))
++        {
++            return Some(error_reply(message, code));
++        }
+         let mut choices = Vec::with_capacity(ret.len());
+         for (index, item) in ret.iter().enumerate() {
+             let meta = &item["meta_info"];
+@@ -433,24 +440,16 @@ impl CompletionResponder {
+             }
+         }
+ 
+-        // An abort carrying a status is an error; Python checks for an
+-        // `HTTPStatus`, which `/generate` serializes as its integer.
+-        if finish_reason["type"] == "abort"
+-            && let Some(code) = finish_reason.get("status_code").and_then(Value::as_u64)
+-            && is_abort_status(code)
+-        {
++        if let Some((code, message)) = abort_error(finish_reason) {
+             self.stream.stopped = true;
+-            let message = finish_reason["message"]
+-                .as_str()
+-                .unwrap_or("Generation aborted.");
+-            return Some(stream_error_event(message, code as u16));
++            return Some(stream_error_event(message, code));
+         }
+ 
+         let mut choice = json!({
+             "index": index,
+             "text": delta,
+             "logprobs": logprobs,
+-            "finish_reason": finish_reason.get("type"),
++            "finish_reason": finish_reason.get("type").map(openai_finish_reason),
+             "matched_stop": finish_reason.get("matched"),
+         });
+         if let Some(ids) = token_ids {
+@@ -506,7 +505,7 @@ impl CompletionResponder {
+             "index": index,
+             "text": text,
+             "logprobs": logprobs,
+-            "finish_reason": finish_reason.get("type"),
++            "finish_reason": finish_reason.get("type").map(openai_finish_reason),
+             "matched_stop": finish_reason.get("matched"),
+         });
+         if self.return_token_ids {
+@@ -585,3 +584,74 @@ impl CompletionResponder {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn responder(stream: bool, n: u64) -> CompletionResponder {
++        let body = json!({"model": "m", "prompt": "hi", "stream": stream, "n": n});
++        let settings = OpenAiSettings::default();
++        lower_completion(
++            &serde_json::to_vec(&body).unwrap(),
++            &OpenAiHeaders::default(),
++            &settings,
++            None,
++        )
++        .unwrap()
++        .1
++    }
++
++    fn item(finish: Value) -> Value {
++        json!({"text": "a", "output_ids": [2], "meta_info": {
++            "id": "r", "finish_reason": finish, "prompt_tokens": 1, "completion_tokens": 1,
++        }})
++    }
++
++    /// An abort without an error status is reported as "stop"; one with a
++    /// status is an error with that status, even when another choice finished.
++    #[test]
++    fn unary_abort_is_stop_or_an_error() {
++        let reply = responder(false, 1)
++            .unary(
++                item(json!({"type": "abort", "message": "Aborted."}))
++                    .to_string()
++                    .as_bytes(),
++            )
++            .unwrap();
++        let body: Value = serde_json::from_str(&reply.body).unwrap();
++        assert_eq!(body["choices"][0]["finish_reason"], "stop");
++
++        let ret = json!([
++            item(json!({"type": "stop"})),
++            item(json!({"type": "abort", "message": "Encoder timed out", "status_code": 504})),
++        ]);
++        let reply = responder(false, 2)
++            .unary(ret.to_string().as_bytes())
++            .unwrap();
++        assert_eq!(reply.status, 504);
++        let body: Value = serde_json::from_str(&reply.body).unwrap();
++        assert_eq!(body["error"]["type"], "server_error");
++        assert_eq!(body["error"]["message"], "Encoder timed out");
++    }
++
++    #[test]
++    fn stream_abort_without_status_finishes_with_stop() {
++        let mut responder = responder(true, 1);
++        let mut events = Vec::new();
++        for frame in [
++            item(Value::Null).to_string(),
++            item(json!({"type": "abort", "message": "Aborted."})).to_string(),
++            "[DONE]".into(),
++        ] {
++            events.extend(responder.stream_data(frame.as_bytes()).unwrap());
++        }
++        let reasons: Vec<Value> = events
++            .iter()
++            .filter_map(|event| serde_json::from_str::<Value>(event.strip_prefix("data: ")?).ok())
++            .map(|chunk| chunk["choices"][0]["finish_reason"].clone())
++            .filter(|reason| !reason.is_null())
++            .collect();
++        assert_eq!(reasons, [json!("stop")], "{events:?}");
++    }
++}
+diff --git a/rust/sglang-processor/src/openai/wire.rs b/rust/sglang-processor/src/openai/wire.rs
+index 57c38dfc6f7a2594a32ac12be1f792b177a28518..b0e45813b8b71e2faf048220ac5592736de81d74 100644
+--- a/rust/sglang-processor/src/openai/wire.rs
++++ b/rust/sglang-processor/src/openai/wire.rs
+@@ -68,12 +68,31 @@ pub(super) fn malformed_output_reply() -> Reply {
+     error_reply("Internal server error", 500)
+ }
+ 
+-/// Whether `code` is one of the `HTTPStatus` codes SGLang aborts with.
+-pub(super) fn is_abort_status(code: u64) -> bool {
+-    matches!(
+-        code,
+-        400 | 401 | 403 | 404 | 408 | 413 | 422 | 429 | 500 | 501 | 502 | 503 | 504
+-    )
++/// `utils.abort_error_status`: an abort carrying an error status is an
++/// error, as its status and message.
++pub(super) fn abort_error(finish_reason: &Value) -> Option<(u16, &str)> {
++    if finish_reason["type"] != "abort" {
++        return None;
++    }
++    let code = finish_reason["status_code"].as_u64()?;
++    let code = u16::try_from(code)
++        .ok()
++        .filter(|code| (400..600).contains(code))?;
++    let message = finish_reason["message"]
++        .as_str()
++        .filter(|message| !message.is_empty())
++        .unwrap_or("Generation aborted.");
++    Some((code, message))
++}
++
++/// `utils.to_openai_finish_reason`: an abort without an error status is a
++/// deliberate stop, and OpenAI defines no "abort".
++pub(super) fn openai_finish_reason(finish_type: &Value) -> Value {
++    if finish_type == "abort" {
++        "stop".into()
++    } else {
++        finish_type.clone()
++    }
+ }
+ 
+ /// `UsageProcessor.calculate_token_usage`, dumped as `UsageInfo`.
+diff --git a/rust/sglang-processor/tests/scripts/generate_openai_parity.py b/rust/sglang-processor/tests/scripts/generate_openai_parity.py
+index 30279ce63ae9228ce0d3a1526ad8199d7537dae6..f0f2a3411a471c197d8a0d2314024e339bbe64f1 100644
+--- a/rust/sglang-processor/tests/scripts/generate_openai_parity.py
++++ b/rust/sglang-processor/tests/scripts/generate_openai_parity.py
+@@ -18,7 +18,6 @@ import copy
+ import dataclasses
+ import json
+ import sys
+-from http import HTTPStatus
+ from pathlib import Path
+ from types import SimpleNamespace
+ 
+@@ -165,26 +164,22 @@ def record_frames(engine_url, body):
+ 
+ 
+ def replay(output):
+-    """`generate_request` as the OpenAI handler sees the recorded `/generate` output."""
++    """`generate_request` as the OpenAI handler sees the recorded `/generate` output.
+ 
+-    def internal(output):
+-        for frame in output if isinstance(output, list) else [output]:
+-            reason = frame.get("meta_info", {}).get("finish_reason") or {}
+-            if isinstance(reason.get("status_code"), int):
+-                reason["status_code"] = HTTPStatus(reason["status_code"])
+-        return output
++    Abort statuses stay plain ints, as they reach the handler after msgpack IPC.
++    """
+ 
+     async def generate_request(obj, raw_request=None):
+         if "frames" not in output:
+             body = output["body"]
+             if output["status"] != 200:
+                 raise ValueError(body["error"]["message"])
+-            yield internal(json.loads(json.dumps(body)))
++            yield json.loads(json.dumps(body))
+             return
+         for frame in json.loads(json.dumps(stream_frames(output["frames"], False))):
+             if "error" in frame:
+                 raise ValueError(frame["error"]["message"])
+-            yield internal(frame)
++            yield frame
+ 
+     return generate_request
+ 
+diff --git a/rust/sglang-server/src/api_server/http/openai/chat.rs b/rust/sglang-server/src/api_server/http/openai/chat.rs
+index ec86c0907b09aa821096db77ba9dec9c1f795cad..12534ca73b1315c5aea493b87162c560b08f7285 100644
+--- a/rust/sglang-server/src/api_server/http/openai/chat.rs
++++ b/rust/sglang-server/src/api_server/http/openai/chat.rs
+@@ -1,8 +1,8 @@
+ //! OpenAI Chat Completions endpoint and chat-template preparation.
+ 
+-use std::collections::BTreeMap;
++use std::collections::{BTreeMap, HashSet};
+ use std::convert::Infallible;
+-use std::sync::Arc;
++use std::sync::{Arc, Mutex};
+ 
+ use axum::{
+     Json, Router,
+@@ -32,7 +32,10 @@ use sglang_processor::{
+ 
+ use super::completions::completion_usage;
+ use super::pd_routing::PDRoutingFields;
+-use super::tools::{apply_tool_constraint, chat_delta, chat_finish_reason, parse_chat_tool_calls};
++use super::tools::{
++    apply_tool_constraint, chat_delta, chat_finish_reason, parse_chat_tool_calls,
++    tool_call_finish_reason,
++};
+ use super::{
+     AppState, ChatFormatter, ChatTemplateKwargs, collect_output, contains_media, error_payload,
+     indexed_decode_stream, model_error, openai_error, submit_generation, unix_seconds_u32,
+@@ -478,7 +481,6 @@ pub(super) async fn unary_chat(
+         completion_tokens = completion_tokens.saturating_add(output.completion_tokens);
+         reasoning_tokens = reasoning_tokens.saturating_add(output.reasoning_tokens);
+         let logprobs = want_logprobs.then(|| chat_logprobs(output.extras.as_deref()));
+-        let finish_reason = chat_finish_reason(&output);
+         // Split reasoning markers out of the content first (Python splits
+         // before tool-call parsing too), then parse tool calls on the clean
+         // normal text.
+@@ -495,11 +497,7 @@ pub(super) async fn unary_chat(
+             parallel_tool_calls,
+         )
+         .await;
+-        let finish_reason = if tool_calls.is_some() {
+-            Some(OpenAIFinishReason::ToolCalls)
+-        } else {
+-            finish_reason
+-        };
++        let finish_reason = tool_call_finish_reason(&output, tool_calls.is_some());
+         #[allow(deprecated)]
+         let message = ChatCompletionResponseMessage {
+             content: (!content.is_empty()).then_some(ChatCompletionMessageContent::Text(content)),
+@@ -554,6 +552,10 @@ pub(super) fn chat_event_stream(
+     service_tier: Option<ChatServiceTier>,
+ ) -> impl futures::Stream<Item = String> {
+     let count = submitted.len();
++    // The tool-call stream promotes any stop with tool calls to `tool_calls`;
++    // a choice that ended in an abort did not finish its turn.
++    let aborted = Arc::new(Mutex::new(HashSet::new()));
++    let aborted_in_raw = aborted.clone();
+     let raw = async_stream::stream! {
+         let count = submitted.len();
+         let mut streams = Vec::with_capacity(count);
+@@ -622,6 +624,9 @@ pub(super) fn chat_event_stream(
+             completion_tokens = completion_tokens.saturating_add(output.completion_tokens);
+             reasoning_tokens_by_choice[index] = output.reasoning_tokens;
+             let finish_reason = chat_finish_reason(&output);
++            if output.finish_reason.as_ref().and_then(|reason| reason.kind_name()) == Some("abort") {
++                aborted_in_raw.lock().unwrap().insert(u32::try_from(index).unwrap_or(u32::MAX));
++            }
+             // Split the step's text into (reasoning, normal) deltas when
+             // `--reasoning-parser` is set. Mirrors Python's per-step emission:
+             // reasoning chunk first (logprobs ride it), then the content chunk.
+@@ -761,6 +766,13 @@ pub(super) fn chat_event_stream(
+         futures::pin_mut!(parsed);
+         while let Some(mut item) = parsed.next().await {
+             if let Some(response) = item.data.as_mut() {
++                for choice in &mut response.choices {
++                    if choice.finish_reason == Some(OpenAIFinishReason::ToolCalls)
++                        && aborted.lock().unwrap().contains(&choice.index)
++                    {
++                        choice.finish_reason = Some(OpenAIFinishReason::Stop);
++                    }
++                }
+                 if !parallel_tool_calls {
+                     for choice in &mut response.choices {
+                         let index = choice.index as usize;
+@@ -1316,10 +1328,13 @@ mod tests {
+         use crate::api_server::core::{CoreConfig, CoreHandle, CoreMetadata};
+         use crate::message::config::ServerArgs;
+         use crate::message::request::RequestKind;
++        use crate::message::response::ResponseItem;
+         use crate::tokenizer_manager::wiring::TmEvent;
+         use std::sync::Arc;
+ 
+-        for stream in [false, true] {
++        // An aborted turn's tool calls are not promoted to `tool_calls`.
++        for (stream, abort) in [(false, false), (true, false), (false, true), (true, true)] {
++            let expected = if abort { "stop" } else { "tool_calls" };
+             let args = Arc::new(ServerArgs {
+                 served_model_name: "model".into(),
+                 tool_call_parser: Some("kimi_k3".into()),
+@@ -1364,8 +1379,16 @@ mod tests {
+                         .unwrap()
+                         .contains("lookup")
+                 );
+-                request.sink.try_send(chunk(request.rid.as_str(),
+-                    "<|open|>tools<|sep|><|open|>call tool=\"lookup\" index=\"1\"<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|>", true)).unwrap();
++                let mut item = chunk(
++                    request.rid.as_str(),
++                    "<|open|>tools<|sep|><|open|>call tool=\"lookup\" index=\"1\"<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|>",
++                    true,
++                );
++                if abort && let ResponseItem::Done(output) = &mut item {
++                    output.finish_reason =
++                        Some(serde_json::from_value(serde_json::json!({"type": "abort"})).unwrap());
++                }
++                request.sink.try_send(item).unwrap();
+             });
+             let response = post_json(super::super::routes().with_state(state), "/v1/chat/completions", serde_json::json!({
+                 "model":"model", "stream":stream,
+@@ -1395,19 +1418,19 @@ mod tests {
+                     ),
+                     "{text}"
+                 );
+-                assert!(
+-                    frames
+-                        .iter()
+-                        .any(|frame| frame["choices"][0]["finish_reason"] == "tool_calls"),
+-                    "{text}"
+-                );
++                let finishes: Vec<_> = frames
++                    .iter()
++                    .map(|frame| &frame["choices"][0]["finish_reason"])
++                    .filter(|reason| !reason.is_null())
++                    .collect();
++                assert_eq!(finishes, [expected], "{text}");
+             } else {
+                 let body = body_json(response).await;
+                 assert_eq!(
+                     body["choices"][0]["message"]["tool_calls"][0]["function"]["name"], "lookup",
+                     "{body}"
+                 );
+-                assert_eq!(body["choices"][0]["finish_reason"], "tool_calls");
++                assert_eq!(body["choices"][0]["finish_reason"], expected);
+             }
+             responder.await.unwrap();
+         }
+diff --git a/rust/sglang-server/src/api_server/http/openai/completions.rs b/rust/sglang-server/src/api_server/http/openai/completions.rs
+index b14c45200e8dd1464d205b41f6836bcdf0f94bc8..7d6dc271c38c826d91f1da806e250256b82c06ae 100644
+--- a/rust/sglang-server/src/api_server/http/openai/completions.rs
++++ b/rust/sglang-server/src/api_server/http/openai/completions.rs
+@@ -61,8 +61,8 @@ pub(super) struct SubmittedChoice {
+ #[derive(Debug, Default)]
+ pub(super) struct ChoiceExtensions {
+     matched_stop: Option<serde_json::Value>,
+-    /// Dynamo's enum covers the standard values. Python additionally exposes
+-    /// `abort`; unrecognized scheduler finish types are preserved as well.
++    /// Dynamo's enum covers the standard values; unrecognized scheduler
++    /// finish types are preserved.
+     finish_reason_override: Option<String>,
+ }
+ 
+@@ -438,7 +438,8 @@ fn completion_choice(
+     let reason = output.finish_reason.as_ref();
+     let (finish_reason, finish_reason_override) = {
+         match reason.and_then(|reason| reason.kind_name()) {
+-            Some("stop") => (Some(CompletionFinishReason::Stop), None),
++            // OpenAI defines no "abort"; one without an error status is a stop.
++            Some("stop" | "abort") => (Some(CompletionFinishReason::Stop), None),
+             Some("length") => (Some(CompletionFinishReason::Length), None),
+             Some("content_filter") => (Some(CompletionFinishReason::ContentFilter), None),
+             Some(other) => (None, Some(other.into())),
+@@ -743,13 +744,15 @@ fn append_top_logprobs(
+ mod tests {
+     use super::super::test_utils::{chunk, submitted, with_tokens};
+     use super::{
+-        ChoiceExtensions, PromptSpec, completion_event_stream, completion_logprobs,
+-        completion_prompt_specs, completion_response_value, completion_usage, unary_completion,
++        ChoiceExtensions, PromptSpec, completion_choice, completion_event_stream,
++        completion_logprobs, completion_prompt_specs, completion_response_value, completion_usage,
++        unary_completion,
+     };
++    use crate::api_server::core::CoreOutput;
+     use crate::message::response::ChunkExtras;
+     use axum::http::StatusCode;
+     use dynamo_protocols::types::{
+-        Choice, CreateCompletionRequest, CreateCompletionResponse, Prompt,
++        Choice, CompletionFinishReason, CreateCompletionRequest, CreateCompletionResponse, Prompt,
+     };
+     use futures::StreamExt;
+ 
+@@ -788,6 +791,20 @@ mod tests {
+         assert_eq!(specs, [PromptSpec::TokenIds(vec![1, 2])]);
+     }
+ 
++    #[test]
++    fn abort_without_status_is_reported_as_stop() {
++        let output = CoreOutput {
++            text: "x".into(),
++            finish_reason: Some(
++                serde_json::from_value(serde_json::json!({"type": "abort"})).unwrap(),
++            ),
++            ..Default::default()
++        };
++        let (choice, extension) = completion_choice(0, "x".into(), &output, false, false);
++        assert_eq!(choice.finish_reason, Some(CompletionFinishReason::Stop));
++        assert!(extension.finish_reason_override.is_none());
++    }
++
+     #[test]
+     fn zero_top_logprobs_keeps_selected_token_and_empty_top_map() {
+         let extras = ChunkExtras {
+diff --git a/rust/sglang-server/src/api_server/http/openai/tools.rs b/rust/sglang-server/src/api_server/http/openai/tools.rs
+index 58128ffe878c761683f567a6d5a6459d89dd5592..9b5de389253cc12141d62ba1c02b719fb538d2a9 100644
+--- a/rust/sglang-server/src/api_server/http/openai/tools.rs
++++ b/rust/sglang-server/src/api_server/http/openai/tools.rs
+@@ -122,9 +122,27 @@ pub(super) fn chat_finish_reason(output: &CoreOutput) -> Option<OpenAIFinishReas
+     })
+ }
+ 
++/// A non-streamed choice's `finish_reason`: a natural stop that produced tool
++/// calls is reported as `tool_calls`, as in Python; a length or an aborted
++/// turn keeps its own reason.
++pub(super) fn tool_call_finish_reason(
++    output: &CoreOutput,
++    has_tool_calls: bool,
++) -> Option<OpenAIFinishReason> {
++    let kind = output
++        .finish_reason
++        .as_ref()
++        .and_then(|reason| reason.kind_name());
++    if has_tool_calls && kind == Some("stop") {
++        Some(OpenAIFinishReason::ToolCalls)
++    } else {
++        chat_finish_reason(output)
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+-    use super::{chat_delta, chat_finish_reason, parse_chat_tool_calls};
++    use super::{chat_delta, chat_finish_reason, parse_chat_tool_calls, tool_call_finish_reason};
+     use crate::api_server::core::CoreOutput;
+     use dynamo_parsers::tool_calling::jail::{Annotated, apply_tool_calling_jail};
+     use dynamo_protocols::types::CreateChatCompletionStreamResponse as StreamResponse;
+@@ -417,6 +435,30 @@ mod tests {
+             chat_finish_reason(&output(serde_json::json!({"type": "content_filter"}))),
+             Some(OpenAIFinishReason::ContentFilter)
+         );
++        // Only a natural stop becomes `tool_calls`.
++        for (finish, expected) in [
++            (
++                serde_json::json!({"type": "stop"}),
++                OpenAIFinishReason::ToolCalls,
++            ),
++            (
++                serde_json::json!({"type": "abort"}),
++                OpenAIFinishReason::Stop,
++            ),
++            (
++                serde_json::json!({"type": "length", "length": 8}),
++                OpenAIFinishReason::Length,
++            ),
++        ] {
++            assert_eq!(
++                tool_call_finish_reason(&output(finish), true),
++                Some(expected)
++            );
++        }
++        assert_eq!(
++            tool_call_finish_reason(&output(serde_json::json!({"type": "stop"})), false),
++            Some(OpenAIFinishReason::Stop)
++        );
+         // Unknown kinds (including a bare abort) fall back to `stop`.
+         assert_eq!(
+             chat_finish_reason(&output(serde_json::json!({"type": "abort"}))),
+diff --git a/test/registered/unit/constrained/test_grammar_manager.py b/test/registered/unit/constrained/test_grammar_manager.py
+index 25b989471774b2b9df791bf40c796259d564a100..3ddb958c236d4d31977ee9c9f0532a6acc6409f4 100644
+--- a/test/registered/unit/constrained/test_grammar_manager.py
++++ b/test/registered/unit/constrained/test_grammar_manager.py
+@@ -16,6 +16,7 @@ Usage:
+ 
+ import unittest
+ from concurrent.futures import Future
++from http import HTTPStatus
+ from unittest.mock import MagicMock, patch
+ 
+ from sglang.srt.constrained.base_grammar_backend import (
+@@ -26,6 +27,7 @@ from sglang.srt.constrained.base_grammar_backend import (
+ from sglang.srt.constrained.grammar_manager import GrammarManager
+ from sglang.srt.constrained.reasoner_grammar_backend import ReasonerGrammarObject
+ from sglang.srt.distributed.communication_tags import P2PTag
++from sglang.srt.managers.io_struct import AbortReq
+ from sglang.srt.runtime_context import (
+     SpawnRanks,
+     get_context,
+@@ -404,6 +406,33 @@ class TestAbortRequests(unittest.TestCase):
+         future.cancel.assert_called_once()
+         req.set_finish_with_abort.assert_called_once()
+ 
++    def test_abort_status_matches_running_requests(self):
++        # A deliberate abort carries no error status, so the OpenAI layer
++        # reports a stop; a timeout's SLA message is a 503.
++        for abort_message, expected in (
++            (None, ("Aborted by AbortReq.", None)),
++            (
++                "Request timed out",
++                ("Request timed out", HTTPStatus.SERVICE_UNAVAILABLE),
++            ),
++        ):
++            with self.subTest(abort_message=abort_message):
++                mgr = self._make_mgr_with_queue()
++                req = _make_req(rid="req-123")
++                req.grammar = MagicMock(spec=Future)
++                mgr.grammar_queue.append(req)
++
++                mgr.abort_requests(AbortReq(rid="req-123", abort_message=abort_message))
++                args, kwargs = req.set_finish_with_abort.call_args
++                message = args[0]
++                # set_finish_with_abort defaults to a 400.
++                status = (
++                    args[1]
++                    if len(args) > 1
++                    else kwargs.get("status_code", HTTPStatus.BAD_REQUEST)
++                )
++                self.assertEqual((message, status), expected)
++
+     def test_abort_non_matching_rid(self):
+         mgr = self._make_mgr_with_queue()
+         req = _make_req(rid="req-999")
+diff --git a/test/registered/unit/entrypoints/anthropic/test_serving.py b/test/registered/unit/entrypoints/anthropic/test_serving.py
+index dfe744ab9e6f7d9117c7d0fa59e121007df7c983..3760ed77eca4d92cea40b326bbb6ec0b93817e85 100644
+--- a/test/registered/unit/entrypoints/anthropic/test_serving.py
++++ b/test/registered/unit/entrypoints/anthropic/test_serving.py
+@@ -1673,11 +1673,11 @@ class TestAnthropicServing(unittest.TestCase):
+     def test_stop_reason_content_filter_falls_back_with_warning(self):
+         """Unmapped OpenAI finish_reasons default to 'end_turn' + log a warning.
+ 
+-        ``content_filter`` and ``abort`` have no entry in STOP_REASON_MAP
+-        because Anthropic's ``stop_reason`` Literal (end_turn/max_tokens/
++        ``content_filter`` has no entry in STOP_REASON_MAP because
++        Anthropic's ``stop_reason`` Literal (end_turn/max_tokens/
+         stop_sequence/tool_use) has no perfect target. The fallback must
+         produce a spec-valid stop_reason and a WARNING so operators don't
+-        silently lose the safety/abort signal.
++        silently lose the safety signal.
+         """
+         import logging
+ 
+diff --git a/test/registered/unit/entrypoints/openai/test_serving_chat.py b/test/registered/unit/entrypoints/openai/test_serving_chat.py
+index b716603169089a37983f4c44525042b044683738..fe71f36aea3fbd5a7396f24f7c2ddf0f5fc82f2b 100644
+--- a/test/registered/unit/entrypoints/openai/test_serving_chat.py
++++ b/test/registered/unit/entrypoints/openai/test_serving_chat.py
+@@ -3377,6 +3377,146 @@ class ServingChatTestCase(CustomTestCase):
+             "usage chunk dropped after error abort",
+         )
+ 
++    @staticmethod
++    def _abort_result(finish_reason, text="partial"):
++        return {
++            "text": text,
++            "meta_info": {
++                "id": "chatcmpl-abort",
++                "prompt_tokens": 3,
++                "completion_tokens": 1,
++                "cached_tokens": 0,
++                "finish_reason": finish_reason,
++                "weight_version": "default",
++                "output_token_logprobs": None,
++                "output_top_logprobs": None,
++            },
++            "index": 0,
++        }
++
++    def test_streaming_abort_without_status_reports_stop(self):
++        # OpenAI's finish_reason has no "abort"; a deliberate stop keeps its output.
++        async def _mock_generate():
++            yield self._abort_result({"type": "abort", "message": "Aborted."})
++
++        self.tm.generate_request.return_value = _mock_generate()
++        chunks = self._run_chat_stream(Mock(), self.stream_req)
++
++        self.assertNotIn('"abort"', "".join(chunks))
++        finishes = [
++            choice
++            for c in self._parse_chunks(chunks)
++            for choice in c["choices"]
++            if choice.get("finish_reason") is not None
++        ]
++        self.assertEqual(len(finishes), 1)
++        self.assertEqual(finishes[0]["finish_reason"], "stop")
++        self.assertIsNone(finishes[0]["matched_stop"])
++        self.assertEqual(chunks[-1], "data: [DONE]\n\n")
++
++    def test_streaming_abort_with_int_status_yields_error(self):
++        # After msgpack IPC status_code is a plain int, not an HTTPStatus.
++        async def _mock_generate():
++            yield self._abort_result(
++                {"type": "abort", "status_code": 503, "message": "Queue full"}
++            )
++
++        self.tm.generate_request.return_value = _mock_generate()
++        chunks = self._run_chat_stream(Mock(), self.stream_req)
++
++        self.assertNotIn('"finish_reason": "abort"', "".join(chunks))
++        error = json.loads(chunks[0][len("data: ") :])["error"]
++        self.assertEqual(error["message"], "Queue full")
++        self.assertEqual(error["type"], "service_unavailable_error")
++        self.assertEqual(chunks[-1], "data: [DONE]\n\n")
++
++    def test_non_streaming_abort_with_status_returns_http_error(self):
++        # The tokenizer manager raises for 400/500/503 aborts; other statuses
++        # (EPD encoder 404/408/502/504) reach the response builder. One
++        # failed choice fails the whole request, as a raised abort does.
++        stop = self._abort_result({"type": "stop", "matched": None})
++        for status, error_type in (
++            (504, "server_error"),
++            (408, "invalid_request_error"),
++        ):
++            with self.subTest(status=status):
++                failed = self._abort_result(
++                    {
++                        "type": "abort",
++                        "status_code": status,
++                        "message": "Encoder failed",
++                    }
++                )
++
++                async def _mock_generate():
++                    yield [stop, failed]
++
++                self.tm.generate_request.return_value = _mock_generate()
++                req = ChatCompletionRequest(
++                    model="x", messages=[{"role": "user", "content": "Hi?"}], n=2
++                )
++                response = get_or_create_event_loop().run_until_complete(
++                    self.chat._handle_non_streaming_request(Mock(), req, Mock())
++                )
++
++                self.assertEqual(response.status_code, status)
++                self.assertEqual(
++                    json.loads(response.body),
++                    {
++                        "error": {
++                            "message": "Encoder failed",
++                            "type": error_type,
++                            "param": None,
++                            "code": None,
++                        }
++                    },
++                )
++
++    def test_abort_error_without_message_uses_the_fallback(self):
++        for message in (None, ""):
++            with self.subTest(message=message):
++                ret = [
++                    self._abort_result(
++                        {"type": "abort", "status_code": 504, "message": message}
++                    )
++                ]
++                response = self.chat._build_chat_response(
++                    self.basic_req, ret, created=123
++                )
++                self.assertEqual(response.status_code, 504)
++                self.assertEqual(
++                    json.loads(response.body)["error"]["message"],
++                    "Generation aborted.",
++                )
++
++    def test_non_streaming_abort_without_status_reports_stop(self):
++        ret = [self._abort_result({"type": "abort", "message": "Aborted."})]
++        response = self.chat._build_chat_response(self.basic_req, ret, created=123)
++
++        self.assertEqual(response.choices[0].finish_reason, "stop")
++        self.assertIsNone(response.choices[0].matched_stop)
++        self.assertEqual(response.choices[0].message.content, "partial")
++
++    def test_non_streaming_abort_is_not_promoted_to_tool_calls(self):
++        # Only a natural stop becomes "tool_calls"; an aborted turn did not finish.
++        req = ChatCompletionRequest(
++            model="x",
++            messages=[{"role": "user", "content": "Hi?"}],
++            tools=[{"type": "function", "function": {"name": "f", "parameters": {}}}],
++        )
++        text = '<tool_call>\n{"name": "f", "arguments": {}}\n</tool_call>'
++        for finish_reason, expected in (
++            ({"type": "stop", "matched": None}, "tool_calls"),
++            ({"type": "abort", "message": "Aborted."}, "stop"),
++        ):
++            with self.subTest(finish_reason=finish_reason["type"]):
++                ret = [self._abort_result(dict(finish_reason), text=text)]
++                response = self.chat._build_chat_response(req, ret, created=123)
++                self.assertEqual(response.choices[0].finish_reason, expected)
++                self.assertEqual(
++                    response.choices[0].message.tool_calls[0].function.name, "f"
++                )
++
+     def _run_chat_stream(self, adapted_request, req):
+         async def run_stream():
+             chunks = []
+diff --git a/test/registered/unit/entrypoints/openai/test_serving_completions.py b/test/registered/unit/entrypoints/openai/test_serving_completions.py
+index bb2e314908da97641660d0c79925f12d29e06bc1..a133f6d201f0793080e59b3d27a9e6f7242a4d4f 100644
+--- a/test/registered/unit/entrypoints/openai/test_serving_completions.py
++++ b/test/registered/unit/entrypoints/openai/test_serving_completions.py
+@@ -321,6 +321,95 @@ class ServingCompletionTestCase(unittest.TestCase):
+         self.assertGreaterEqual(len(chunks), 2)
+         self.assertIn("error", chunks[0])
+ 
++    def _abort_ret(self, finish_reason):
++        return [
++            {
++                "text": "partial",
++                "meta_info": {
++                    "id": "cmpl-test",
++                    "prompt_tokens": 3,
++                    "completion_tokens": 1,
++                    "finish_reason": finish_reason,
++                    "weight_version": "v1",
++                },
++            }
++        ]
++
++    def test_streaming_abort_with_int_status_yields_error(self):
++        """After msgpack IPC the abort status is a plain int; it is still an error."""
++
++        async def _mock_generate_abort(*args, **kwargs):
++            yield {
++                "text": "Partial ",
++                "meta_info": {
++                    "id": "cmpl-test",
++                    "prompt_tokens": 10,
++                    "completion_tokens": 2,
++                    "cached_tokens": 0,
++                    "finish_reason": {
++                        "type": "abort",
++                        "status_code": 503,
++                        "message": "Overloaded",
++                    },
++                },
++                "index": 0,
++            }
++
++        self.sc.tokenizer_manager.generate_request = _mock_generate_abort
++        req = CompletionRequest(model="x", prompt="Hello", max_tokens=8, stream=True)
++        adapted_request, _ = self.sc._convert_to_internal_request(req)
++
++        async def run_stream():
++            return [
++                chunk
++                async for chunk in self.sc._generate_completion_stream(
++                    adapted_request, req, self.fastapi_request
++                )
++            ]
++
++        chunks = get_or_create_event_loop().run_until_complete(run_stream())
++        error = json.loads(chunks[0][len("data: ") :])["error"]
++        self.assertEqual(error["message"], "Overloaded")
++        self.assertEqual(error["type"], "service_unavailable_error")
++        self.assertEqual(chunks[-1], "data: [DONE]\n\n")
++        self.assertFalse(any('"finish_reason"' in c for c in chunks))
++
++    def test_non_streaming_abort_with_status_returns_http_error(self):
++        # Statuses the tokenizer manager does not raise for (EPD encoder
++        # 404/408/502/504) reach the builder; one failed choice fails the request.
++        (stop,) = self._abort_ret({"type": "stop", "matched": None})
++        (failed,) = self._abort_ret(
++            {"type": "abort", "status_code": 504, "message": "Encoder timed out"}
++        )
++
++        async def _mock_generate(*args, **kwargs):
++            yield [stop, failed]
++
++        self.sc.tokenizer_manager.generate_request = _mock_generate
++        req = CompletionRequest(model="x", prompt="Hello", max_tokens=8, n=2)
++        adapted_request, _ = self.sc._convert_to_internal_request(req)
++        response = get_or_create_event_loop().run_until_complete(
++            self.sc._handle_non_streaming_request(
++                adapted_request, req, self.fastapi_request
++            )
++        )
++
++        self.assertEqual(response.status_code, 504)
++        error = json.loads(response.body)["error"]
++        self.assertEqual(error["message"], "Encoder timed out")
++        self.assertEqual(error["type"], "server_error")
++
++    def test_non_streaming_abort_without_status_reports_stop(self):
++        """An abort without an error status keeps its partial output as a stop."""
++        req = CompletionRequest(model="x", prompt="Hello", max_tokens=8)
++        response = self.sc._build_completion_response(
++            req, self._abort_ret({"type": "abort", "message": "Aborted."}), 123
++        )
++
++        self.assertEqual(response.choices[0].finish_reason, "stop")
++        self.assertIsNone(response.choices[0].matched_stop)
++        self.assertEqual(response.choices[0].text, "partial")
++
+     def test_echo_with_zero_logprobs_streaming(self):
+         """logprobs=0 requests token logprobs without top-logprobs, so the
+         scheduler never fills the top-logprob keys. The echo branch must not
+diff --git a/test/registered/unit/managers/test_batch_result_processor_spec_grammar.py b/test/registered/unit/managers/test_batch_result_processor_spec_grammar.py
+index 237827fa81c0df947dddf6cdb51cd9e4019caec2..7dbdb40f2801719856e34a1e65e5379c6e742be9 100644
+--- a/test/registered/unit/managers/test_batch_result_processor_spec_grammar.py
++++ b/test/registered/unit/managers/test_batch_result_processor_spec_grammar.py
+@@ -1,11 +1,13 @@
+ """Unit tests for Spec V2 grammar truncation in _resolve_spec_v2_tokens.
+ 
+ The grammar-constrained spec path stops accepting at the grammar-terminating
+-token, so the over-drafted suffix is never committed to KV nor emitted.
++token, so the over-drafted suffix is never committed to KV nor emitted. A token
++the grammar rejects aborts the request with a server error.
+ """
+ 
+ import unittest
+ from dataclasses import replace
++from http import HTTPStatus
+ from types import SimpleNamespace
+ from unittest.mock import MagicMock
+ 
+@@ -157,6 +159,30 @@ def _commit_disagg_handoff(
+     queue._commit_transfer_to_req(decode_req)
+ 
+ 
++class _RejectingGrammar(_FakeGrammar):
++    def accept_token(self, token_id: int):
++        raise ValueError(f"token {token_id} not allowed")
++
++
++class TestGrammarRejection(CustomTestCase):
++    def test_rejected_token_aborts_with_server_error(self):
++        # Matches the PD paths, so the OpenAI layer reports an error rather
++        # than a successful stop.
++        proc = _make_processor()
++        for advance in (
++            lambda req: proc._accept_grammar_tokens(req, 7),
++            lambda req: proc._apply_prefill_grammar(req=req, next_token_id=7),
++        ):
++            req = _make_req(terminate_after=99)
++            req.grammar = _RejectingGrammar(terminate_after=99)
++            with self.assertLogs(level="ERROR"):
++                advance(req)
++            finish = req.to_finish.to_json()
++            self.assertEqual(finish["type"], "abort")
++            self.assertEqual(finish["status_code"], HTTPStatus.INTERNAL_SERVER_ERROR)
++            self.assertIn("Grammar accept_token failed", finish["message"])
++
++
+ class TestSpecV2GrammarTruncation(CustomTestCase):
+     def test_resolve_truncates_after_grammar_completion(self):
+         req = _make_req(terminate_after=2)

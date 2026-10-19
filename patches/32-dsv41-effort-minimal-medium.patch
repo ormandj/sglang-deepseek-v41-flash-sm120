@@ -1,0 +1,216 @@
+diff --git a/docs/cookbook/autoregressive/DeepSeek/DeepSeek-V4_1.mdx b/docs/cookbook/autoregressive/DeepSeek/DeepSeek-V4_1.mdx
+index ef885e89b4a1b3a281990a034819b38343008c68..05688a5015056f641384b951425aa9949905a2af 100644
+--- a/docs/cookbook/autoregressive/DeepSeek/DeepSeek-V4_1.mdx
++++ b/docs/cookbook/autoregressive/DeepSeek/DeepSeek-V4_1.mdx
+@@ -147,7 +147,7 @@ print("Answer:", msg.content)
+ 
+ </Accordion>
+ 
+-On the request, `reasoning_effort` accepts the tiers `low` (50), `high` (75), `xhigh` (75), and `max` (100), or a float in `[0.0, 0.99]` that maps onto the model's 1–100 budget. An integer budget is reachable only through `chat_template_kwargs.reasoning_effort`, and that route does not switch thinking on by itself — pair it with `chat_template_kwargs.thinking`. `none` turns thinking off. The remaining OpenAI tiers, which have no V4.1 counterpart (`minimal`, `medium`), log a warning and fall back to the server-side default rather than erroring; that default is `high` (75), and `SGLANG_DSV41_REASONING_EFFORT` overrides it.
++On the request, `reasoning_effort` accepts the tiers `minimal` (50), `low` (50), `medium` (62), `high` (75), `xhigh` (75), and `max` (100), or a float in `[0.0, 0.99]` that maps onto the model's 1–100 budget. An integer budget is reachable only through `chat_template_kwargs.reasoning_effort`, and that route does not switch thinking on by itself — pair it with `chat_template_kwargs.thinking`. `none` turns thinking off. V4.1's named budgets are `low`, `high` and `max` (with `xhigh` an alias of `high`), so the OpenAI tiers `minimal` and `medium` map to budgets: `minimal` to the lowest named budget, the same as `low` (as Harmony maps `minimal` to `low`), and `medium` to 62, the midpoint of `low` and `high` rounded down. Any other value logs a warning and falls back to the server-side default rather than erroring; that default is `high` (75), and `SGLANG_DSV41_REASONING_EFFORT` overrides it.
+ 
+ ### 3.2 Tool Calling
+ 
+diff --git a/docs/docs/references/environment_variables.mdx b/docs/docs/references/environment_variables.mdx
+index f2c045d564cbeb05827d6b75adfeec8707bb0e49..ada7eb10b5f8d9c5f9b4aaa9734d98baa0d7ef7c 100644
+--- a/docs/docs/references/environment_variables.mdx
++++ b/docs/docs/references/environment_variables.mdx
+@@ -767,7 +767,7 @@ SGLang supports various environment variables that can be used to configure its
+     </tr>
+     <tr>
+       <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><code>SGLANG_DSV41_REASONING_EFFORT</code></td>
+-      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Default <code>reasoning_effort</code> for the DeepSeek-V4.1 chat encoder when a request does not set it: one of <code>low</code>, <code>high</code>, <code>xhigh</code>, <code>max</code>, or an integer budget in [1, 100]. Unset means the encoder default <code>high</code>.</td>
++      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Default <code>reasoning_effort</code> for the DeepSeek-V4.1 chat encoder when a request does not set it: one of <code>minimal</code> (50), <code>low</code> (50), <code>medium</code> (62), <code>high</code> (75), <code>xhigh</code> (75), <code>max</code> (100), or an integer budget in [1, 100]. Unset means the encoder default <code>high</code>.</td>
+       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}><code>""</code></td>
+     </tr>
+     <tr>
+diff --git a/python/sglang/srt/entrypoints/openai/chat_encoding.py b/python/sglang/srt/entrypoints/openai/chat_encoding.py
+index c5c65d561d324ad69b5c7b995a6b9d7ea6eea0e5..62c7177fe26b70d9f2575a1444081be0d211a256 100644
+--- a/python/sglang/srt/entrypoints/openai/chat_encoding.py
++++ b/python/sglang/srt/entrypoints/openai/chat_encoding.py
+@@ -154,11 +154,19 @@ def resolve_chat_encoding_spec(
+     return None
+ 
+ 
++# OpenAI reasoning_effort levels the V4.1 encoder has no name for, as budgets
++# on its 1-100 scale, where it names low=50, high=75 and max=100. "minimal"
++# is the lowest named budget, as Harmony maps minimal to low; "medium" is the
++# midpoint of low and high, rounded down.
++_DSV41_OPENAI_EFFORT_BUDGETS = {"minimal": 50, "medium": 62}
++
++
+ def parse_dsv41_reasoning_effort(value: Any) -> Union[str, int, None]:
+     """Map an API ``reasoning_effort`` onto what the V4.1 encoder accepts.
+ 
+-    An int budget only reaches here through ``chat_template_kwargs``; None
+-    means unsupported, and the caller applies its default.
++    An int input only arrives through ``chat_template_kwargs``; "minimal" and
++    "medium" are returned as int budgets. None means unsupported, and the
++    caller applies its default.
+     """
+     if isinstance(value, bool):
+         return None
+@@ -168,6 +176,8 @@ def parse_dsv41_reasoning_effort(value: Any) -> Union[str, int, None]:
+         return max(1, round(value * 100)) if 0.0 <= value <= 0.99 else None
+     if value in encoding_dsv41.REASONING_EFFORT_MAPPINGS:
+         return value
++    if value in _DSV41_OPENAI_EFFORT_BUDGETS:
++        return _DSV41_OPENAI_EFFORT_BUDGETS[value]
+     return None
+ 
+ 
+@@ -199,7 +209,8 @@ def default_dsv41_reasoning_effort_from_env(raw: Optional[str]) -> Union[str, in
+     if effort is None:
+         raise ValueError(
+             f"Invalid SGLANG_DSV41_REASONING_EFFORT={raw!r}; expected one of "
+-            f"{list(encoding_dsv41.REASONING_EFFORT_MAPPINGS)} or an integer in [1, 100]"
++            f"{[*encoding_dsv41.REASONING_EFFORT_MAPPINGS, *_DSV41_OPENAI_EFFORT_BUDGETS]} "
++            "or an integer in [1, 100]"
+         )
+     return effort
+ 
+diff --git a/python/sglang/srt/entrypoints/openai/serving_chat.py b/python/sglang/srt/entrypoints/openai/serving_chat.py
+index 1d2e707d58cabc752b9dc41418aee9a3e3d52d15..d9479311d11cf7b1ef052b9b34918a31d6b7b828 100644
+--- a/python/sglang/srt/entrypoints/openai/serving_chat.py
++++ b/python/sglang/srt/entrypoints/openai/serving_chat.py
+@@ -761,8 +761,9 @@ class OpenAIServingChat(OpenAIServingBase):
+         if value is not None and value != "none":
+             logger.warning(
+                 "DeepSeek-V4.1 does not support reasoning_effort=%r; using the "
+-                "default %r (low/high/xhigh/max, a float in [0, 0.99], or an "
+-                "integer budget in [1, 100] via chat_template_kwargs are accepted).",
++                "default %r (minimal/low/medium/high/xhigh/max, a float in [0, 0.99], "
++                "or an integer budget in [1, 100] via chat_template_kwargs are "
++                "accepted).",
+                 value,
+                 self._dsv41_default_reasoning_effort,
+             )
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index 0cd8a3e7831d456068d89014c1838dfe7f98344b..364b67223a34751c77357c1c26acc265650e56d0 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -1649,7 +1649,8 @@ class Envs:
+     # Flash-0731 also accepts "low"; the active profile is checkpoint-resolved.
+     SGLANG_DSV4_REASONING_EFFORT = EnvStr("")
+     # DeepSeek-V4.1 default when a request carries no reasoning_effort: one of
+-    # low/high/xhigh/max or an integer budget in [1, 100]; unset -> the encoder default.
++    # minimal/low/medium/high/xhigh/max or an integer budget in [1, 100]; unset ->
++    # the encoder default.
+     SGLANG_DSV41_REASONING_EFFORT = EnvStr(None)
+     # Quantize the SWA fp8 KV cache from bf16-rounded values (matches
+     # trainer-side QAT and the DSA-CP path) instead of fp32 registers.
+diff --git a/rust/sglang-processor/src/render/models/deepseek_v41.rs b/rust/sglang-processor/src/render/models/deepseek_v41.rs
+index d0017658a2a57e3f0d36f5c9cc88415dfece2044..6d9af6dfe996b528fec96e53d7065749efc38351 100644
+--- a/rust/sglang-processor/src/render/models/deepseek_v41.rs
++++ b/rust/sglang-processor/src/render/models/deepseek_v41.rs
+@@ -145,12 +145,14 @@ fn pydantic_effort(effort: &Value) -> Value {
+     number.map_or_else(|| effort.clone(), Value::from)
+ }
+ 
+-/// `chat_encoding.parse_dsv41_reasoning_effort`, as the encoder's budget;
++/// `chat_encoding.parse_dsv41_reasoning_effort`, as the encoder's budget
++/// (OpenAI's `minimal` and `medium` map to 50 and 62);
+ /// integers only arrive verbatim through `chat_template_kwargs`.
+ fn effort_budget(effort: &Value) -> Option<u8> {
+     match effort {
+         Value::String(tier) => match tier.as_str() {
+-            "low" => Some(50),
++            "minimal" | "low" => Some(50),
++            "medium" => Some(62),
+             "high" | "xhigh" => Some(75),
+             "max" => Some(100),
+             _ => None,
+@@ -165,3 +167,24 @@ fn effort_budget(effort: &Value) -> Option<u8> {
+         _ => None,
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    /// Request and `SGLANG_DSV41_REASONING_EFFORT` values both resolve here.
++    #[test]
++    fn openai_effort_levels_map_to_budgets() {
++        for (effort, budget) in [
++            ("minimal", 50),
++            ("low", 50),
++            ("medium", 62),
++            ("high", 75),
++            ("xhigh", 75),
++            ("max", 100),
++        ] {
++            assert_eq!(effort_budget(&json!(effort)), Some(budget), "{effort}");
++        }
++        assert_eq!(effort_budget(&json!("none")), None);
++    }
++}
+diff --git a/rust/sglang-processor/tests/fixtures/parity/deepseek-v4.1-flash.json b/rust/sglang-processor/tests/fixtures/parity/deepseek-v4.1-flash.json
+index 4eac5e5b504185158653ffa279fdb015be899951..2ecc503e7da72ab93a6be74bfdde93f0d9cf0f4a 100644
+--- a/rust/sglang-processor/tests/fixtures/parity/deepseek-v4.1-flash.json
++++ b/rust/sglang-processor/tests/fixtures/parity/deepseek-v4.1-flash.json
+@@ -37,8 +37,9 @@
+ {"name":"tool_float_values","request":{"model":"m","messages":[{"role":"user","content":"Hi"}],"tools":[{"type":"function","function":{"name":"foo","parameters":{"type":"object","properties":{"a":{"type":"number","default":1e-06},"b":{"default":1e+16},"c":{"default":2.5},"d":{"default":100.0}}}}}]},"prompt":"<｜begin▁of▁sentence｜><｜System｜>\n\n## Tools\n\nYou have access to a set of tools to help answer the user's question. You can invoke tools by writing a \"<｜DSML｜ calls>\" block like the following:\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"$TOOL_NAME\">\n<｜DSML｜ parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</｜DSML｜ parameter>\n...\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"$TOOL_NAME2\">\n...\n</｜DSML｜ invoke>\n</｜DSML｜ calls>\n\nString parameters should be specified as is and set `string=\"true\"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string=\"false\"`.\n\nIf thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.\n\nOtherwise, output directly after </think> with tool calls or final response.\n\n### Available Tool Schemas\n\n{\"name\": \"foo\", \"parameters\": {\"type\": \"object\", \"properties\": {\"a\": {\"type\": \"number\", \"default\": 1e-06}, \"b\": {\"default\": 1e+16}, \"c\": {\"default\": 2.5}, \"d\": {\"default\": 100.0}}}}\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n<｜User｜>Hi<｜Assistant｜></think>","token_count":289,"token_sha256":"bccbf4eba3f4e98539d1bdf5efcf598c22084868b797f76bc5de11e1c11b11e6"},
+ {"name":"history_float_arguments","request":{"model":"m","messages":[{"role":"user","content":"Hi"},{"role":"assistant","content":null,"tool_calls":[{"id":"a","type":"function","function":{"name":"foo","arguments":"{\"x\": 0.000001, \"y\": 1e16, \"z\": 3.0}"}}]},{"role":"tool","tool_call_id":"a","content":"r"},{"role":"user","content":"Again"}]},"prompt":"<｜begin▁of▁sentence｜><｜User｜>Hi<｜Assistant｜></think>\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"foo\">\n<｜DSML｜ parameter name=\"x\" string=\"false\">1e-06</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"y\" string=\"false\">1e+16</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"z\" string=\"false\">3.0</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜><｜User｜><tool_result>r</tool_result>\n\nAgain<｜Assistant｜></think>","token_count":95,"token_sha256":"ea02f879dcc43c4922d22d3f079b83045463f62790909f25317c778cff3bd182"},
+ {"name":"effort_low","request":{"model":"m","messages":[{"role":"user","content":"Hi"}],"reasoning_effort":"low"},"prompt":"<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Hi<｜Assistant｜><think>","token_count":31,"token_sha256":"4add8297343cd581f7ded6ecba6c06c5f70f402802db9a021d469efdc2138a15"},
++{"name":"effort_minimal","request":{"model":"m","messages":[{"role":"user","content":"Hi"}],"reasoning_effort":"minimal"},"prompt":"<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Hi<｜Assistant｜><think>","token_count":31,"token_sha256":"4add8297343cd581f7ded6ecba6c06c5f70f402802db9a021d469efdc2138a15"},
+ {"name":"effort_xhigh","request":{"model":"m","messages":[{"role":"user","content":"Hi"}],"reasoning_effort":"xhigh"},"prompt":"<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Hi<｜Assistant｜><think>","token_count":31,"token_sha256":"54a0e744ad23d9a75775f4a71851980f51a778a1011d73de2f370b1d5499a5b7"},
+-{"name":"effort_medium","request":{"model":"m","messages":[{"role":"user","content":"Hi"}],"reasoning_effort":"medium"},"prompt":"<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Hi<｜Assistant｜><think>","token_count":31,"token_sha256":"54a0e744ad23d9a75775f4a71851980f51a778a1011d73de2f370b1d5499a5b7"},
++{"name":"effort_medium","request":{"model":"m","messages":[{"role":"user","content":"Hi"}],"reasoning_effort":"medium"},"prompt":"<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 62 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Hi<｜Assistant｜><think>","token_count":31,"token_sha256":"37f733897652a0c07f20210d565c0286934cb58eece6ddddb1a230516907e888"},
+ {"name":"effort_float","request":{"model":"m","messages":[{"role":"user","content":"Hi"}],"reasoning_effort":0.33},"prompt":"<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 33 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Hi<｜Assistant｜><think>","token_count":31,"token_sha256":"e9d5a7b1070619f11034eefab1ab6f2f8a73b3566934b6a868033547e75763b8"},
+ {"name":"effort_zero","request":{"model":"m","messages":[{"role":"user","content":"Hi"}],"reasoning_effort":0},"prompt":"<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 1 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Hi<｜Assistant｜><think>","token_count":31,"token_sha256":"2350f65f050404c73daf902f5f532ef087deaf7334d6a2e50ac4d2c4f1fd73f2"},
+ {"name":"effort_numeric_string","request":{"model":"m","messages":[{"role":"user","content":"Hi"}],"reasoning_effort":"0.5"},"prompt":"<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Hi<｜Assistant｜><think>","token_count":31,"token_sha256":"4add8297343cd581f7ded6ecba6c06c5f70f402802db9a021d469efdc2138a15"},
+diff --git a/test/registered/unit/entrypoints/openai/test_serving_chat.py b/test/registered/unit/entrypoints/openai/test_serving_chat.py
+index b281f76a2217940ad47413540d09a02709cf0c90..03add84a8b1402bf1dbccd910f2a3b7eb1a353b6 100644
+--- a/test/registered/unit/entrypoints/openai/test_serving_chat.py
++++ b/test/registered/unit/entrypoints/openai/test_serving_chat.py
+@@ -2993,6 +2993,49 @@ class ServingChatTestCase(CustomTestCase):
+         with self.assertRaisesRegex(ValueError, "dsv4_reasoning_effort_profile"):
+             OpenAIServingChat(tm, TemplateManager())
+ 
++    def test_dsv41_openai_effort_levels_map_to_budgets(self):
++        # "minimal" and "medium" are OpenAI levels the V4.1 encoder does not
++        # name; they map to budgets instead of falling back to the default.
++        from sglang.srt.entrypoints.openai import chat_encoding
++
++        expected = {
++            "minimal": 50,
++            "low": "low",
++            "medium": 62,
++            "high": "high",
++            "xhigh": "xhigh",
++            "max": "max",
++        }
++        for effort, parsed in expected.items():
++            with self.subTest(effort=effort):
++                self.assertEqual(
++                    chat_encoding.parse_dsv41_reasoning_effort(effort), parsed
++                )
++        self.assertIsNone(chat_encoding.parse_dsv41_reasoning_effort("none"))
++        for effort, budget in (("minimal", 50), ("medium", 62)):
++            with self.subTest(env_effort=effort):
++                self.assertEqual(
++                    chat_encoding.default_dsv41_reasoning_effort_from_env(effort),
++                    budget,
++                )
++
++        self.template_manager.chat_template_name = None
++        self.chat.chat_encoding_spec = "dsv41"
++        for effort, budget in (("minimal", 50), ("medium", 62)):
++            with self.subTest(request_effort=effort):
++                self.tm.tokenizer.encode.reset_mock()
++                request = ChatCompletionRequest(
++                    model="x",
++                    messages=[{"role": "user", "content": "hi"}],
++                    reasoning_effort=effort,
++                )
++                with patch("sglang.srt.entrypoints.openai.serving_chat.logger") as log:
++                    self.chat._process_messages(request, is_multimodal=False)
++                log.warning.assert_not_called()
++                prompt = self.tm.tokenizer.encode.call_args.args[0]
++                self.assertIn(f"Reasoning Effort: {budget} ", prompt)
++                self.assertTrue(prompt.endswith("<｜Assistant｜><think>"))
++
+     def test_dsv41_rejects_image_placeholder_in_text(self):
+         from sglang.srt.entrypoints.openai import encoding_dsv41
+ 
