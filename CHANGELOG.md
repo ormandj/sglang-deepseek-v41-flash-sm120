@@ -1,26 +1,37 @@
 # Changelog
 
-## v0.4.2-rc.2
+## v0.4.2 (stable; 2026-10-19)
 
-0.4.2-rc.1 with the carried pull requests at their final review revisions. Same stack.
-
-### Changes
-
-- Patch 13 (sgl-project/sglang#42985): unchanged serving behavior; two of SGLang's layer-boundary unit tests give their stub layers the overlap gates.
-- Patch 16 (#42867): the opt-in BF16 LM-head path falls back to `torch.matmul` when Triton is unavailable.
-- Patches 09 (#42712) and 11 (#42865): STS fitting validates its mask and warns on shards collected without one; the MXFP8 skinny GEMM's counter contract and tests are tightened.
-
-## v0.4.2-rc.1
-
-0.4.1 rebuilt on current upstream sources. The model and the runtime configuration are unchanged.
+0.4.1 rebuilt on current upstream sources, with faster prefill. The model and the runtime configuration are unchanged.
 
 ### Changes
 
 - SGLang `main` of 2026-10-19 (`62cee1b15c`) with 32 patches, FlashInfer `main` of 2026-10-19 (`f64b4ba876`, version 0.7.2) with one patch, sgl-project DeepGEMM `release/v0.2.3` (`d6fcb32f19`, the 0.2.3 SGLang `main` requires) and Triton `release/3.8.x` with its backport (unchanged), on the `lmsysorg/sglang` CUDA 13 nightly of 2026-10-19.
 - Now upstream and no longer patched: the FlashInfer PCIe-IPC all-reduce tuner fixes (flashinfer-ai/flashinfer#6401).
-- SGLang `main` carries image inputs through encoder SWA bounded replay on CUDA (sgl-project/sglang#45048); patch 24 (#43241) now only warms up the image path there.
-- The prefill indexer's score-tile budget (patch 25, #43376) uses free memory during breakable prefill CUDA-graph replay too; only graph capture uses the static budget.
+- The wide-prefill mHC statistics overlap (patch 13, [sgl-project/sglang#42985](https://github.com/sgl-project/sglang/pull/42985)) now also covers the MoE sublayer; since 0.4.0 only the attention sublayer overlapped.
+- The prefill indexer's score-tile budget (patch 25, [#43376](https://github.com/sgl-project/sglang/pull/43376)) uses free memory during breakable prefill CUDA-graph replay; only graph capture uses the static budget.
+- SGLang `main` carries image inputs through encoder SWA bounded replay on CUDA (#45048); patch 24 ([#43241](https://github.com/sgl-project/sglang/pull/43241)) now only warms up the image path there.
 - The carried pull requests that needed it are updated on SGLang `main` (#42712, #42718, #42865, #42867, #42985, #43008, #43241, #43376).
+
+### Upgrade
+
+Start the `v0.4.2` image with the 0.4.1 launcher settings and a new kernel cache directory. The first start compiles kernels for the new FlashInfer, DeepGEMM and SGLang (about 40 minutes on the hardware below) and measures the speculative-decoding cost table (about 7 minutes after warmup); later starts reuse both.
+
+### Measurements
+
+Validation runs on four RTX PRO 6000 Blackwell Max-Q GPUs at 250 W each, with the privately built image of this release, at the model card's sampling (temperature 1.0, `top_p` 1.0, thinking with `reasoning_effort` high), three repetitions per cell.
+
+| Concurrency | C1 | C2 | C4 | C8 | C16 |
+|---|---|---|---|---|---|
+| Decode output tok/s | 202 | 322 | 497 | 674 | 1,051 |
+| Accepted tokens per step | 2.38 | 2.22 | 2.18 | 2.04 | 2.14 |
+
+- Cold prefill: about 14.1K, 14.9K and 14.7K prompt tok/s at 8K, 32K and 128K tokens, 10%, 13% and 14% above 0.4.1, with prompts sized to whole 8,192-token prefill chunks.
+- Long context at C1: 86, 84-86 and 81-83 decode steps/s at 0, 32K and 128K tokens of context (two runs).
+- Device KV pool: 2,931,712 tokens across requests; one request may use up to 1,048,576.
+- Quality: teacher-forced log-probabilities within 0.08 nats (worst prompt mean) and 0.58 nats (maximum) of a full prefill. No repetition loops in 64 sampled reasoning streams at 4 and 16 concurrent requests, or in 346 requests over 10 minutes at 8 concurrent requests.
+
+Against 0.4.1 at the same settings, decode and long-context step rates are within the run-to-run noise. At 32K context and one request, output is 6-9% lower in both runs, from fewer accepted draft tokens per step at an unchanged step rate. These are controlled measurements and do not necessarily represent real-world performance. Output rates include reasoning tokens and depend on speculative acceptance.
 
 ## v0.4.1 (stable; 2026-10-19)
 
