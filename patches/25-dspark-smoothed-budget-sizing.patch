@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
-index 65b07fc4a5..b10958c50c 100644
+index 24b98a7819..34c609f59c 100644
 --- a/python/sglang/srt/environ.py
 +++ b/python/sglang/srt/environ.py
-@@ -534,6 +534,11 @@ class Envs:
+@@ -545,6 +545,11 @@ class Envs:
      # ===================================================================
      # DSpark speculative decoding
      # ===================================================================
@@ -15,10 +15,10 @@ index 65b07fc4a5..b10958c50c 100644
      SGLANG_DSPARK_DEBUG_CONFIDENCE_METRICS = EnvBool(False)
      SGLANG_DSPARK_DEBUG_DUMP = EnvTuple(tuple())
 diff --git a/python/sglang/srt/speculative/dspark_components/dspark_planner.py b/python/sglang/srt/speculative/dspark_components/dspark_planner.py
-index c66fef358f..97d8cecf5c 100644
+index 70f15879f1..12ab263fdb 100644
 --- a/python/sglang/srt/speculative/dspark_components/dspark_planner.py
 +++ b/python/sglang/srt/speculative/dspark_components/dspark_planner.py
-@@ -303,6 +303,10 @@ class DSparkVerifyPlanner:
+@@ -311,6 +311,10 @@ class DSparkVerifyPlanner:
          all_gather_single(gathered, local_tensor, group=cpu_group)
          batch.global_spec_verify_tier_num_tokens = gathered.tolist()
  
@@ -29,7 +29,7 @@ index c66fef358f..97d8cecf5c 100644
      def note_non_decode_step(self) -> None:
          if self._budget_planner is not None:
              self._budget_planner.note_non_decode_step()
-@@ -1109,6 +1113,13 @@ class HostConfidenceBudgetPlanner:
+@@ -1139,6 +1143,13 @@ class HostConfidenceBudgetPlanner:
          self._carry_confidence: Optional[torch.Tensor] = None
          self._carry_generation: Optional[torch.Tensor] = None
          self._carry_pos = 0
@@ -43,7 +43,7 @@ index c66fef358f..97d8cecf5c 100644
  
      def compute_budget(
          self,
-@@ -1129,6 +1140,12 @@ class HostConfidenceBudgetPlanner:
+@@ -1159,6 +1170,12 @@ class HostConfidenceBudgetPlanner:
              lagged_generation=lagged_generation,
              current_generation=current_generation,
          )
@@ -56,13 +56,13 @@ index c66fef358f..97d8cecf5c 100644
          forced_frac = self.forced_budget_frac
          if forced_frac is not None:
              full_budget = int(survival[:, : self.cfg.resolved_max_verify_len()].numel())
-@@ -1153,6 +1170,14 @@ class HostConfidenceBudgetPlanner:
+@@ -1183,6 +1200,14 @@ class HostConfidenceBudgetPlanner:
      def note_non_decode_step(self) -> None:
          self.last_decision = None
  
 +    def reset_request_history(self) -> None:
 +        """Drop per-row history (lag carry and smoothed survival) when the
-+        request pool is cleared and its generations restart."""
++        request pool is cleared."""
 +        self._carry_confidence = None
 +        self._carry_generation = None
 +        self._carry_pos = 0
@@ -71,7 +71,7 @@ index c66fef358f..97d8cecf5c 100644
      def _shift_to_lag(
          self,
          *,
-@@ -1186,6 +1211,37 @@ class HostConfidenceBudgetPlanner:
+@@ -1216,6 +1241,37 @@ class HostConfidenceBudgetPlanner:
          ).view(-1, 1)
          return torch.where(fresh, k_survival, torch.ones_like(k_survival))
  
@@ -110,22 +110,21 @@ index c66fef358f..97d8cecf5c 100644
          if self._carry_confidence is not None:
              return
 diff --git a/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py b/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
-index 249e9beea6..ec52495c93 100644
+index c017618c76..13a08c7371 100644
 --- a/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
 +++ b/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
-@@ -547,7 +547,11 @@ class DSparkWorkerV2(BaseSpecWorker):
+@@ -724,6 +724,11 @@ class DSparkWorkerV2(BaseSpecWorker):
          )
  
      def clear_cache_pool(self):
--        pass
-+        # The request pool's generations restart from zero, so per-row history
-+        # keyed by (row, generation) would match unrelated new requests.
++        # Per-row history (lag carry and smoothed survival) belongs to the
++        # requests the clear just dropped.
 +        planner = self.__dict__.get("_verify_planner")
 +        if planner is not None:
 +            planner.reset_request_history()
- 
-     def post_capture_init(self) -> None:
          if not self._hosts_draft:
+             return
+         # The staged rows' slots were just freed.
 diff --git a/test/registered/spec/dspark/test_dspark_budget_smoothing.py b/test/registered/spec/dspark/test_dspark_budget_smoothing.py
 new file mode 100644
 index 0000000000..a6ced9595f

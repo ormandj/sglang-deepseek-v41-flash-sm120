@@ -150,10 +150,10 @@ index ec8f094311..ba02273499 100644
      parser.add_argument(
          "--out",
 diff --git a/python/sglang/srt/speculative/dspark_components/dspark_observability.py b/python/sglang/srt/speculative/dspark_components/dspark_observability.py
-index ce3395ee61..1f964fd512 100644
+index 9a663d4151..c3d8a72eb7 100644
 --- a/python/sglang/srt/speculative/dspark_components/dspark_observability.py
 +++ b/python/sglang/srt/speculative/dspark_components/dspark_observability.py
-@@ -767,7 +767,14 @@ class DsparkStepObservers:
+@@ -769,7 +769,14 @@ class DsparkStepObservers:
                  "SGLANG_SIMULATE_ACC_LEN (simulated correct_len breaks the "
                  "accept-probability bookkeeping of the estimator)."
              )
@@ -169,7 +169,7 @@ index ce3395ee61..1f964fd512 100644
          self._sts_recorder: Optional[StsDataRecorder] = None
  
      # --- step lifecycle -------------------------------------------------
-@@ -841,10 +848,7 @@ class DsparkStepObservers:
+@@ -843,10 +850,7 @@ class DsparkStepObservers:
      ) -> None:
          planner = self._planner
          self._maybe_record_sts_collect(
@@ -181,7 +181,7 @@ index ce3395ee61..1f964fd512 100644
          )
          self._confidence_probe.maybe_observe(
              carries_confidence=planner.carries_confidence,
-@@ -932,9 +936,8 @@ class DsparkStepObservers:
+@@ -939,9 +943,8 @@ class DsparkStepObservers:
          self,
          *,
          confidence_raw: Optional[torch.Tensor],
@@ -193,7 +193,7 @@ index ce3395ee61..1f964fd512 100644
      ) -> None:
          if not self._sts_collect_path:
              return
-@@ -946,14 +949,10 @@ class DsparkStepObservers:
+@@ -953,14 +956,10 @@ class DsparkStepObservers:
                  gamma=self._gamma,
                  flush_every=_STS_COLLECT_FLUSH_EVERY,
              )
@@ -273,7 +273,7 @@ index 01d1a88426..0ac81b6680 100644
 +        self._observed_mask_buffer.clear()
          self._shard_ct += 1
 diff --git a/test/registered/spec/dspark/test_dspark_sts.py b/test/registered/spec/dspark/test_dspark_sts.py
-index ff953ca752..4e71377134 100644
+index 9fad1550a5..323d92864b 100644
 --- a/test/registered/spec/dspark/test_dspark_sts.py
 +++ b/test/registered/spec/dspark/test_dspark_sts.py
 @@ -1,15 +1,22 @@
@@ -299,7 +299,7 @@ index ff953ca752..4e71377134 100644
  from sglang.srt.speculative.dspark_components.dspark_sts import (
      DSparkStsCalibration,
      StsDataRecorder,
-@@ -142,6 +149,41 @@ class TestFitStsTemperatures(CustomTestCase):
+@@ -117,6 +124,41 @@ class TestFitStsTemperatures(CustomTestCase):
          mean_after = sum(result["ece_after"]) / gamma
          self.assertLess(mean_after, 0.25 * mean_before)
  
@@ -341,7 +341,7 @@ index ff953ca752..4e71377134 100644
  
  class TestStsDataRecorder(CustomTestCase):
      def test_builds_prefix_mask_and_writes_shard(self):
-@@ -163,6 +205,89 @@ class TestStsDataRecorder(CustomTestCase):
+@@ -138,6 +180,89 @@ class TestStsDataRecorder(CustomTestCase):
              shard = torch.load(f"{stem}.0.pt")
          self.assertTrue(torch.equal(shard["prefix_mask"], expected_prefix_mask))
          self.assertTrue(torch.equal(shard["logits"], confidence_raw.to(torch.float32)))

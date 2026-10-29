@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.5.0-rc.1
+
+0.4.3 rebuilt on current upstream sources, with prefill that no longer slows down on deep prompts once the server has been running. The model is unchanged; the launcher selects the Engram host tables with `--engram-config`.
+
+### Changes
+
+- SGLang `main` of 2026-10-29 (`974831643f`) with 29 patches, FlashInfer `main` of 2026-10-29 (`453a7e2450`, version 0.7.2) with one patch, sgl-project DeepGEMM `v0.2.3.post2` (the version SGLang `main` pins) and Triton `release/3.8.x` with its backport (unchanged), on the `lmsysorg/sglang` CUDA 13 nightly of 2026-10-29.
+- Deep cold prefill (patch 25, [sgl-project/sglang#43376](https://github.com/sgl-project/sglang/pull/43376)): the prefill indexer sizes its score tiles by the memory in use: when free GPU memory reads low, the allocator's unused blocks are returned before it is read again. A running server's memory allocator holds nearly all free memory, so 0.4.2 and 0.4.3 shrank the tiles to a few rows on prompts deeper than about 120K tokens and prefill slowed chunk by chunk, to about 1K prompt tok/s at 300K. The fix of the 0.4.x OOM at long cached contexts is kept.
+- Now upstream and no longer patched: the request-window history check (patch 15; SGLang `main` checks it without host syncs), reasoning tokens in `usage.completion_tokens_details` (patch 28; SGLang `main` reports them, as `null` when a response has no reasoning) and the `minimal` and `medium` reasoning efforts (patch 32; SGLang `main` maps efforts through `deepseek-recipe`). The DSpark accept-buffer fix (patch 27) is carried as its upstream head, which now includes the amendment 0.4.x added.
+- Every carried pull request is updated on SGLang `main`.
+
+### Upgrade
+
+Start the `v0.5.0` image with a new kernel cache directory. Replace `SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE=1` and `SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT=per_rank` with `--engram-config '{"placement": "cpu", "replication": "none"}'` (the variables still work and are deprecated upstream). `reasoning_effort: "medium"` now selects DeepSeek's high effort (75) instead of 62. `usage.completion_tokens_details.reasoning_tokens` is `null`, not 0, when a response has no reasoning. The first start compiles kernels and measures the speculative-decoding cost table.
+
 ## v0.4.3 (stable; 2026-10-19)
 
 0.4.2 with the image path warmed before serving. The sources other than patch 17, the stack, the model and the runtime configuration are unchanged.

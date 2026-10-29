@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/model_loader/loader.py b/python/sglang/srt/model_loader/loader.py
-index 6d3a4183e3..64d82d8738 100644
+index edda2a7618..e0e2e6664e 100644
 --- a/python/sglang/srt/model_loader/loader.py
 +++ b/python/sglang/srt/model_loader/loader.py
 @@ -12,6 +12,7 @@ import fnmatch
@@ -10,7 +10,7 @@ index 6d3a4183e3..64d82d8738 100644
  import json
  import logging
  import math
-@@ -357,6 +358,41 @@ class BaseModelLoader(ABC):
+@@ -359,6 +360,41 @@ class BaseModelLoader(ABC):
          raise NotImplementedError
  
  
@@ -52,7 +52,7 @@ index 6d3a4183e3..64d82d8738 100644
  def _validate_default_loader_extra_config(
      *, extra_config: dict, load_format: LoadFormat
  ) -> None:
-@@ -417,6 +453,12 @@ class DefaultModelLoader(BaseModelLoader):
+@@ -419,6 +455,12 @@ class DefaultModelLoader(BaseModelLoader):
          model_config: Optional[ModelConfig] = None
          """The model configuration (for checking architecture, etc)."""
  
@@ -65,7 +65,7 @@ index 6d3a4183e3..64d82d8738 100644
          @classmethod
          def init_new(cls, model_config: ModelConfig, model):
              return cls(
-@@ -428,6 +470,9 @@ class DefaultModelLoader(BaseModelLoader):
+@@ -430,6 +472,9 @@ class DefaultModelLoader(BaseModelLoader):
                      model, "allow_patterns_overrides", None
                  ),
                  model_config=model_config,
@@ -75,7 +75,7 @@ index 6d3a4183e3..64d82d8738 100644
              )
  
      @dataclasses.dataclass(frozen=True)
-@@ -639,11 +684,35 @@ class DefaultModelLoader(BaseModelLoader):
+@@ -641,11 +686,35 @@ class DefaultModelLoader(BaseModelLoader):
                  hf_weights_files,
              )
          elif self.load_config.load_format == LoadFormat.INSTANTTENSOR:
@@ -116,17 +116,26 @@ index 6d3a4183e3..64d82d8738 100644
              weight_loader_disable_mmap = get_model().weight_loader_disable_mmap
              configured_prefetch = get_model().weight_loader_prefetch_checkpoints
 diff --git a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/deepseek_v4.py
-index bdb56a1bc1..6350bfa25c 100644
+index 63e5ba1481..68263b2f20 100644
 --- a/python/sglang/srt/models/deepseek_v4.py
 +++ b/python/sglang/srt/models/deepseek_v4.py
-@@ -4360,6 +4360,13 @@ class DeepseekV4ForCausalLM(nn.Module):
+@@ -47,6 +47,7 @@ from sglang.kernels.ops.quantization.fp8_group_major_quant_ue8m0 import (
+ from sglang.kernels.ops.quantization.fp8_kernel import (
+     sglang_per_token_group_quant_fp8,
+ )
++from sglang.srt.arg_groups.engram_config import EngramPlacement
+ from sglang.srt.compilation.compilation_config import register_split_op
+ from sglang.srt.configs.deepseek_v4 import DeepSeekV4Config
+ from sglang.srt.distributed.device_communicators.pynccl_allocator import (
+@@ -4629,6 +4630,14 @@ class DeepseekV4ForCausalLM(nn.Module):
          # written against different names, so only Quark checkpoints get it.
          return _QUARK_CKPT_TO_SGLANG_MAPPER if _is_quark_checkpoint(config) else None
  
 +    @property
 +    def host_resident_weight_patterns(self) -> Optional[Tuple[str, ...]]:
 +        """Checkpoint names of the Engram tables kept in host memory."""
-+        if envs.SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE.get():
++        config = get_exec().offload.engram_config
++        if config is not None and config.placement == EngramPlacement.CPU:
 +            return (".engram.embed.",)
 +        return None
 +
@@ -134,10 +143,10 @@ index bdb56a1bc1..6350bfa25c 100644
          self,
          config: DeepSeekV4Config,
 diff --git a/python/sglang/srt/models/deepseek_v4_dspark.py b/python/sglang/srt/models/deepseek_v4_dspark.py
-index b1c0248806..8ba4d3fb4a 100644
+index 9385ab8cf5..8135407ff5 100644
 --- a/python/sglang/srt/models/deepseek_v4_dspark.py
 +++ b/python/sglang/srt/models/deepseek_v4_dspark.py
-@@ -685,6 +685,8 @@ class DeepseekV4ForCausalLMDSpark(nn.Module):
+@@ -694,6 +694,8 @@ class DeepseekV4ForCausalLMDSpark(nn.Module):
      precompile_kernels_after_loading = (
          DeepseekV4ForCausalLM.precompile_kernels_after_loading
      )
@@ -147,7 +156,7 @@ index b1c0248806..8ba4d3fb4a 100644
      @classmethod
      def shared_experts_fusion_disable_reason(
 diff --git a/test/registered/unit/model_loader/test_instanttensor_loader.py b/test/registered/unit/model_loader/test_instanttensor_loader.py
-index 240c4cac52..98bafba570 100644
+index 10214390cd..181b6514f5 100644
 --- a/test/registered/unit/model_loader/test_instanttensor_loader.py
 +++ b/test/registered/unit/model_loader/test_instanttensor_loader.py
 @@ -1,4 +1,5 @@
@@ -156,7 +165,7 @@ index 240c4cac52..98bafba570 100644
  import sys
  import tempfile
  import unittest
-@@ -8,18 +9,19 @@ from types import SimpleNamespace
+@@ -8,14 +9,15 @@ from types import SimpleNamespace
  from unittest.mock import MagicMock, patch
  
  import torch
@@ -165,20 +174,16 @@ index 240c4cac52..98bafba570 100644
  
  import sglang.srt.model_loader.loader as loader_mod
  import sglang.srt.model_loader.weight_utils as weight_utils
++from sglang.srt.arg_groups.engram_config import EngramConfig, EngramPlacement
  from sglang.srt.configs.load_config import _DEFAULT_LOAD_GROUP, LoadConfig
-+from sglang.srt.environ import envs
  from sglang.srt.platforms.cuda import CudaSRTPlatform
  from sglang.srt.platforms.rocm import RocmSRTPlatform
- from sglang.srt.runtime_context import get_context
+-from sglang.srt.runtime_context import get_context
++from sglang.srt.runtime_context import get_context, get_exec
  from sglang.test.ci.ci_register import register_cpu_ci
  from sglang.test.test_utils import CustomTestCase
  
--register_cpu_ci(est_time=1, suite="base-a-test-cpu")
-+register_cpu_ci(est_time=5, suite="base-a-test-cpu")
- 
- 
- class _Backend(Enum):
-@@ -297,5 +299,143 @@ class TestInstantTensorLoader(CustomTestCase):
+@@ -297,5 +299,149 @@ class TestInstantTensorLoader(CustomTestCase):
          self.safe_open.assert_not_called()
  
  
@@ -260,7 +265,13 @@ index 240c4cac52..98bafba570 100644
 +        model_cls = model_cls or DeepseekV4ForCausalLM
 +        model = model_cls.__new__(model_cls)
 +        model_config = SimpleNamespace(model_path="model", revision=None)
-+        with envs.SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE.override(host_table):
++        placement = EngramPlacement.CPU if host_table else EngramPlacement.GPU
++        with (
++            get_context().override_server_args(),
++            get_exec().offload.override(
++                engram_config=EngramConfig(placement=placement)
++            ),
++        ):
 +            return loader_mod.DefaultModelLoader.Source.init_new(model_config, model)
 +
 +    def _host_resident_names(self, result):

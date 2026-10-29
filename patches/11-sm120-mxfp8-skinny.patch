@@ -1,9 +1,9 @@
 diff --git a/python/sglang/kernels/ops/gemm/__init__.py b/python/sglang/kernels/ops/gemm/__init__.py
-index 515d4c943e..7f992e9224 100644
+index 045adb0337..8e6c42d649 100644
 --- a/python/sglang/kernels/ops/gemm/__init__.py
 +++ b/python/sglang/kernels/ops/gemm/__init__.py
-@@ -430,6 +430,14 @@ register_kernel(
-         ),
+@@ -495,6 +495,14 @@ register_kernel(
+         capabilities=_SM120,
      )
  )
 +register_kernel(
@@ -243,10 +243,10 @@ index 0000000000..eb488617d6
 +    )
 +    return out
 diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
-index 268e6fad24..ddce934266 100644
+index d873acf209..e7bdf2f262 100644
 --- a/python/sglang/srt/environ.py
 +++ b/python/sglang/srt/environ.py
-@@ -1111,6 +1111,11 @@ class Envs:
+@@ -1242,6 +1242,11 @@ class Envs:
      # kernels/ops/gemm/configs/ (currently L40S), so it is a no-op on
      # any other GPU / untuned shape even when enabled.
      SGLANG_ENABLE_FP8_GEMM_CONFIG_TUNE = EnvBool(True)
@@ -259,7 +259,7 @@ index 268e6fad24..ddce934266 100644
      # ===================================================================
      # Humming quantization
 diff --git a/python/sglang/srt/layers/quantization/fp8.py b/python/sglang/srt/layers/quantization/fp8.py
-index 9d0c3e0116..48403fa692 100644
+index ca511647bb..e1c2cd1e4c 100644
 --- a/python/sglang/srt/layers/quantization/fp8.py
 +++ b/python/sglang/srt/layers/quantization/fp8.py
 @@ -5,7 +5,7 @@
@@ -271,7 +271,7 @@ index 9d0c3e0116..48403fa692 100644
  
  import torch
  import torch.nn.functional as F
-@@ -107,6 +107,7 @@ from sglang.srt.utils import (
+@@ -109,6 +109,7 @@ from sglang.srt.utils import (
      is_hip,
      is_musa,
      is_npu,
@@ -279,7 +279,7 @@ index 9d0c3e0116..48403fa692 100644
      is_xpu,
      log_info_on_rank0,
      mxfp8_block_convert_required,
-@@ -482,6 +483,25 @@ class Fp8Config(QuantizationConfig):
+@@ -497,6 +498,25 @@ class Fp8Config(QuantizationConfig):
              )
  
  
@@ -305,7 +305,7 @@ index 9d0c3e0116..48403fa692 100644
  class Fp8LinearMethod(LinearMethodBase):
      """Linear method for FP8.
  
-@@ -979,6 +999,90 @@ class Fp8LinearMethod(LinearMethodBase):
+@@ -1023,6 +1043,90 @@ class Fp8LinearMethod(LinearMethodBase):
          # the swizzled copy is stored separately.
          self._process_mxfp8_linear_weight_scale(layer, scale_u8=scale_u8)
          layer.block_fp8_mxfp8_ready = True
@@ -394,9 +394,9 @@ index 9d0c3e0116..48403fa692 100644
 +        )
 +        return out.view(*data.shape[:-1], out.shape[-1])
  
-     def _process_mxfp8_linear_weight_scale(
-         self, layer: Module, scale_u8: Optional[torch.Tensor] = None
-@@ -1281,6 +1385,10 @@ class Fp8LinearMethod(LinearMethodBase):
+     def prepare_deepgemm_mxfp8_input(self, layer: Module) -> bool:
+         """Pack the weight scale a FlashInfer layer needs for a DeepGEMM-packed input pair."""
+@@ -1385,6 +1489,10 @@ class Fp8LinearMethod(LinearMethodBase):
          elif self.block_fp8_as_mxfp8 and isinstance(x, tuple):
              # A legacy (q, scale) block-fp8 pair keeps the block kernel.
              mxfp8_view = False

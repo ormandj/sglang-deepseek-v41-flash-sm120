@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/layers/engram.py b/python/sglang/srt/layers/engram.py
-index 453d63811d..57f16c77ae 100644
+index 7d8e7c4b72..58688776b9 100644
 --- a/python/sglang/srt/layers/engram.py
 +++ b/python/sglang/srt/layers/engram.py
-@@ -857,11 +857,20 @@ class EngramEmbedding(nn.Module):
+@@ -1132,11 +1132,19 @@ class EngramEmbedding(nn.Module):
          return self._host_table_ptrs
  
      def _load_rows(self, param: nn.Parameter, loaded_weight: torch.Tensor):
@@ -13,12 +13,11 @@ index 453d63811d..57f16c77ae 100644
 -            param.data[rows].copy_(loaded_weight[rows])
 +        dst = param.data[rows] if self._shared else param.data
 +        if isinstance(loaded_weight, SafetensorsRowSource):
-+            # Page-cache eviction was measured with the per-rank layout only.
++            # Page-cache eviction was measured with per-rank host shards only.
 +            loaded_weight.read_rows_into(
 +                dst,
 +                self.row_start,
-+                drop_page_cache=self.host_table is not None
-+                and self.host_table.layout == "per_rank",
++                drop_page_cache=self.host_table is not None and not self._shared,
 +            )
          else:
 -            param.data.copy_(loaded_weight[rows])
@@ -27,10 +26,10 @@ index 453d63811d..57f16c77ae 100644
              self.host_table.dirty = True
  
 diff --git a/python/sglang/srt/model_loader/loader.py b/python/sglang/srt/model_loader/loader.py
-index 64d82d8738..a744bfa6c3 100644
+index e0e2e6664e..e593e8f3a5 100644
 --- a/python/sglang/srt/model_loader/loader.py
 +++ b/python/sglang/srt/model_loader/loader.py
-@@ -119,6 +119,7 @@ from sglang.srt.model_loader.weight_utils import (
+@@ -123,6 +123,7 @@ from sglang.srt.model_loader.weight_utils import (
      get_gguf_extra_tensor_names,
      get_quant_config,
      gguf_quant_weights_iterator,
@@ -38,7 +37,7 @@ index 64d82d8738..a744bfa6c3 100644
      initialize_capture_safe_weights,
      initialize_dummy_weights,
      instanttensor_weights_iterator,
-@@ -456,8 +457,9 @@ class DefaultModelLoader(BaseModelLoader):
+@@ -458,8 +459,9 @@ class DefaultModelLoader(BaseModelLoader):
          host_resident_weight_patterns: Optional[Tuple[str, ...]] = None
          """Substrings of checkpoint tensor names the model keeps in host memory.
  
@@ -50,7 +49,7 @@ index 64d82d8738..a744bfa6c3 100644
  
          @classmethod
          def init_new(cls, model_config: ModelConfig, model):
-@@ -699,13 +701,11 @@ class DefaultModelLoader(BaseModelLoader):
+@@ -701,13 +703,11 @@ class DefaultModelLoader(BaseModelLoader):
              if host_files:
                  logger.info(
                      "Loading %d checkpoint file(s) with host-resident weights "
@@ -68,7 +67,7 @@ index 64d82d8738..a744bfa6c3 100644
                  weights_iterator = itertools.chain(
                      weights_iterator,
 diff --git a/python/sglang/srt/model_loader/weight_utils.py b/python/sglang/srt/model_loader/weight_utils.py
-index a77aecb388..d096d1567c 100644
+index 64d781ea7f..ea8c50bdea 100644
 --- a/python/sglang/srt/model_loader/weight_utils.py
 +++ b/python/sglang/srt/model_loader/weight_utils.py
 @@ -12,6 +12,7 @@ import hashlib
@@ -182,10 +181,10 @@ index a77aecb388..d096d1567c 100644
      extra_config: Optional[dict] = None,
 diff --git a/test/registered/unit/model_loader/test_host_resident_rows.py b/test/registered/unit/model_loader/test_host_resident_rows.py
 new file mode 100644
-index 0000000000..bcdd74419d
+index 0000000000..bc9e54e100
 --- /dev/null
 +++ b/test/registered/unit/model_loader/test_host_resident_rows.py
-@@ -0,0 +1,220 @@
+@@ -0,0 +1,241 @@
 +"""Positioned row reads of host-resident safetensors weights."""
 +
 +import errno
@@ -203,11 +202,17 @@ index 0000000000..bcdd74419d
 +
 +import sglang.srt.layers.engram as engram
 +import sglang.srt.model_loader.weight_utils as weight_utils
-+from sglang.srt.environ import envs
++from sglang.srt.arg_groups.engram_config import (
++    EngramConfig,
++    EngramLookup,
++    EngramPlacement,
++    EngramReplication,
++)
 +from sglang.srt.model_loader.weight_utils import (
 +    SafetensorsRowSource,
 +    host_resident_weights_iterator,
 +)
++from sglang.srt.runtime_context import get_context, get_exec
 +from sglang.test.ci.ci_register import register_cpu_ci
 +from sglang.test.test_utils import CustomTestCase
 +
@@ -226,13 +231,26 @@ index 0000000000..bcdd74419d
 +OTHER = "layers.1.engram.wkv.weight"
 +HOST_RESIDENT = (WEIGHT, SCALE, FP32_TABLE)
 +SENTINEL = 0xA5
++# --engram-config per layout: device shards, a host shard per rank, or one host
++# table per node. An explicit lookup skips the auto choice, which probes GPUs.
++LAYOUTS = {
++    None: EngramConfig(lookup=EngramLookup.ALL_REDUCE),
++    "per_rank": EngramConfig(
++        placement=EngramPlacement.CPU, lookup=EngramLookup.ALL_REDUCE
++    ),
++    "shared": EngramConfig(
++        placement=EngramPlacement.CPU,
++        replication=EngramReplication.PER_NODE,
++        lookup=EngramLookup.ALL_REDUCE,
++    ),
++}
 +
 +
 +class _FakeHostTable:
 +    """_HostTable without the memfd, the huge pages and cudaHostRegister."""
 +
-+    def __init__(self, layout, nbytes, name, group):
-+        self.layout = layout
++    def __init__(self, replication, nbytes, name, group):
++        self.replication = replication
 +        self.dirty = False
 +        self.bytes = torch.full((nbytes,), SENTINEL, dtype=torch.uint8)
 +        self.device_ptr = self.bytes.data_ptr()
@@ -353,8 +371,10 @@ index 0000000000..bcdd74419d
 +        with (
 +            patch.object(engram, "get_parallel", return_value=parallel),
 +            patch.object(engram, "_HostTable", _FakeHostTable),
-+            envs.SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE.override(layout is not None),
-+            envs.SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT.override(layout or "shared"),
++            patch.object(engram, "_sorted_host_reads", return_value=False),
++            patch.object(engram.torch.cuda, "current_device", return_value=0),
++            get_context().override_server_args(),
++            get_exec().offload.override(engram_config=LAYOUTS[layout]),
 +        ):
 +            embed = engram.EngramEmbedding(
 +                NUM_ROWS, DIM, layer_id=1, column_bounds=COLUMN_BOUNDS[split]
@@ -407,10 +427,10 @@ index 0000000000..bcdd74419d
 +if __name__ == "__main__":
 +    unittest.main()
 diff --git a/test/registered/unit/model_loader/test_instanttensor_loader.py b/test/registered/unit/model_loader/test_instanttensor_loader.py
-index 98bafba570..60011dc686 100644
+index 181b6514f5..8e2d0b0306 100644
 --- a/test/registered/unit/model_loader/test_instanttensor_loader.py
 +++ b/test/registered/unit/model_loader/test_instanttensor_loader.py
-@@ -385,6 +385,9 @@ class TestInstantTensorHostResidentWeights(CustomTestCase):
+@@ -391,6 +391,9 @@ class TestInstantTensorHostResidentWeights(CustomTestCase):
          self.assertCountEqual([name for name, _ in result], self.expected)
          on_host = set()
          for name, tensor in result:
@@ -420,7 +440,7 @@ index 98bafba570..60011dc686 100644
              expected = self.expected[name]
              self.assertEqual(
                  (tensor.shape, tensor.dtype), (expected.shape, expected.dtype)
-@@ -397,6 +400,15 @@ class TestInstantTensorHostResidentWeights(CustomTestCase):
+@@ -403,6 +406,15 @@ class TestInstantTensorHostResidentWeights(CustomTestCase):
  
      def test_engram_tables_stay_on_host(self):
          result = self._load(self._dsv4_source(host_table=True))

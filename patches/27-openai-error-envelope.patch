@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/entrypoints/anthropic/serving.py b/python/sglang/srt/entrypoints/anthropic/serving.py
-index 722389b74a..8ee7e4e37d 100644
+index 8936e9d90c..69e345cbb8 100644
 --- a/python/sglang/srt/entrypoints/anthropic/serving.py
 +++ b/python/sglang/srt/entrypoints/anthropic/serving.py
-@@ -83,6 +83,15 @@ ERROR_TYPE_MAP = {
+@@ -84,6 +84,15 @@ ERROR_TYPE_MAP = {
      504: "api_error",
  }
  
@@ -18,7 +18,7 @@ index 722389b74a..8ee7e4e37d 100644
  
  def _cached_prompt_tokens(usage) -> int:
      prompt_tokens_details = getattr(usage, "prompt_tokens_details", None)
-@@ -971,8 +980,8 @@ class AnthropicServing:
+@@ -997,8 +1006,8 @@ class AnthropicServing:
              """Detect an OpenAI handler streaming-error envelope.
  
              ``OpenAIServingChat.create_streaming_error_response`` emits
@@ -29,7 +29,7 @@ index 722389b74a..8ee7e4e37d 100644
              ChatCompletionStreamResponse validator rejects it. Pull the
              type/message out so the Anthropic client sees the real
              failure instead of a generic 'Stream processing error'.
-@@ -987,10 +996,10 @@ class AnthropicServing:
+@@ -1013,10 +1022,10 @@ class AnthropicServing:
              if not isinstance(err, dict):
                  return None
              upstream_message = err.get("message") or "Upstream error"
@@ -44,10 +44,10 @@ index 722389b74a..8ee7e4e37d 100644
              )
              return error_type, str(upstream_message)
 diff --git a/python/sglang/srt/entrypoints/http_server.py b/python/sglang/srt/entrypoints/http_server.py
-index c79a3746cb..031b3aab24 100644
+index 6a69b35071..56992e8971 100644
 --- a/python/sglang/srt/entrypoints/http_server.py
 +++ b/python/sglang/srt/entrypoints/http_server.py
-@@ -102,6 +102,8 @@ from sglang.srt.entrypoints.openai.protocol import (
+@@ -105,6 +105,8 @@ from sglang.srt.entrypoints.openai.protocol import (
      ScoringRequest,
      TokenizeRequest,
      V1RerankReqInput,
@@ -56,7 +56,7 @@ index c79a3746cb..031b3aab24 100644
  )
  from sglang.srt.entrypoints.openai.serving_classify import OpenAIServingClassify
  from sglang.srt.entrypoints.openai.serving_completions import OpenAIServingCompletion
-@@ -569,6 +571,11 @@ def _anthropic_error_response(*, status_code: int, error_type: str, message: str
+@@ -581,6 +583,11 @@ def _anthropic_error_response(*, status_code: int, error_type: str, message: str
      )
  
  
@@ -68,7 +68,7 @@ index c79a3746cb..031b3aab24 100644
  @app.exception_handler(HTTPException)
  async def validation_exception_handler(request: Request, exc: HTTPException):
      """Enrich HTTP exception with status code and other details.
-@@ -576,6 +583,7 @@ async def validation_exception_handler(request: Request, exc: HTTPException):
+@@ -588,6 +595,7 @@ async def validation_exception_handler(request: Request, exc: HTTPException):
      For /v1/responses, emit OpenAI-style nested error envelope:
      {"error": {"message": "...", "type": "...", "param": null, "code": <status>}}
      For /v1/messages, emit Anthropic-style envelope so SDK clients can parse it.
@@ -76,7 +76,7 @@ index c79a3746cb..031b3aab24 100644
      """
      if request.url.path.startswith("/v1/messages"):
          # Map HTTP status to Anthropic error.type; fall back to api_error.
-@@ -616,6 +624,12 @@ async def validation_exception_handler(request: Request, exc: HTTPException):
+@@ -628,6 +636,12 @@ async def validation_exception_handler(request: Request, exc: HTTPException):
              content={"error": nested_error}, status_code=exc.status_code
          )
  
@@ -89,7 +89,7 @@ index c79a3746cb..031b3aab24 100644
      error = ErrorResponse(
          object="error",
          message=exc.detail,
-@@ -634,7 +648,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
+@@ -646,7 +660,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
      file paths or Python internals from the default ``str(exc)`` representation
      never reach the client. For /v1/responses, keep OpenAI-style. For
      /v1/systemone, keep the 422 detail list that the System One API documents.
@@ -99,7 +99,7 @@ index c79a3746cb..031b3aab24 100644
      """
      if request.url.path.startswith("/v1/messages"):
          return _anthropic_error_response(
-@@ -674,6 +689,12 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
+@@ -686,6 +701,12 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
          }
          return ORJSONResponse(status_code=400, content={"error": nested_error})
  
@@ -112,7 +112,7 @@ index c79a3746cb..031b3aab24 100644
      err = ErrorResponse(
          message=message,
          type=HTTPStatus.BAD_REQUEST.phrase,
-@@ -1898,11 +1919,11 @@ async def openai_v1_audio_transcriptions(
+@@ -1952,11 +1973,11 @@ async def openai_v1_audio_transcriptions(
      """OpenAI-compatible audio transcription endpoint."""
      if response_format not in ["json", "text", "verbose_json"]:
          return ORJSONResponse(
@@ -129,7 +129,7 @@ index c79a3746cb..031b3aab24 100644
              status_code=400,
          )
  
-@@ -1973,14 +1994,12 @@ async def retrieve_model(model: str):
+@@ -2027,14 +2048,12 @@ async def retrieve_model(model: str):
      if model not in served_model_names:
          return ORJSONResponse(
              status_code=404,
@@ -151,7 +151,7 @@ index c79a3746cb..031b3aab24 100644
  
      return ModelCard(
 diff --git a/python/sglang/srt/entrypoints/openai/protocol.py b/python/sglang/srt/entrypoints/openai/protocol.py
-index 149bab556d..b68a9b6042 100644
+index cbdd8aa1d8..dbfb9e6b2a 100644
 --- a/python/sglang/srt/entrypoints/openai/protocol.py
 +++ b/python/sglang/srt/entrypoints/openai/protocol.py
 @@ -20,6 +20,7 @@ import time
@@ -162,7 +162,7 @@ index 149bab556d..b68a9b6042 100644
  from typing import (
      Annotated,
      Any,
-@@ -105,6 +106,68 @@ class ErrorResponse(BaseModel):
+@@ -111,6 +112,68 @@ class ErrorResponse(BaseModel):
      code: int
  
  
@@ -232,7 +232,7 @@ index 149bab556d..b68a9b6042 100644
  class ParsedResponseFields(Protocol):
      """Protocol for parsed response fields from custom renderers."""
 diff --git a/python/sglang/srt/entrypoints/openai/serving_base.py b/python/sglang/srt/entrypoints/openai/serving_base.py
-index 04dfe2cab6..92134d2878 100644
+index d00b475ad5..5405771540 100644
 --- a/python/sglang/srt/entrypoints/openai/serving_base.py
 +++ b/python/sglang/srt/entrypoints/openai/serving_base.py
 @@ -12,7 +12,11 @@ from fastapi import HTTPException, Request
@@ -259,7 +259,7 @@ index 04dfe2cab6..92134d2878 100644
      def __init__(self, tokenizer_manager: TokenizerManager):
          self.tokenizer_manager = tokenizer_manager
          self.allowed_custom_labels = (
-@@ -129,7 +137,7 @@ class OpenAIServingBase(ABC):
+@@ -136,7 +144,7 @@ class OpenAIServingBase(ABC):
          except Exception as e:
              logger.exception(f"Error in request: {e}")
              return self.create_error_response(
@@ -268,7 +268,7 @@ index 04dfe2cab6..92134d2878 100644
                  err_type="InternalServerError",
                  status_code=500,
              )
-@@ -202,8 +210,18 @@ class OpenAIServingBase(ABC):
+@@ -209,8 +217,18 @@ class OpenAIServingBase(ABC):
          status_code: int = 400,
          param: Optional[str] = None,
      ) -> ORJSONResponse:
@@ -288,7 +288,7 @@ index 04dfe2cab6..92134d2878 100644
          error = ErrorResponse(
              object="error",
              message=message,
-@@ -219,7 +237,9 @@ class OpenAIServingBase(ABC):
+@@ -226,7 +244,9 @@ class OpenAIServingBase(ABC):
          err_type: str = "BadRequestError",
          status_code: int = 400,
      ) -> str:
@@ -300,10 +300,10 @@ index 04dfe2cab6..92134d2878 100644
              object="error",
              message=message,
 diff --git a/python/sglang/srt/entrypoints/openai/serving_chat.py b/python/sglang/srt/entrypoints/openai/serving_chat.py
-index ec56b6f709..f6424339a9 100644
+index 50ef945810..9a9c8e182d 100644
 --- a/python/sglang/srt/entrypoints/openai/serving_chat.py
 +++ b/python/sglang/srt/entrypoints/openai/serving_chat.py
-@@ -272,6 +272,8 @@ def _build_video_config(request: ChatCompletionRequest) -> dict[str, Any] | None
+@@ -382,6 +382,8 @@ def _build_video_config(request: ChatCompletionRequest) -> dict[str, Any] | None
  class OpenAIServingChat(OpenAIServingBase):
      """Handler for /v1/chat/completions requests"""
  
@@ -312,7 +312,7 @@ index ec56b6f709..f6424339a9 100644
      _default_sampling_params_logged = False
      _KIMI_K3_GENERATION_STUB_TOKENS = 3
  
-@@ -2409,7 +2411,9 @@ class OpenAIServingChat(OpenAIServingBase):
+@@ -2912,7 +2914,9 @@ class OpenAIServingChat(OpenAIServingBase):
  
              text = self._decode_response(ret_item)
              if isinstance(text, ErrorResponse):
@@ -320,9 +320,9 @@ index ec56b6f709..f6424339a9 100644
 +                return self.create_error_response(
 +                    text.message, text.type, text.code, text.param
 +                )
- 
-             # Handle reasoning content
-             reasoning_text = None
+             text = self._settle_response_template_stop(
+                 text, finish_reason, request, text
+             )
 diff --git a/python/sglang/srt/entrypoints/openai/serving_completions.py b/python/sglang/srt/entrypoints/openai/serving_completions.py
 index e381ddc396..84ee1ff324 100644
 --- a/python/sglang/srt/entrypoints/openai/serving_completions.py
@@ -350,10 +350,10 @@ index ed52ef8323..316dbaf102 100644
          self,
          tokenizer_manager: TokenizerManager,
 diff --git a/python/sglang/srt/entrypoints/openai/serving_responses.py b/python/sglang/srt/entrypoints/openai/serving_responses.py
-index d4e4c2d300..f1bcc5f1cb 100644
+index 18c495a3dc..ace0fcb6ba 100644
 --- a/python/sglang/srt/entrypoints/openai/serving_responses.py
 +++ b/python/sglang/srt/entrypoints/openai/serving_responses.py
-@@ -159,6 +159,9 @@ def _should_emit_normal_text_as_message(
+@@ -180,6 +180,9 @@ _RESPONSE_OUTPUT = TypeAdapter(ResponsesResponse.model_fields["output"].annotati
  class OpenAIServingResponses(OpenAIServingChat):
      """Handler for /v1/responses requests"""
  
@@ -416,87 +416,29 @@ index df6811179e..ffa5cad87d 100644
                      status_code=decision.error_status_code,
                  )
                  await response(scope, receive, send)
-diff --git a/rust/sglang-processor/src/openai/chat.rs b/rust/sglang-processor/src/openai/chat.rs
-index 80bfbc5e8c..5d75491054 100644
---- a/rust/sglang-processor/src/openai/chat.rs
-+++ b/rust/sglang-processor/src/openai/chat.rs
-@@ -13,7 +13,7 @@ use super::request::{
-     format_json_schema, lora_path, one, usage_flags, yes,
- };
- use super::wire::{
--    Payload, Reply, StreamState, http_status_name, malformed_output_reply, meta_u64, now,
-+    Payload, Reply, StreamState, is_abort_status, malformed_output_reply, meta_u64, now,
-     stream_error_event, unary_reply,
- };
- use super::{OpenAiHeaders, OpenAiSettings, OpenAiTokenizer, Unsupported};
-@@ -850,7 +850,7 @@ impl ChatResponder {
-                 json!({"content": self.token_logprobs(&meta["output_token_logprobs"], &meta["output_top_logprobs"])})
-             });
-             let Some(text) = item["text"].as_str() else {
--                return Some(malformed_output_reply("text"));
-+                return Some(malformed_output_reply());
-             };
-             let mut text = text.to_owned();
-             let mut reasoning = String::new();
-@@ -964,13 +964,13 @@ impl ChatResponder {
-             // `HTTPStatus`, which `/generate` serializes as its integer.
-             if finish_type == "abort"
-                 && let Some(code) = finish_reason["status_code"].as_u64()
--                && let Some(name) = http_status_name(code)
-+                && is_abort_status(code)
-             {
-                 let message = finish_reason["message"]
-                     .as_str()
-                     .unwrap_or("Generation aborted.");
-                 self.stream.stopped = true;
--                return vec![stream_error_event(message, name, code as u16)];
-+                return vec![stream_error_event(message, code as u16)];
-             }
-             self.finish_reasons.push((index, finish_reason.clone()));
-         }
-diff --git a/rust/sglang-processor/src/openai/completions.rs b/rust/sglang-processor/src/openai/completions.rs
-index 236a92f775..ac658e20f5 100644
---- a/rust/sglang-processor/src/openai/completions.rs
-+++ b/rust/sglang-processor/src/openai/completions.rs
-@@ -11,7 +11,7 @@ use super::request::{
-     format_json_schema, lora_path, one, usage_flags, yes,
- };
- use super::wire::{
--    Payload, Reply, StreamState, http_status_name, malformed_output_reply, meta_u64, now,
-+    Payload, Reply, StreamState, is_abort_status, malformed_output_reply, meta_u64, now,
-     stream_error_event, unary_reply, without_nulls,
- };
- use super::{OpenAiHeaders, OpenAiSettings, OpenAiTokenizer, Unsupported};
-@@ -314,7 +314,7 @@ impl CompletionResponder {
-         for (index, item) in ret.iter().enumerate() {
-             let meta = &item["meta_info"];
-             let Some(text) = item["text"].as_str() else {
--                return Some(malformed_output_reply("text"));
-+                return Some(malformed_output_reply());
-             };
-             let mut text = text.to_owned();
-             if let Some(echo) = self.echo_prompts.get(index / self.n) {
-@@ -437,13 +437,13 @@ impl CompletionResponder {
-         // `HTTPStatus`, which `/generate` serializes as its integer.
-         if finish_reason["type"] == "abort"
-             && let Some(code) = finish_reason.get("status_code").and_then(Value::as_u64)
--            && let Some(name) = http_status_name(code)
-+            && is_abort_status(code)
-         {
-             self.stream.stopped = true;
-             let message = finish_reason["message"]
-                 .as_str()
-                 .unwrap_or("Generation aborted.");
--            return Some(stream_error_event(message, name, code as u16));
-+            return Some(stream_error_event(message, code as u16));
-         }
+diff --git a/rust/sglang-processor/src/openai/mod.rs b/rust/sglang-processor/src/openai/mod.rs
+index 010d5b0f58..ac1ed77eed 100644
+--- a/rust/sglang-processor/src/openai/mod.rs
++++ b/rust/sglang-processor/src/openai/mod.rs
+@@ -77,9 +77,10 @@ impl Responder {
+         wire::engine_error_reply(error)
+     }
  
-         let mut choice = json!({
+-    /// The engine returned an output missing a field required by OpenAI.
+-    pub fn malformed_output(missing: &str) -> Reply {
+-        wire::malformed_output_reply(missing)
++    /// The engine returned an output missing a field required by OpenAI:
++    /// Python's catch-all 500, which does not name the field.
++    pub fn malformed_output(_missing: &str) -> Reply {
++        wire::malformed_output_reply()
+     }
+ }
+ 
 diff --git a/rust/sglang-processor/src/openai/wire.rs b/rust/sglang-processor/src/openai/wire.rs
-index 9cfd0d3c5e..57c38dfc6f 100644
+index 437f54cd5f..36813afe92 100644
 --- a/rust/sglang-processor/src/openai/wire.rs
 +++ b/rust/sglang-processor/src/openai/wire.rs
-@@ -13,59 +13,67 @@ pub struct Reply {
+@@ -16,98 +16,68 @@ pub struct Reply {
      pub body: String,
  }
  
@@ -541,120 +483,215 @@ index 9cfd0d3c5e..57c38dfc6f 100644
 +    )
  }
  
- /// The OpenAI reply for a `/generate` error response. `None` passes the
--/// engine's reply through: SGLang answers its other errors, such as an
--/// `HTTPException`, in the OpenAI error shape on every route.
-+/// engine's reply through.
- pub(super) fn engine_error_reply(body: &[u8]) -> Option<Reply> {
-     let body: Value = serde_json::from_slice(body).ok()?;
-     // A ValueError: `/generate` answers `{"error": {"message"}}`, OpenAI a 400.
--    let message = body.pointer("/error/message")?.as_str()?;
--    Some(error_reply(message, "BadRequestError", 400))
--}
--
+-/// A native `/generate` error's message, OpenAI type and status. Python's
+-/// `/generate` sends no code (a ValueError, so a 400); an engine that sends one
+-/// keeps its status, typed as `create_error_response` types it.
+-fn engine_error_parts(error: GenerateStreamError) -> (String, String, u16) {
++/// A native `/generate` error's message and status. Python's `/generate`
++/// sends no code (a ValueError, so a 400); an engine that sends one keeps its
++/// status.
++fn engine_error_parts(error: GenerateStreamError) -> (String, u16) {
+     let error = error.error.unwrap_or_default();
+     let code = u16::try_from(error.code)
+         .ok()
+         .filter(|code| (400..600).contains(code))
+         .unwrap_or(400);
+-    let err_type = match code {
+-        400 => "BadRequestError".to_owned(),
+-        _ => code.to_string(),
+-    };
+-    (error.message, err_type, code)
++    (error.message, code)
+ }
+ 
+ /// The OpenAI reply for a native `/generate` error.
+ pub(super) fn engine_error_reply(error: GenerateStreamError) -> Reply {
+-    let (message, err_type, code) = engine_error_parts(error);
+-    error_reply(&message, &err_type, code)
++    let (message, code) = engine_error_parts(error);
++    error_reply(&message, code)
+ }
+ 
 -/// Python's answer when the engine output lacks what the OpenAI layer reads.
 -pub(super) fn malformed_output_reply(missing: &str) -> Reply {
 -    let message = format!("Internal server error: '{missing}'");
 -    error_reply(&message, "InternalServerError", 500)
--}
--
--/// `HTTPStatus(code).name` for the codes SGLang aborts with.
++/// Python's catch-all 500, when the engine output lacks what the OpenAI layer reads.
++pub(super) fn malformed_output_reply() -> Reply {
++    error_reply("Internal server error", 500)
+ }
+ 
+-/// `HTTPStatus(code).name` for an error status, as Python 3.12 names it.
 -pub(super) fn http_status_name(code: u64) -> Option<&'static str> {
 -    Some(match code {
 -        400 => "BAD_REQUEST",
 -        401 => "UNAUTHORIZED",
+-        402 => "PAYMENT_REQUIRED",
 -        403 => "FORBIDDEN",
 -        404 => "NOT_FOUND",
+-        405 => "METHOD_NOT_ALLOWED",
+-        406 => "NOT_ACCEPTABLE",
+-        407 => "PROXY_AUTHENTICATION_REQUIRED",
 -        408 => "REQUEST_TIMEOUT",
+-        409 => "CONFLICT",
+-        410 => "GONE",
+-        411 => "LENGTH_REQUIRED",
+-        412 => "PRECONDITION_FAILED",
 -        413 => "REQUEST_ENTITY_TOO_LARGE",
+-        414 => "REQUEST_URI_TOO_LONG",
+-        415 => "UNSUPPORTED_MEDIA_TYPE",
+-        416 => "REQUESTED_RANGE_NOT_SATISFIABLE",
+-        417 => "EXPECTATION_FAILED",
+-        418 => "IM_A_TEAPOT",
+-        421 => "MISDIRECTED_REQUEST",
 -        422 => "UNPROCESSABLE_ENTITY",
+-        423 => "LOCKED",
+-        424 => "FAILED_DEPENDENCY",
+-        425 => "TOO_EARLY",
+-        426 => "UPGRADE_REQUIRED",
+-        428 => "PRECONDITION_REQUIRED",
 -        429 => "TOO_MANY_REQUESTS",
+-        431 => "REQUEST_HEADER_FIELDS_TOO_LARGE",
+-        451 => "UNAVAILABLE_FOR_LEGAL_REASONS",
 -        500 => "INTERNAL_SERVER_ERROR",
 -        501 => "NOT_IMPLEMENTED",
 -        502 => "BAD_GATEWAY",
 -        503 => "SERVICE_UNAVAILABLE",
 -        504 => "GATEWAY_TIMEOUT",
+-        505 => "HTTP_VERSION_NOT_SUPPORTED",
+-        506 => "VARIANT_ALSO_NEGOTIATES",
+-        507 => "INSUFFICIENT_STORAGE",
+-        508 => "LOOP_DETECTED",
+-        510 => "NOT_EXTENDED",
+-        511 => "NETWORK_AUTHENTICATION_REQUIRED",
 -        _ => return None,
 -    })
-+    if let Some(message) = body.pointer("/error/message").and_then(Value::as_str) {
-+        return Some(error_reply(message, 400));
-+    }
-+    // An `HTTPException`: `/generate` answers the flat `ErrorResponse`, the
-+    // OpenAI servings the envelope with the same status.
-+    let code = body["code"]
-+        .as_u64()
-+        .and_then(|code| u16::try_from(code).ok())?;
-+    (body["object"] == "error" && (400..600).contains(&code))
-+        .then(|| error_reply(body["message"].as_str().unwrap_or_default(), code))
-+}
-+
-+/// Python's catch-all 500, when the engine output lacks what the OpenAI layer reads.
-+pub(super) fn malformed_output_reply() -> Reply {
-+    error_reply("Internal server error", 500)
-+}
-+
-+/// Whether `code` is one of the `HTTPStatus` codes SGLang aborts with.
-+pub(super) fn is_abort_status(code: u64) -> bool {
++/// Whether `code` is an `HTTPStatus` error code, as Python 3.12 defines them.
++pub(super) fn is_http_error_status(code: u64) -> bool {
 +    matches!(
 +        code,
-+        400 | 401 | 403 | 404 | 408 | 413 | 422 | 429 | 500 | 501 | 502 | 503 | 504
++        400..=418 | 421..=426 | 428 | 429 | 431 | 451 | 500..=508 | 510 | 511
 +    )
  }
  
  /// `UsageProcessor.calculate_token_usage`, dumped as `UsageInfo`.
-@@ -164,14 +172,10 @@ impl StreamState {
-         };
-         if let Some(message) = content.pointer("/error/message").and_then(Value::as_str) {
-             if !self.started {
--                return Err(error_reply(message, "BadRequestError", 400));
-+                return Err(error_reply(message, 400));
+@@ -188,28 +158,18 @@ pub(super) struct StreamState {
+ impl StreamState {
+     /// An engine error replaces the reply until the first chunk has been sent.
+     pub(super) fn error(&mut self, error: GenerateStreamError) -> Result<Vec<String>, Reply> {
+-        let (message, err_type, code) = engine_error_parts(error);
++        let (message, code) = engine_error_parts(error);
+         if !self.started {
+             // Python's `/generate` streams a scheduler abort as a frame and
+             // sends only 400 error frames, so a 500 is a host's own failure:
+-            // `handle_request`'s generic `InternalServerError`.
++            // `handle_request`'s generic 500, which sends no exception text.
+             if code == 500 {
+-                let message = format!("Internal server error: {message}");
+-                return Err(error_reply(&message, "InternalServerError", code));
++                return Err(error_reply("Internal server error", code));
              }
-             self.failed = true;
--            return Ok(Payload::Events(vec![stream_error_event(
--                message,
--                "BadRequestError",
--                400,
--            )]));
-+            return Ok(Payload::Events(vec![stream_error_event(message, 400)]));
+-            return Err(error_reply(&message, &err_type, code));
++            return Err(error_reply(&message, code));
          }
-         self.started = true;
-         Ok(Payload::Frame(content))
-@@ -245,6 +249,33 @@ pub(super) fn meta_u64(meta: &Value, key: &str) -> u64 {
+         self.failed = true;
+-        // Mid-stream, Python's abort event is typed by the status's name.
+-        let event_type = match code {
+-            400 => None,
+-            _ => http_status_name(code.into()),
+-        };
+-        Ok(vec![stream_error_event(
+-            &message,
+-            event_type.unwrap_or(&err_type),
+-            code,
+-        )])
++        Ok(vec![stream_error_event(&message, code)])
+     }
+ 
+     /// An abort or error just ended the stream; Python stops there, without
+@@ -294,11 +254,12 @@ pub(super) fn abort_event(reason: Option<&FinishReason>) -> Option<String> {
+         return None;
+     };
+     let code = u64::from(abort.status_code?);
+-    Some(stream_error_event(
+-        abort.message.as_deref().unwrap_or("Generation aborted."),
+-        http_status_name(code)?,
+-        code as u16,
+-    ))
++    is_http_error_status(code).then(|| {
++        stream_error_event(
++            abort.message.as_deref().unwrap_or("Generation aborted."),
++            code as u16,
++        )
++    })
+ }
+ 
+ pub(super) fn logprob_slice<T>(items: &[T], prev: usize, total: usize, incremental: bool) -> &[T] {
+@@ -327,6 +288,62 @@ pub(super) fn logprobs_length(meta: &GenerateMetaInfo, prev: usize, incremental:
  mod tests {
      use super::*;
  
 +    #[test]
 +    fn engine_errors_become_the_envelope_with_their_status() {
-+        let reply = |body: Value| engine_error_reply(body.to_string().as_bytes());
++        let error = |message: &str, code: u32| GenerateStreamError {
++            error: Some(sglang_api_types::api::v1::ErrorBody {
++                message: message.into(),
++                code,
++            }),
++            index: None,
++        };
 +        let envelope = |message: &str, error_type: &str| json!({"error": {"message": message, "type": error_type, "param": null, "code": null}});
-+        // A ValueError from `/generate`.
-+        let value_error = reply(json!({"error": {"message": "bad n"}})).unwrap();
++        let body = |reply: &Reply| serde_json::from_str::<Value>(&reply.body).unwrap();
++        // A ValueError from `/generate` carries no code: a 400.
++        let value_error = engine_error_reply(error("bad n", 0));
 +        assert_eq!(value_error.status, 400);
-+        let body: Value = serde_json::from_str(&value_error.body).unwrap();
-+        assert_eq!(body, envelope("bad n", "invalid_request_error"));
-+        // An HTTPException's flat ErrorResponse keeps its status.
-+        let flat = json!({"object": "error", "message": "The request queue is full.", "type": "503", "param": null, "code": 503});
-+        let http_exception = reply(flat).unwrap();
-+        assert_eq!(http_exception.status, 503);
-+        let body: Value = serde_json::from_str(&http_exception.body).unwrap();
 +        assert_eq!(
-+            body,
++            body(&value_error),
++            envelope("bad n", "invalid_request_error")
++        );
++        // An engine status is kept, and typed by it.
++        let unavailable = engine_error_reply(error("The request queue is full.", 503));
++        assert_eq!(unavailable.status, 503);
++        assert_eq!(
++            body(&unavailable),
 +            envelope("The request queue is full.", "service_unavailable_error")
 +        );
-+        // Anything else passes through.
-+        assert!(reply(json!({"detail": "not found"})).is_none());
++
++        // Before the first chunk, a 500 is the generic one, without its text.
++        let mut stream = StreamState::default();
++        let failed = stream.error(error("boom", 500)).unwrap_err();
++        assert_eq!(failed.status, 500);
++        assert_eq!(
++            body(&failed),
++            envelope("Internal server error", "server_error")
++        );
++        // Mid-stream, the error is an envelope frame typed by its status.
++        stream.started = true;
++        let events = stream.error(error("Out of memory.", 503)).unwrap();
++        assert_eq!(
++            events,
++            [format!(
++                "data: {}\n\n",
++                python_json(
++                    &envelope("Out of memory.", "service_unavailable_error"),
++                    true
++                )
++            )]
++        );
 +
 +        let malformed = malformed_output_reply();
 +        assert_eq!(malformed.status, 500);
-+        let body: Value = serde_json::from_str(&malformed.body).unwrap();
-+        assert_eq!(body, envelope("Internal server error", "server_error"));
++        assert_eq!(
++            body(&malformed),
++            envelope("Internal server error", "server_error")
++        );
 +    }
 +
      #[test]
      fn cache_report_keeps_zero_cached_tokens() {
          let details = |cached| usage(3, 2, 0, cached)["prompt_tokens_details"].clone();
 diff --git a/rust/sglang-processor/tests/fixtures/openai_parity/deepseek-v4-flash-0731.json b/rust/sglang-processor/tests/fixtures/openai_parity/deepseek-v4-flash-0731.json
-index 51cddea83d..100ab71442 100644
+index ab65a1746a..28f39df0c6 100644
 --- a/rust/sglang-processor/tests/fixtures/openai_parity/deepseek-v4-flash-0731.json
 +++ b/rust/sglang-processor/tests/fixtures/openai_parity/deepseek-v4-flash-0731.json
 @@ -1290,11 +1290,12 @@
@@ -699,20 +736,20 @@ index 51cddea83d..100ab71442 100644
            {"id": "r", "object": "text_completion", "created": 1791964722, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "text": " there", "logprobs": null, "finish_reason": null, "matched_stop": null}], "usage": null},
 -          {"error": {"object": "error", "message": "Out of memory.", "type": "SERVICE_UNAVAILABLE", "param": null, "code": 503}},
 +          {"error": {"message": "Out of memory.", "type": "service_unavailable_error", "param": null, "code": null}},
-           {"id": "r", "object": "text_completion", "created": 1791964722, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [], "usage": {"prompt_tokens": 2, "total_tokens": 3, "completion_tokens": 1, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
+           {"id": "r", "object": "text_completion", "created": 1791964722, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [], "usage": {"prompt_tokens": 2, "total_tokens": 3, "completion_tokens": 1, "reasoning_tokens": 0}},
            "[DONE]"
          ]
-@@ -2416,7 +2418,7 @@
+@@ -2456,7 +2458,7 @@
          "events": [
            {"id": "r", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"reasoning_content": null, "role": "assistant", "content": ""}, "logprobs": null, "finish_reason": null, "matched_stop": null}]},
-           {"id": "r", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"reasoning_content": null, "content": " there"}, "logprobs": null, "finish_reason": null, "matched_stop": null}]},
+           {"id": "r", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [{"index": 0, "delta": {"reasoning_content": null, "content": "<｜end▁of▁sentence｜>"}, "logprobs": null, "finish_reason": null, "matched_stop": null}]},
 -          {"error": {"object": "error", "message": "Out of memory.", "type": "SERVICE_UNAVAILABLE", "param": null, "code": 503}},
 +          {"error": {"message": "Out of memory.", "type": "service_unavailable_error", "param": null, "code": null}},
-           {"id": "r", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [], "usage": {"prompt_tokens": 2, "total_tokens": 3, "completion_tokens": 1, "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": 0}, "reasoning_tokens": 0}},
+           {"id": "r", "object": "chat.completion.chunk", "created": 1791964724, "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "choices": [], "usage": {"prompt_tokens": 2, "total_tokens": 3, "completion_tokens": 1, "prompt_tokens_details": null, "reasoning_tokens": 0, "completion_tokens_details": null}},
            "[DONE]"
          ]
 diff --git a/rust/sglang-server/src/api_server/http/openai.rs b/rust/sglang-server/src/api_server/http/openai.rs
-index cbdc48ce8a..9a3467bcfa 100644
+index 4804202dad..88614d75e7 100644
 --- a/rust/sglang-server/src/api_server/http/openai.rs
 +++ b/rust/sglang-server/src/api_server/http/openai.rs
 @@ -87,23 +87,26 @@ fn unix_seconds_u32() -> u32 {
@@ -755,6 +792,191 @@ index cbdc48ce8a..9a3467bcfa 100644
          }
      })
  }
+diff --git a/rust/sglang-server/src/api_server/http/openai/lowered.rs b/rust/sglang-server/src/api_server/http/openai/lowered.rs
+index 97507093e2..c67f9c8ee9 100644
+--- a/rust/sglang-server/src/api_server/http/openai/lowered.rs
++++ b/rust/sglang-server/src/api_server/http/openai/lowered.rs
+@@ -22,7 +22,7 @@ use sglang_processor::{DynamoTokenizer, TemplateArgs, TemplateError};
+ use super::super::request_headers::apply_header_overrides;
+ use super::chat::ChatBody;
+ use super::template::RenderedChat;
+-use super::{AppState, ChatFormatter};
++use super::{AppState, ChatFormatter, error_payload};
+ use crate::api_server::core::CoreError;
+ use crate::api_server::http::native_api::{
+     GenerateItem, RequestState, RequestTiming, drain_unary_frame, generate_requests,
+@@ -173,8 +173,8 @@ pub(super) async fn chat(
+     if state.server_args.enable_request_header_overrides
+         && let Err(error) = apply_header_overrides(&mut generate, headers)
+     {
+-        // `apply_header_overrides` raises `HTTPException(400)`, typed by its status.
+-        return Some(typed_error_response(StatusCode::BAD_REQUEST, "400", &error));
++        // `apply_header_overrides` raises `HTTPException(400)`.
++        return Some(error_response(StatusCode::BAD_REQUEST, &error));
+     }
+     // Failures before the first frame answer unary even for a stream: Python
+     // awaits the first chunk before it starts the stream.
+@@ -406,44 +406,26 @@ fn python_error_frame(error: &CoreError, index: Option<u32>) -> String {
+     .to_string()
+ }
+ 
+-/// `OpenAIServingBase.create_error_response`: a 400 is a `BadRequestError`;
+-/// any other status is an `HTTPException`, typed by its status code.
++/// `OpenAIServingBase.create_error_response`: OpenAI's error envelope, typed
++/// by the status.
+ fn error_response(status: StatusCode, message: &str) -> Response {
+-    let err_type = match status {
+-        StatusCode::BAD_REQUEST => "BadRequestError".to_owned(),
+-        _ => status.as_u16().to_string(),
+-    };
+-    typed_error_response(status, &err_type, message)
++    (status, axum::Json(error_payload(status, message))).into_response()
+ }
+ 
+ /// `handle_request`'s answer to a call that failed before its first frame: a
+ /// scheduler abort is the `HTTPException` the tokenizer manager raises, while a
+-/// failure of this server's own is Python's generic exception.
++/// failure of this server's own is Python's generic 500, without its text.
+ fn call_error_response(error: &CoreError) -> Response {
+     let status = error.http_status();
+     match error {
+         CoreError::RuntimeRejected { .. } => error_response(status, &error.to_string()),
+-        _ if status == StatusCode::INTERNAL_SERVER_ERROR => typed_error_response(
+-            status,
+-            "InternalServerError",
+-            &format!("Internal server error: {error}"),
+-        ),
++        _ if status == StatusCode::INTERNAL_SERVER_ERROR => {
++            error_response(status, "Internal server error")
++        }
+         _ => error_response(status, &error.to_string()),
+     }
+ }
+ 
+-fn typed_error_response(status: StatusCode, err_type: &str, message: &str) -> Response {
+-    let code = status.as_u16();
+-    let error = serde_json::json!({
+-        "object": "error",
+-        "message": message,
+-        "type": err_type,
+-        "param": null,
+-        "code": code,
+-    });
+-    (status, axum::Json(error)).into_response()
+-}
+-
+ fn reply_response(reply: Reply) -> Response {
+     let status = StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+     (status, [(CONTENT_TYPE, "application/json")], reply.body).into_response()
+@@ -522,8 +504,8 @@ mod tests {
+         // Unary, as Python answers a failure before the first chunk.
+         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+         let value = body_json(response).await;
+-        assert_eq!(value["type"], "BadRequestError");
+-        let message = value["message"].as_str().unwrap();
++        assert_eq!(value["error"]["type"], "invalid_request_error");
++        let message = value["error"]["message"].as_str().unwrap();
+         assert!(message.contains("exceeds the maximum"), "{message}");
+     }
+ 
+@@ -560,18 +542,18 @@ mod tests {
+         let response = post_json(app, "/v1/chat/completions", body).await;
+         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+         let value = body_json(response).await;
+-        let message = value["message"].as_str().unwrap();
++        let message = value["error"]["message"].as_str().unwrap();
+         assert!(message.contains("byte limit"), "{message}");
+     }
+ 
+     /// A scheduler abort in a stream, whatever its status, is Python's error
+-    /// event under that status, then the stream's end, not a unary 400.
++    /// event typed by that status, then the stream's end, not a unary 400.
+     #[tokio::test]
+     async fn streamed_abort_keeps_its_status() {
+-        for (status, name) in [
+-            (503, "SERVICE_UNAVAILABLE"),
+-            (400, "BAD_REQUEST"),
+-            (412, "PRECONDITION_FAILED"),
++        for (status, error_type) in [
++            (503, "service_unavailable_error"),
++            (400, "invalid_request_error"),
++            (412, "invalid_request_error"),
+         ] {
+             let app = lowered_state(move |rid| {
+                 let mut item = chunk(rid, "", true);
+@@ -605,8 +587,8 @@ mod tests {
+                 })
+                 .unwrap_or_else(|| panic!("no error event: {text}"));
+             assert_eq!(
+-                (error["type"].as_str(), error["code"].as_u64()),
+-                (Some(name), Some(status))
++                error,
++                json!({"message": "aborted", "type": error_type, "param": null, "code": null})
+             );
+             assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
+         }
+@@ -635,7 +617,10 @@ mod tests {
+         let response = post("x-override-priority", "high").await;
+         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+         // `HTTPException(400)`, typed by its status.
+-        assert_eq!(body_json(response).await["type"], "400");
++        assert_eq!(
++            body_json(response).await["error"]["type"],
++            "invalid_request_error"
++        );
+     }
+ 
+     /// A failed choice answers at once, without waiting on an unfinished sibling.
+@@ -657,7 +642,8 @@ mod tests {
+         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+     }
+ 
+-    /// This server's own failure answers as Python's generic exception does.
++    /// This server's own failure answers as Python's generic exception does,
++    /// without its text.
+     #[tokio::test]
+     async fn failed_choice_keeps_its_status() {
+         let body = json!({"model": "model", "messages": [{"role": "user", "content": "hi"}]});
+@@ -666,13 +652,13 @@ mod tests {
+         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+         let value = body_json(response).await;
+         assert_eq!(
+-            (value["type"].as_str(), value["code"].as_u64()),
+-            (Some("InternalServerError"), Some(500))
+-        );
+-        let message = value["message"].as_str().unwrap();
+-        assert!(
+-            message.starts_with("Internal server error: ") && message.contains("boom"),
+-            "{value}"
++            value,
++            json!({"error": {
++                "message": "Internal server error",
++                "type": "server_error",
++                "param": null,
++                "code": null,
++            }})
+         );
+     }
+ 
+@@ -690,11 +676,14 @@ mod tests {
+         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+         let value = body_json(response).await;
+         assert_eq!(
+-            (value["type"].as_str(), value["code"].as_u64()),
+-            (Some("InternalServerError"), Some(500))
++            value,
++            json!({"error": {
++                "message": "Internal server error",
++                "type": "server_error",
++                "param": null,
++                "code": null,
++            }})
+         );
+-        let message = value["message"].as_str().unwrap();
+-        assert!(message.starts_with("Internal server error: "), "{value}");
+     }
+ 
+     /// A template's detected toggle decides reasoning before the parser's
 diff --git a/rust/sglang-server/src/api_server/http/openai/models.rs b/rust/sglang-server/src/api_server/http/openai/models.rs
 index d41d94db1a..63bfd1cb99 100644
 --- a/rust/sglang-server/src/api_server/http/openai/models.rs
@@ -786,10 +1008,10 @@ index d41d94db1a..63bfd1cb99 100644
      Json(model_card(card)).into_response()
  }
 diff --git a/rust/sglang-server/src/api_server/http/openai/test_utils.rs b/rust/sglang-server/src/api_server/http/openai/test_utils.rs
-index fd950dbc90..00aa098ce4 100644
+index 57ef940622..b99b966ec3 100644
 --- a/rust/sglang-server/src/api_server/http/openai/test_utils.rs
 +++ b/rust/sglang-server/src/api_server/http/openai/test_utils.rs
-@@ -250,10 +250,15 @@ async fn openai_error_response_covers_unary_and_sse() {
+@@ -291,10 +291,15 @@ async fn openai_error_response_covers_unary_and_sse() {
      let unary = openai_error(StatusCode::BAD_REQUEST, "bad input", false);
      assert_eq!(unary.status(), StatusCode::BAD_REQUEST);
      let value = body_json(unary).await;
@@ -809,7 +1031,7 @@ index fd950dbc90..00aa098ce4 100644
  
      let streamed = openai_error(StatusCode::BAD_REQUEST, "bad input", true);
      assert_eq!(streamed.status(), StatusCode::OK);
-@@ -269,7 +274,7 @@ async fn openai_error_response_covers_unary_and_sse() {
+@@ -310,7 +315,7 @@ async fn openai_error_response_covers_unary_and_sse() {
          .unwrap();
      let frame: serde_json::Value = serde_json::from_str(frame).unwrap();
      assert_eq!(frame["error"]["message"], "bad input");
@@ -818,7 +1040,7 @@ index fd950dbc90..00aa098ce4 100644
      assert!(text.contains("[DONE]"));
  }
  
-@@ -424,7 +429,7 @@ async fn streaming_submit_failure_answers_inside_the_stream() {
+@@ -465,7 +470,7 @@ async fn streaming_submit_failure_answers_inside_the_stream() {
          .unwrap();
      let frame: serde_json::Value = serde_json::from_str(frame).unwrap();
      assert_eq!(frame["error"]["message"], "service unavailable");
@@ -829,10 +1051,10 @@ index fd950dbc90..00aa098ce4 100644
      assert!(text.contains("[DONE]"));
  }
 diff --git a/test/registered/unit/entrypoints/anthropic/test_serving.py b/test/registered/unit/entrypoints/anthropic/test_serving.py
-index 5f8295d6a3..dfe744ab9e 100644
+index 678feec4e0..7e886a163f 100644
 --- a/test/registered/unit/entrypoints/anthropic/test_serving.py
 +++ b/test/registered/unit/entrypoints/anthropic/test_serving.py
-@@ -1286,28 +1286,35 @@ class TestAnthropicServing(unittest.TestCase):
+@@ -1348,28 +1348,35 @@ class TestAnthropicServing(unittest.TestCase):
  
      def test_stream_upstream_error_envelope_is_forwarded(self):
          """OpenAI handler streaming-error JSON must surface real type/message."""
@@ -1223,10 +1445,10 @@ index 0000000000..6147921ff5
 +if __name__ == "__main__":
 +    unittest.main()
 diff --git a/test/registered/unit/entrypoints/openai/test_serving_chat.py b/test/registered/unit/entrypoints/openai/test_serving_chat.py
-index d28d6663c0..b716603169 100644
+index 415c885b8b..c71482ff5a 100644
 --- a/test/registered/unit/entrypoints/openai/test_serving_chat.py
 +++ b/test/registered/unit/entrypoints/openai/test_serving_chat.py
-@@ -549,9 +549,9 @@ class ServingChatTestCase(CustomTestCase):
+@@ -881,9 +881,9 @@ class ServingChatTestCase(CustomTestCase):
                  response = get_or_create_event_loop().run_until_complete(
                      self.chat.handle_request(request, self.fastapi_request)
                  )
@@ -1238,7 +1460,7 @@ index d28d6663c0..b716603169 100644
                  self.assertIn(media_type, error["message"])
          self.tm.generate_request.assert_not_called()
  
-@@ -3209,7 +3209,8 @@ class ServingChatTestCase(CustomTestCase):
+@@ -4146,7 +4146,8 @@ class ServingChatTestCase(CustomTestCase):
                  break
          self.assertIsNotNone(error_chunk_data, "Error chunk not found in stream")
          self.assertEqual(error_chunk_data["error"]["message"], err_msg)
@@ -1248,7 +1470,7 @@ index d28d6663c0..b716603169 100644
  
          # Ensure the stream stops after the abort error
          # The last chunk should be "data: [DONE]\n\n"
-@@ -3292,7 +3293,8 @@ class ServingChatTestCase(CustomTestCase):
+@@ -4229,7 +4230,8 @@ class ServingChatTestCase(CustomTestCase):
  
          error_chunk_data = json.loads(chunks[0][len("data: ") :])
          self.assertEqual(error_chunk_data["error"]["message"], err_msg)
@@ -1259,7 +1481,7 @@ index d28d6663c0..b716603169 100644
      def test_streaming_error_abort_still_finalizes_other_choices(self):
          """An error abort ends generation but still runs finalization, so a
 diff --git a/test/registered/unit/entrypoints/openai/test_serving_completions.py b/test/registered/unit/entrypoints/openai/test_serving_completions.py
-index 2ce597b1fe..bb2e314908 100644
+index e9a1c55c19..dac19e9b96 100644
 --- a/test/registered/unit/entrypoints/openai/test_serving_completions.py
 +++ b/test/registered/unit/entrypoints/openai/test_serving_completions.py
 @@ -310,7 +310,8 @@ class ServingCompletionTestCase(unittest.TestCase):

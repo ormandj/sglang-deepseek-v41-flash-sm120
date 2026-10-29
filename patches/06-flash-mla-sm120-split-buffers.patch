@@ -62,7 +62,7 @@ index c57194d3c5..846796bf72 100644
          idx_flat = touched_indices.reshape(-1).contiguous()
          if idx_flat.dtype != torch.int32:
 diff --git a/test/registered/kernels/ops/attention/test_flash_mla_backends.py b/test/registered/kernels/ops/attention/test_flash_mla_backends.py
-index d105bdfc77..ab981df341 100644
+index 3fe59b11c8..5246977206 100644
 --- a/test/registered/kernels/ops/attention/test_flash_mla_backends.py
 +++ b/test/registered/kernels/ops/attention/test_flash_mla_backends.py
 @@ -619,8 +619,8 @@ class TestTouchedPageSplit(CustomTestCase):

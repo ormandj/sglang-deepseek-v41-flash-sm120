@@ -1,8 +1,8 @@
 diff --git a/docs/docs/references/environment_variables.mdx b/docs/docs/references/environment_variables.mdx
-index c6ef4258b5..aa2e5ae557 100644
+index bc821a061e..eeb5778a31 100644
 --- a/docs/docs/references/environment_variables.mdx
 +++ b/docs/docs/references/environment_variables.mdx
-@@ -1707,7 +1707,7 @@ SGLang supports various environment variables that can be used to configure its
+@@ -1747,7 +1747,7 @@ SGLang supports various environment variables that can be used to configure its
      </tr>
      <tr>
        <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><code>SGLANG_ENABLE_PCIE_IPC_ALLREDUCE</code></td>
@@ -427,10 +427,10 @@ index 4ea0dbcf04..99ff255b23 100644
          fallback=nccl,
      )
 diff --git a/python/sglang/srt/distributed/parallel_state.py b/python/sglang/srt/distributed/parallel_state.py
-index 4524b21c3d..da11d29c43 100644
+index c2f7805334..fb963c8717 100644
 --- a/python/sglang/srt/distributed/parallel_state.py
 +++ b/python/sglang/srt/distributed/parallel_state.py
-@@ -497,11 +497,15 @@ class GroupCoordinator:
+@@ -484,11 +484,15 @@ class GroupCoordinator:
              eligible_group,
          )
  
@@ -449,10 +449,10 @@ index 4524b21c3d..da11d29c43 100644
                  # The IPC handshake needs the CUDA (NCCL) group, not the CPU one.
                  # Autotuning is the other way round: it rendezvouses on the host.
 diff --git a/python/sglang/srt/layers/logits_processor.py b/python/sglang/srt/layers/logits_processor.py
-index 19fd6e8ebf..6f17ce881f 100644
+index ede078b6c7..ae92c89b1b 100644
 --- a/python/sglang/srt/layers/logits_processor.py
 +++ b/python/sglang/srt/layers/logits_processor.py
-@@ -499,6 +499,7 @@ class LogitsProcessor(nn.Module):
+@@ -575,6 +575,7 @@ class LogitsProcessor(nn.Module):
              ),
              enabled=self.do_tensor_parallel_all_gather and not self.use_attn_tp_group,
              skip_entry_sync=True,
@@ -461,10 +461,10 @@ index 19fd6e8ebf..6f17ce881f 100644
  
          chunking_group = None
 diff --git a/python/sglang/srt/models/deepseek_v4_dspark.py b/python/sglang/srt/models/deepseek_v4_dspark.py
-index 8ba4d3fb4a..0e0f99d2a2 100644
+index 8135407ff5..1cca5ad34f 100644
 --- a/python/sglang/srt/models/deepseek_v4_dspark.py
 +++ b/python/sglang/srt/models/deepseek_v4_dspark.py
-@@ -473,6 +473,7 @@ class DSparkV4MarkovHead(BaseDSparkMarkovHead):
+@@ -485,6 +485,7 @@ class DSparkV4MarkovHead(BaseDSparkMarkovHead):
              local_width=per_partition,
              prefer_nvlink=self._is_dsv41
              and envs.SGLANG_DSPARK_NVLINK_VOCAB_GATHER.get(),

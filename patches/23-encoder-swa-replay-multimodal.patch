@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/entrypoints/http_server.py b/python/sglang/srt/entrypoints/http_server.py
-index c374c9a8b4..c79a3746cb 100644
+index ee3e323454..6a69b35071 100644
 --- a/python/sglang/srt/entrypoints/http_server.py
 +++ b/python/sglang/srt/entrypoints/http_server.py
-@@ -524,6 +524,7 @@ from sglang.srt.runtime_context import (
+@@ -536,6 +536,7 @@ from sglang.srt.runtime_context import (
      get_model,
      get_observability,
      get_parallel,
@@ -10,7 +10,7 @@ index c374c9a8b4..c79a3746cb 100644
      get_serving,
      publish,
  )
-@@ -2293,6 +2294,20 @@ async def _send_disaggregation_warmup_requests(
+@@ -2353,6 +2354,20 @@ async def _send_disaggregation_warmup_requests(
          )
  
  
@@ -31,7 +31,7 @@ index c374c9a8b4..c79a3746cb 100644
  def _execute_server_warmup(server_args: ServerArgs):
      headers = {}
      url = server_args.url()
-@@ -2326,13 +2341,7 @@ def _execute_server_warmup(server_args: ServerArgs):
+@@ -2386,13 +2401,7 @@ def _execute_server_warmup(server_args: ServerArgs):
      # Construct a warmup request (MLX: text warmup for VLM-advertising models; TODO: enable image warmup).
      # A language-only worker may advertise VLM capability for encoder
      # disaggregation, but its local warmup must stay on the text path.
@@ -47,7 +47,7 @@ index c374c9a8b4..c79a3746cb 100644
          if is_vlm and not get_serving().skip_tokenizer_init:
              request_name = "/v1/chat/completions"
 diff --git a/test/registered/unit/entrypoints/test_http_server_warmup.py b/test/registered/unit/entrypoints/test_http_server_warmup.py
-index bfc3a8b48f..4419365079 100644
+index c88a4ec272..2571452342 100644
 --- a/test/registered/unit/entrypoints/test_http_server_warmup.py
 +++ b/test/registered/unit/entrypoints/test_http_server_warmup.py
 @@ -4,6 +4,7 @@ from types import SimpleNamespace

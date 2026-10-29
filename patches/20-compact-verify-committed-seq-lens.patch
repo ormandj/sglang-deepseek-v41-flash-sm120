@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/speculative/dspark_components/dspark_verify.py b/python/sglang/srt/speculative/dspark_components/dspark_verify.py
-index 339f3e1941..255487d58c 100644
+index 35766c43d5..e169fbb4e5 100644
 --- a/python/sglang/srt/speculative/dspark_components/dspark_verify.py
 +++ b/python/sglang/srt/speculative/dspark_components/dspark_verify.py
-@@ -450,7 +450,10 @@ class TargetVerifyExecutor:
+@@ -479,7 +479,10 @@ class TargetVerifyExecutor:
          batch.out_cache_loc = ragged_window.verify_cache_loc
          seq_lens_cpu_backup = batch.seq_lens_cpu
          seq_lens_sum_backup = batch.seq_lens_sum
@@ -16,7 +16,7 @@ index 339f3e1941..255487d58c 100644
                  if layout.verify_lens_cpu is not None
 diff --git a/test/registered/unit/spec/test_dspark_verify_seq_lens.py b/test/registered/unit/spec/test_dspark_verify_seq_lens.py
 new file mode 100644
-index 0000000000..06af93618f
+index 0000000000..ba58dc4be9
 --- /dev/null
 +++ b/test/registered/unit/spec/test_dspark_verify_seq_lens.py
 @@ -0,0 +1,124 @@
@@ -88,7 +88,7 @@ index 0000000000..06af93618f
 +        verify_window=SimpleNamespace(
 +            positions_2d=torch.zeros((bs, _W), dtype=torch.int64),
 +            verify_cache_loc=torch.zeros(bs * _W, dtype=torch.int64),
-+            kv_loc_plan=None,
++            iteration_ids=None,
 +        ),
 +        sampling_info=None,
 +    )
@@ -108,7 +108,7 @@ index 0000000000..06af93618f
 +            window_index=None,
 +        ),
 +        sampling_info=None,
-+        kv_loc_plan=None,
++        iteration_ids=None,
 +    )
 +
 +

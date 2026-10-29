@@ -1,8 +1,8 @@
 diff --git a/python/sglang/kernels/ops/gemm/__init__.py b/python/sglang/kernels/ops/gemm/__init__.py
-index 7f992e9224..04dfc2b0d8 100644
+index 8e6c42d649..cf924174b2 100644
 --- a/python/sglang/kernels/ops/gemm/__init__.py
 +++ b/python/sglang/kernels/ops/gemm/__init__.py
-@@ -371,6 +371,14 @@ register_kernel(
+@@ -422,6 +422,14 @@ register_kernel(
          capabilities=CUDA_ONLY,
      )
  )
@@ -128,10 +128,10 @@ index 0000000000..3044dd60ea
 +        )
 +    return out
 diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
-index ddce934266..9958c8e7a9 100644
+index e7bdf2f262..a6eac38bd1 100644
 --- a/python/sglang/srt/environ.py
 +++ b/python/sglang/srt/environ.py
-@@ -1416,6 +1416,9 @@ class Envs:
+@@ -1559,6 +1559,9 @@ class Envs:
      # materializing the full-vocab log-softmax. Escape hatch only; the two
      # paths are mathematically identical.
      SGLANG_ENABLE_FAST_INPUT_LOGPROBS = EnvBool(True)
@@ -142,10 +142,10 @@ index ddce934266..9958c8e7a9 100644
      # ===================================================================
      # Deterministic inference and all-reduce
 diff --git a/python/sglang/srt/layers/logits_processor.py b/python/sglang/srt/layers/logits_processor.py
-index 6f17ce881f..b5864c1b57 100644
+index ae92c89b1b..75269f327b 100644
 --- a/python/sglang/srt/layers/logits_processor.py
 +++ b/python/sglang/srt/layers/logits_processor.py
-@@ -123,6 +123,24 @@ class SamplingMaskOutput:
+@@ -140,6 +140,24 @@ class SamplingMaskOutput:
              self.num_accept_tokens = fn(self.num_accept_tokens)
  
  
@@ -170,9 +170,9 @@ index 6f17ce881f..b5864c1b57 100644
  def _trace_e2e_logits(stage: str, **fields) -> None:
      if not envs.SGLANG_TRACE_LOGITS_E2E.get():
          return
-@@ -1104,9 +1122,7 @@ class LogitsProcessor(nn.Module):
-                     hidden_states.bfloat16(), lm_head.weight.T.bfloat16()
-                 )
+@@ -1254,9 +1272,7 @@ class LogitsProcessor(nn.Module):
+             elif _aiter_lm_head_ok(hidden_states, lm_head.weight):
+                 logits = tgemm.mm(hidden_states, lm_head.weight)
              else:
 -                logits = torch.matmul(
 -                    hidden_states.to(lm_head.weight.dtype), lm_head.weight.T
@@ -182,11 +182,11 @@ index 6f17ce881f..b5864c1b57 100644
              # GGUF models
              # TODO: use weight_packed_linear for GGUF models
 diff --git a/python/sglang/srt/models/dspark.py b/python/sglang/srt/models/dspark.py
-index 81ceb973ab..6a535abd0d 100644
+index de8b3bbfba..50a0f3723e 100644
 --- a/python/sglang/srt/models/dspark.py
 +++ b/python/sglang/srt/models/dspark.py
-@@ -13,7 +13,10 @@ from sglang.kernels.ops.memory.ptr_table import make_ptr_table
- from sglang.srt.distributed.communication_op import tensor_model_parallel_all_gather
+@@ -18,7 +18,10 @@ from sglang.srt.distributed.device_communicators.triton_symm_mem_ag import (
+ from sglang.srt.distributed.device_communicators.vocab_gather import make_vocab_gather
  from sglang.srt.environ import envs
  from sglang.srt.layers.linear import ReplicatedLinear
 -from sglang.srt.layers.logits_processor import should_apply_lm_head_quant_method
@@ -196,14 +196,13 @@ index 81ceb973ab..6a535abd0d 100644
 +)
  from sglang.srt.mem_cache.memory_pool import KVWriteLoc
  from sglang.srt.model_loader.weight_utils import default_weight_loader
- from sglang.srt.models.dflash import DFlashDraftModel
-@@ -52,8 +55,7 @@ def project_through_lm_head(hidden: torch.Tensor, lm_head: nn.Module) -> torch.T
-     quant_method = lm_head.quant_method
-     if should_apply_lm_head_quant_method(lm_head, quant_method):
-         return quant_method.apply(lm_head, hidden, None)
--    weight = lm_head.weight
+ from sglang.srt.models.dflash import DFlashDraftModel, DFlashMLAAttention
+@@ -139,7 +142,7 @@ def project_through_lm_head(hidden: torch.Tensor, lm_head: nn.Module) -> torch.T
+         and weight.shape[-1] % 16 == 0
+     ):
+         return _fp8_lm_head_matmul(hidden, lm_head)
 -    return torch.matmul(hidden.to(weight.dtype), weight.T)
-+    return bf16_lm_head_matmul(hidden, lm_head.weight)
++    return bf16_lm_head_matmul(hidden, weight)
  
  
  class VocabShard(msgspec.Struct, frozen=True):
@@ -406,10 +405,10 @@ index 0000000000..0512b83b76
 +if __name__ == "__main__":
 +    unittest.main()
 diff --git a/test/registered/unit/kernels/test_kernels_namespace.py b/test/registered/unit/kernels/test_kernels_namespace.py
-index c12429fa18..327757d525 100644
+index fc39595f6a..74e242f635 100644
 --- a/test/registered/unit/kernels/test_kernels_namespace.py
 +++ b/test/registered/unit/kernels/test_kernels_namespace.py
-@@ -332,5 +332,12 @@ def test_deep_select_spec_matches_wrapper_architectures():
+@@ -517,5 +517,12 @@ def test_deep_select_spec_matches_wrapper_architectures():
      )
  
  

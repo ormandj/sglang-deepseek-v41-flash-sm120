@@ -1,8 +1,8 @@
 diff --git a/python/sglang/kernels/ops/attention/__init__.py b/python/sglang/kernels/ops/attention/__init__.py
-index e982c4ffac..3ffd771b9c 100644
+index 8c9b15f478..2447b57965 100644
 --- a/python/sglang/kernels/ops/attention/__init__.py
 +++ b/python/sglang/kernels/ops/attention/__init__.py
-@@ -402,7 +402,11 @@ register_kernel(
+@@ -411,7 +411,11 @@ register_kernel(
      )
  )
  
@@ -39,10 +39,10 @@ index ba4abad43a..157d5799a3 100644
      logits: torch.Tensor,
      compress_lens: Union[torch.Tensor, int],
 diff --git a/python/sglang/kernels/ops/attention/dsv4/fp4_indexer.py b/python/sglang/kernels/ops/attention/dsv4/fp4_indexer.py
-index 232bcc37b3..24e84c2d04 100644
+index d129e805ee..003f9a063a 100644
 --- a/python/sglang/kernels/ops/attention/dsv4/fp4_indexer.py
 +++ b/python/sglang/kernels/ops/attention/dsv4/fp4_indexer.py
-@@ -893,6 +893,157 @@ def _fp4_index_logits_paged_kernel(
+@@ -601,6 +601,157 @@ def _fp4_index_logits_paged_kernel(
          tl.store(out_ptr + b * out_stride + offs_l, logit, mask=offs_l < L)
  
  
@@ -201,7 +201,7 @@ index 232bcc37b3..24e84c2d04 100644
      q: torch.Tensor,
      weights: torch.Tensor,
 diff --git a/python/sglang/srt/layers/attention/dsv4/v41_indexer/dense_blocks.py b/python/sglang/srt/layers/attention/dsv4/v41_indexer/dense_blocks.py
-index eda27cf9f9..1e2394a1f9 100644
+index 647ce5a45e..4477197699 100644
 --- a/python/sglang/srt/layers/attention/dsv4/v41_indexer/dense_blocks.py
 +++ b/python/sglang/srt/layers/attention/dsv4/v41_indexer/dense_blocks.py
 @@ -10,7 +10,6 @@ import torch
@@ -249,18 +249,18 @@ index eda27cf9f9..1e2394a1f9 100644
              return
          k = min(inputs.indexer.index_topk, d.lmax)
 diff --git a/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py b/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py
-index 2916d1a94e..0b97025587 100644
+index d7d6363b26..a17ab68d60 100644
 --- a/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py
 +++ b/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py
-@@ -12,6 +12,7 @@ import torch
- 
+@@ -13,6 +13,7 @@ import torch
  from sglang.kernels.ops.attention.dsv4.fp4_indexer import (
      finish_paged_indexer_topk,
+     flat_selection_slots,
 +    fp4_index_logits_candidates,
      fp4_index_logits_decode,
      fp4_index_logits_paged,
  )
-@@ -371,8 +372,9 @@ class PagedDecodeScores(msgspec.Struct, frozen=True):
+@@ -456,8 +457,9 @@ class PagedDecodeScores(msgspec.Struct, frozen=True):
      """Paged decode scores with graph-stable capacity ``lmax``.
  
      Only positions below each device-side ``lens`` are initialized. Top-k
@@ -272,7 +272,7 @@ index 2916d1a94e..0b97025587 100644
      """
  
      bs: int
-@@ -391,10 +393,11 @@ def decode_scores(
+@@ -476,10 +478,11 @@ def decode_scores(
      inputs: DecodeInputs,
      token_to_kv_pool: DeepSeekV4TokenToKVPool,
      req_to_token: torch.Tensor,
@@ -286,7 +286,7 @@ index 2916d1a94e..0b97025587 100644
      pool = token_to_kv_pool
      ratio = inputs.compress_ratio
      indexer = inputs.indexer
-@@ -422,18 +425,12 @@ def decode_scores(
+@@ -507,18 +510,12 @@ def decode_scores(
          lens = lens.to(torch.int32)
          # Prepare the device-side plan before scoring, away from its top-k consumer.
          plan = plan_topk_v2(lens) if compute_topk_plan else None
@@ -311,7 +311,7 @@ index 2916d1a94e..0b97025587 100644
          return PagedDecodeScores(
              bs=bs,
              lmax=lmax,
-@@ -443,7 +440,7 @@ def decode_scores(
+@@ -528,7 +525,7 @@ def decode_scores(
              req_to_token=req_to_token,
              ratio=ratio,
              plan=plan,
@@ -321,18 +321,18 @@ index 2916d1a94e..0b97025587 100644
      inputs.reset_outputs()
      j = torch.arange(lmax, device=pos.device)
 diff --git a/test/registered/kernels/ops/attention/test_fp4_indexer.py b/test/registered/kernels/ops/attention/test_fp4_indexer.py
-index ade6e92c7e..c3c301c97b 100644
+index 0f003cdf5a..df1c88943d 100644
 --- a/test/registered/kernels/ops/attention/test_fp4_indexer.py
 +++ b/test/registered/kernels/ops/attention/test_fp4_indexer.py
-@@ -22,6 +22,7 @@ from sglang.kernels.ops.attention.dsv4.fp4_indexer import (
+@@ -18,6 +18,7 @@ from sglang.kernels.ops.attention.dsv4.fp4_indexer import (
      _e2m1_decode,
      _e8m0_decode,
      finish_paged_indexer_topk,
 +    fp4_index_logits_candidates,
      fp4_index_logits_decode,
      fp4_index_logits_paged,
-     quantize_fp4_indexer_tensor,
-@@ -603,6 +604,81 @@ def test_fp4_paged_logits_replay(batch, ratio, width, masked):
+ )
+@@ -433,6 +434,81 @@ def test_fp4_paged_logits_replay(batch, ratio, width, masked):
                  )
  
  
@@ -414,7 +414,7 @@ index ade6e92c7e..c3c301c97b 100644
  @pytest.mark.skipif(
      not torch.cuda.is_available()
      or torch.cuda.get_device_capability()[0] not in (9, 12),
-@@ -676,13 +752,15 @@ def test_paged_indexer_backends_replay(ratio):
+@@ -506,13 +582,15 @@ def test_paged_indexer_backends_replay(ratio):
          for i, out in enumerate(outputs)
      ]
      captured_scores = []
@@ -436,7 +436,7 @@ index ade6e92c7e..c3c301c97b 100644
  
      def run():
          full.topk_decode(decode_inputs[0])
-@@ -693,15 +771,21 @@ def test_paged_indexer_backends_replay(ratio):
+@@ -523,15 +601,21 @@ def test_paged_indexer_backends_replay(ratio):
      for _ in range(3):
          run()
      graph = torch.cuda.CUDAGraph()
@@ -467,7 +467,7 @@ index ade6e92c7e..c3c301c97b 100644
      for step, visible in enumerate([193, 0, 1, 7, 8, 9, 65, 193]):
          # -1 positions exercise zero-length padded rows, also for ratio 1.
          lens.copy_((visible - torch.arange(batch, device=q.device) % 6).clamp_min(0))
-@@ -738,7 +822,6 @@ def test_paged_indexer_backends_replay(ratio):
+@@ -568,7 +652,6 @@ def test_paged_indexer_backends_replay(ratio):
                      maxima.topk(min(4, nblocks)).values.sort().values,
                  )
              keep = torch.isin(torch.arange(width, device=q.device) // 8, blocks)

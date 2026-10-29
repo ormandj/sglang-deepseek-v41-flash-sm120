@@ -28,10 +28,10 @@ index 574f4a7969..3e5c36e21f 100644
      def _apply_dspark_budget_frac(self, key: str, value: Any) -> None:
          # A worker command, not a server arg: keep it out of the override.
 diff --git a/python/sglang/srt/speculative/dspark_components/dspark_planner.py b/python/sglang/srt/speculative/dspark_components/dspark_planner.py
-index 17a342c721..00c8187dd6 100644
+index abeb2da688..2de3f9e7cc 100644
 --- a/python/sglang/srt/speculative/dspark_components/dspark_planner.py
 +++ b/python/sglang/srt/speculative/dspark_components/dspark_planner.py
-@@ -378,10 +378,15 @@ class DSparkVerifyPlanner:
+@@ -386,10 +386,15 @@ class DSparkVerifyPlanner:
      ) -> Optional[RaggedVerifyLayout]:
          if self._ragged_verify_mode is RaggedVerifyMode.STATIC:
              return None
@@ -50,7 +50,7 @@ index 17a342c721..00c8187dd6 100644
              if key not in self._uniform_layout_cache:
                  self._uniform_layout_cache[key] = uniform_ragged_layout(
 diff --git a/test/registered/spec/dspark/test_dspark_scheduler.py b/test/registered/spec/dspark/test_dspark_scheduler.py
-index bc1a030a67..029d5f04e0 100644
+index b7a7827853..b3d85947e9 100644
 --- a/test/registered/spec/dspark/test_dspark_scheduler.py
 +++ b/test/registered/spec/dspark/test_dspark_scheduler.py
 @@ -1,14 +1,17 @@
@@ -82,7 +82,7 @@ index bc1a030a67..029d5f04e0 100644
  from sglang.test.ci.ci_register import register_cpu_ci
  from sglang.test.test_utils import CustomTestCase
  
-@@ -470,6 +474,69 @@ class TestGraphTierFillBudget(CustomTestCase):
+@@ -398,6 +402,69 @@ class TestGraphTierFillBudget(CustomTestCase):
              self.assertEqual(total, min(graph_num_tokens, bs * cap))
  
  
@@ -152,7 +152,7 @@ index bc1a030a67..029d5f04e0 100644
  class _FakeRaggedRunner(types.SimpleNamespace):
      pass
  
-@@ -553,5 +620,79 @@ class TestBudgetTierSelection(CustomTestCase):
+@@ -481,5 +548,79 @@ class TestBudgetTierSelection(CustomTestCase):
          )
  
  

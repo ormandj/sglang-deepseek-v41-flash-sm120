@@ -1,8 +1,8 @@
 diff --git a/python/sglang/kernels/ops/attention/dsv4/fp4_indexer.py b/python/sglang/kernels/ops/attention/dsv4/fp4_indexer.py
-index 4bcde3084b..232bcc37b3 100644
+index 37357a3a83..d129e805ee 100644
 --- a/python/sglang/kernels/ops/attention/dsv4/fp4_indexer.py
 +++ b/python/sglang/kernels/ops/attention/dsv4/fp4_indexer.py
-@@ -649,14 +649,24 @@ def index_k_rope_pack(
+@@ -357,14 +357,24 @@ def index_k_rope_pack(
  @triton.jit
  def _e2m1_decode(code):
      # code: uint 0..15 -> e2m1 value. exp = bits 2..1, mantissa = bit 0, sign = bit 3.
@@ -30,7 +30,7 @@ index 4bcde3084b..232bcc37b3 100644
  @triton.jit
  def _fp4_index_logits_tile(
      q_ptr,
-@@ -700,7 +710,7 @@ def _fp4_index_logits_tile(
+@@ -408,7 +418,7 @@ def _fp4_index_logits_tile(
          mask=valid[:, None],
          other=127,
      )
@@ -40,7 +40,7 @@ index 4bcde3084b..232bcc37b3 100644
      k_high = (high * scale).to(tl.bfloat16)  # elements 2i+1
  
 diff --git a/test/registered/kernels/ops/attention/test_fp4_indexer.py b/test/registered/kernels/ops/attention/test_fp4_indexer.py
-index 328223494d..ade6e92c7e 100644
+index ce83a937c0..0f003cdf5a 100644
 --- a/test/registered/kernels/ops/attention/test_fp4_indexer.py
 +++ b/test/registered/kernels/ops/attention/test_fp4_indexer.py
 @@ -6,6 +6,8 @@ from unittest.mock import patch
@@ -50,9 +50,9 @@ index 328223494d..ade6e92c7e 100644
 +import triton
 +import triton.language as tl
  
- from sglang.kernels.ops.attention.deepseek_v4_rope import (
-     apply_rotary_emb_triton,
-@@ -17,6 +19,8 @@ from sglang.kernels.ops.attention.dsv4 import (
+ from sglang.kernels.ops.attention.dsv4 import (
+     CompressorDecodePlan,
+@@ -13,6 +15,8 @@ from sglang.kernels.ops.attention.dsv4 import (
      fused_q_indexer_rope_hadamard_fp4_quant,
  )
  from sglang.kernels.ops.attention.dsv4.fp4_indexer import (
@@ -61,7 +61,7 @@ index 328223494d..ade6e92c7e 100644
      finish_paged_indexer_topk,
      fp4_index_logits_decode,
      fp4_index_logits_paged,
-@@ -385,6 +389,28 @@ def _reference_logits(q, weights, slots, lens, table):
+@@ -215,6 +219,28 @@ def _reference_logits(q, weights, slots, lens, table):
      return logits.masked_fill(position[None, :] >= lens[:, None], -torch.inf)
  
  

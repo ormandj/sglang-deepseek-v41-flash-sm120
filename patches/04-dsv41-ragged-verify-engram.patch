@@ -1,23 +1,20 @@
 diff --git a/python/sglang/srt/layers/attention/dsv4/dsv41_sparse.py b/python/sglang/srt/layers/attention/dsv4/dsv41_sparse.py
-index 7a32a5a107..717b0fb555 100644
+index 6b08bd9dbd..da96a8d065 100644
 --- a/python/sglang/srt/layers/attention/dsv4/dsv41_sparse.py
 +++ b/python/sglang/srt/layers/attention/dsv4/dsv41_sparse.py
-@@ -20,6 +20,10 @@ from sglang.kernels.ops.gemm.router_gemv_hip import rocm_gemv_split_k_max_tokens
- from sglang.kernels.ops.layernorm.rmsnorm_fp32 import rmsnorm_fp32
+@@ -20,6 +20,7 @@ from sglang.kernels.ops.quantization.fp4_fake_quant import (
+ )
  from sglang.srt.layers.linear import ReplicatedLinear
  from sglang.srt.layers.quantization.base_config import QuantizationConfig
-+from sglang.srt.speculative.ragged_verify import (
-+    ragged_verify_token_rows,
-+    resolve_ragged_verify_layout,
-+)
++from sglang.srt.speculative.ragged_verify import ragged_verify_token_rows
  from sglang.srt.utils import add_prefix, is_gfx95_supported
  
  
-@@ -75,6 +79,14 @@ def token_req_indices(forward_batch, *, num_tokens=None) -> torch.Tensor:
+@@ -75,6 +76,14 @@ def token_req_indices(forward_batch, *, num_tokens=None) -> torch.Tensor:
      if forward_batch.forward_mode.is_decode():
          return req
      if forward_batch.forward_mode.is_target_verify():
-+        layout = resolve_ragged_verify_layout(forward_batch)
++        layout = forward_batch.ragged_verify_layout
 +        if layout is not None:
 +            # Tokens past qo_indptr[-1] map to row bs (pool slot 0); padding the
 +            # staged layout gave to padding rows or the last real row follows them.
@@ -29,21 +26,18 @@ index 7a32a5a107..717b0fb555 100644
              req, int(forward_batch.spec_info.draft_token_num), output_size=num_tokens
          )
 diff --git a/python/sglang/srt/layers/engram.py b/python/sglang/srt/layers/engram.py
-index 57f16c77ae..fe7996dad9 100644
+index 58688776b9..66af6db01d 100644
 --- a/python/sglang/srt/layers/engram.py
 +++ b/python/sglang/srt/layers/engram.py
-@@ -53,6 +53,10 @@ from sglang.srt.layers.quantization.base_config import QuantizationConfig
- from sglang.srt.managers.schedule_batch import MM_PAD_SHIFT_VALUE
- from sglang.srt.model_executor.forward_batch_info import ForwardBatch
- from sglang.srt.runtime_context import get_model, get_parallel, get_serving
-+from sglang.srt.speculative.ragged_verify import (
-+    ragged_verify_token_rows,
-+    resolve_ragged_verify_layout,
-+)
+@@ -82,6 +82,7 @@ from sglang.srt.runtime_context import (
+     get_parallel,
+     get_serving,
+ )
++from sglang.srt.speculative.ragged_verify import ragged_verify_token_rows
  from sglang.srt.utils import add_prefix, is_cuda, is_gfx95_supported, is_hip
  from sglang.srt.utils.hf_transformers.tokenizer import get_tokenizer
  
-@@ -353,12 +357,22 @@ class EngramHasher(nn.Module):
+@@ -389,12 +390,22 @@ class EngramHasher(nn.Module):
              kmode = MODE_DECODE
              commit_rows, commit_last = req_slots, None
          elif mode.is_target_verify():
@@ -53,7 +47,7 @@ index 57f16c77ae..fe7996dad9 100644
 -                f"{num_tokens} tokens for {bs} requests of {block}"
 -            )
 -            kmode = MODE_VERIFY
-+            layout = resolve_ragged_verify_layout(forward_batch)
++            layout = forward_batch.ragged_verify_layout
 +            if layout is None:
 +                block = int(forward_batch.spec_info.draft_token_num)
 +                assert num_tokens == bs * block, (
@@ -73,11 +67,11 @@ index 57f16c77ae..fe7996dad9 100644
          else:
              assert mode.is_extend(), (
 diff --git a/python/sglang/srt/speculative/ragged_verify.py b/python/sglang/srt/speculative/ragged_verify.py
-index 92542e5530..b43aa83e00 100644
+index 1575948b3d..00aa20eeb7 100644
 --- a/python/sglang/srt/speculative/ragged_verify.py
 +++ b/python/sglang/srt/speculative/ragged_verify.py
-@@ -225,6 +225,19 @@ def resolve_ragged_verify_layout(forward_batch) -> Optional[RaggedVerifyLayout]:
-     return spec_info.ragged_verify_layout
+@@ -216,6 +216,19 @@ def build_capture_verify_lens(
+     return [base + 1] * rem + [base] * (num_slots - rem)
  
  
 +def ragged_verify_token_rows(
@@ -98,10 +92,10 @@ index 92542e5530..b43aa83e00 100644
      cu_seqlens_q: torch.Tensor
 diff --git a/test/registered/kernels/ops/attention/dsv4/test_dsv41_compact_verify.py b/test/registered/kernels/ops/attention/dsv4/test_dsv41_compact_verify.py
 new file mode 100644
-index 0000000000..57cc1c020d
+index 0000000000..d3b2e5b5d5
 --- /dev/null
 +++ b/test/registered/kernels/ops/attention/dsv4/test_dsv41_compact_verify.py
-@@ -0,0 +1,226 @@
+@@ -0,0 +1,225 @@
 +"""DeepSeek-V4.1 per-token request lookups under compact (packed) target verify."""
 +
 +import unittest
@@ -148,9 +142,8 @@ index 0000000000..57cc1c020d
 +        forward_mode=ForwardMode.TARGET_VERIFY,
 +        req_pool_indices=slots,
 +        positions=positions,
-+        spec_info=SimpleNamespace(
-+            draft_token_num=draft_token_num, ragged_verify_layout=layout
-+        ),
++        spec_info=SimpleNamespace(draft_token_num=draft_token_num),
++        ragged_verify_layout=layout,
 +        out_cache_loc=None if positions is None else torch.ones_like(positions),
 +    )
 +
@@ -329,18 +322,18 @@ index 0000000000..57cc1c020d
 +if __name__ == "__main__":
 +    unittest.main()
 diff --git a/test/registered/spec/dspark/test_ragged_verify.py b/test/registered/spec/dspark/test_ragged_verify.py
-index 95a713b055..c2ea087813 100644
+index e907db6ceb..fe8e2edd8b 100644
 --- a/test/registered/spec/dspark/test_ragged_verify.py
 +++ b/test/registered/spec/dspark/test_ragged_verify.py
-@@ -5,6 +5,7 @@ import torch
- from sglang.srt.speculative.ragged_verify import (
+@@ -6,6 +6,7 @@ from sglang.srt.speculative.ragged_verify import (
      RaggedVerifyLayout,
      build_ragged_target_verify_geometry,
+     compute_uniform_extend_lengths,
 +    ragged_verify_token_rows,
  )
  from sglang.test.ci.ci_register import register_cpu_ci
  from sglang.test.test_utils import CustomTestCase
-@@ -96,6 +97,17 @@ class TestPaddedRaggedVerifyGeometry(CustomTestCase):
+@@ -107,6 +108,17 @@ class TestPaddedRaggedVerifyGeometry(CustomTestCase):
          self.assertEqual(int(padded.qo_indptr_device[-1]), 16)
  
  
@@ -356,5 +349,5 @@ index 95a713b055..c2ea087813 100644
 +
 +
  class TestCaptureVerifyLens(CustomTestCase):
-     def test_small_tier_one_token_rows(self):
+     def test_rejects_overpacked_tier(self):
          from sglang.srt.speculative.ragged_verify import build_capture_verify_lens

@@ -1,43 +1,43 @@
 diff --git a/python/sglang/kernels/ops/attention/dsv4/index_logits.py b/python/sglang/kernels/ops/attention/dsv4/index_logits.py
-index b24711a14b..a55d6574a3 100644
+index 0a0f7db166..4c8154d570 100644
 --- a/python/sglang/kernels/ops/attention/dsv4/index_logits.py
 +++ b/python/sglang/kernels/ops/attention/dsv4/index_logits.py
-@@ -4,7 +4,7 @@ memory budget), the paged pool, or the published blocks of a sparse table."""
- 
+@@ -5,7 +5,7 @@ memory budget), the paged pool, or the published blocks of a sparse table."""
  from __future__ import annotations
  
+ import functools
 -from typing import Iterator, Tuple
 +from typing import Callable, Iterator, Tuple
  
  import torch
  
-@@ -33,16 +33,21 @@ def flat_index_logits_rows_per_tile(
+@@ -57,16 +57,19 @@ def flat_index_logits_rows_per_tile(
+     *,
      heads: int,
      budget_bytes: int,
-     item_size: int = _LOGITS_DTYPE_BYTES,
 +    scratch_row_bytes: int = 0,
 +    scratch_tile_bytes: int = 0,
  ) -> int:
--    """Rows per logits tile within ``budget_bytes`` (sized as fp32, which also
--    bounds bf16), at the kernel's row alignment."""
-+    """Rows per tile so that a tile's logits (sized as fp32, which also bounds
-+    bf16), plus its consumer's scratch, ``scratch_row_bytes`` a row and
-+    ``scratch_tile_bytes`` a tile, stay within ``budget_bytes``: ``rows`` when all
-+    fit, else a multiple of the kernel's row group, at least one row group even
-+    when that exceeds the budget."""
+-    """Rows per logits tile within ``budget_bytes``, at the kernel's row alignment.
+-    Tiles are sized as fp32 logits whatever the logits dtype: bf16 tiles then fill
+-    half the budget, which leaves room for the per-row selection scratch that
+-    grows with the tile."""
++    """Rows per tile so that a tile's logits (sized as fp32 whatever the logits
++    dtype, which also bounds bf16), plus its consumer's scratch,
++    ``scratch_row_bytes`` a row and ``scratch_tile_bytes`` a tile, stay within
++    ``budget_bytes``: ``rows`` when all fit, else a multiple of the kernel's row
++    group, at least one row group even when that exceeds the budget."""
      row_alignment = 128 // heads
-     # NOTE: for bf16, the estimated row bytes is 2 times the actual bytes
-     effective_width = width * item_size // 4
      rows_per_chunk = mqa_logits_rows_per_chunk(
          num_rows=ceil_align(rows, row_alignment),
--        row_bytes=mqa_logits_row_bytes(effective_width),
+-        row_bytes=mqa_logits_row_bytes(width),
 -        budget_bytes=budget_bytes,
-+        row_bytes=mqa_logits_row_bytes(effective_width) + scratch_row_bytes,
++        row_bytes=mqa_logits_row_bytes(width) + scratch_row_bytes,
 +        budget_bytes=max(1, budget_bytes - scratch_tile_bytes),
      )
      if rows_per_chunk is None:
          return rows
-@@ -58,19 +63,29 @@ def flat_index_logits_tiles(
+@@ -82,19 +85,29 @@ def flat_index_logits_tiles(
      lengths: torch.Tensor,
      context_lengths: list[int],
      budget_bytes: int,
@@ -70,100 +70,13 @@ index b24711a14b..a55d6574a3 100644
 +        scratch_row_bytes=scratch_row_bytes,
 +        scratch_tile_bytes=scratch_tile_bytes,
      )
-     for offset in range(0, rows, rows_per_chunk):
-         tile = slice(offset, min(offset + rows_per_chunk, rows))
-diff --git a/python/sglang/srt/layers/attention/deepseek_v4_backend.py b/python/sglang/srt/layers/attention/deepseek_v4_backend.py
-index 0ac54d0ad8..4c9dab0867 100644
---- a/python/sglang/srt/layers/attention/deepseek_v4_backend.py
-+++ b/python/sglang/srt/layers/attention/deepseek_v4_backend.py
-@@ -90,6 +90,9 @@ from sglang.srt.layers.attention.dsv4.v41_indexer import (
-     make_candidate_indexer,
-     make_full_topk_indexer,
- )
-+from sglang.srt.layers.attention.dsv4.v41_indexer.scoring import (
-+    prefill_score_budget_bytes,
-+)
- from sglang.srt.layers.attention.dsv4.v41_indexer.sparse_table import (
-     SparseTableBackend,
- )
-@@ -1052,6 +1055,9 @@ class DSV4Metadata:
-     # What the candidate-source layer published for the index-source layers after
-     # it, in the implementation's own type; never copied from the host.
-     candidate_metadata: Optional[CandidateMetadata] = None
-+    # The eager low-ratio prefill indexer's score-tile budget, read by its first
-+    # layer in this forward and shared by the rest.
-+    low_ratio_score_budget_bytes: Optional[int] = None
- 
-     # Built at the runner's prefill WAR boundary when the fast path is on,
-     # otherwise lazily by ``_forward_prefill_sparse``.
-@@ -1079,6 +1085,7 @@ class DSV4Metadata:
-         )
-         self.sparse_prefill_cache = None
-         self.prefill_shared_reads_snapshotted = False
-+        self.low_ratio_score_budget_bytes = None
- 
-     def refresh_for_breakable_cuda_graph_replay_(
-         self,
-@@ -1124,6 +1131,7 @@ class DSV4Metadata:
-             )
-         self.sparse_prefill_cache = None
-         self.prefill_shared_reads_snapshotted = False
-+        self.low_ratio_score_budget_bytes = None
- 
- 
- @dataclass
-@@ -2046,6 +2054,10 @@ class DeepseekV4AttnBackend(
-                 forward_batch.global_num_token_non_padded = bound
-                 forward_batch.num_token_non_padded = bound
-         tail_core = tail_metadata.core_attn_metadata
-+        if tail_metadata.low_ratio_score_budget_bytes is None:
-+            tail_metadata.low_ratio_score_budget_bytes = saved[
-+                0
-+            ].low_ratio_score_budget_bytes
-         self.forward_metadata = tail_metadata
-         if self.token_to_kv_pool.request_window is not None:
-             self.token_to_kv_pool.request_window.activate(
-@@ -3779,6 +3791,18 @@ class DeepseekV4AttnBackend(
-         else:
-             rows_per_request = _as_int_list(forward_batch.extend_seq_lens_cpu)
-             rows_per_request_device = forward_batch.extend_seq_lens
-+        seq_lens_cpu = _as_int_list(forward_batch.seq_lens_cpu)
-+        meta = self.forward_metadata
-+        if (
-+            meta.low_ratio_score_budget_bytes is None
-+            and self.full_topk_indexer.use_deep_gemm_prefill
-+        ):
-+            # Ratio 1 bounds both low-ratio score widths.
-+            meta.low_ratio_score_budget_bytes = prefill_score_budget_bytes(
-+                num_rows=x.shape[0],
-+                max_seq_len=max(seq_lens_cpu or (), default=0),
-+                device=x.device,
-+            )
-         return PrefillInputs(
-             indexer=layer.indexer,
-             layer_id=layer.layer_id,
-@@ -3790,7 +3814,7 @@ class DeepseekV4AttnBackend(
-             req_rows=req,
-             req_pool_indices=forward_batch.req_pool_indices,
-             kv_page_table=core.page_table,
--            seq_lens_cpu=_as_int_list(forward_batch.seq_lens_cpu),
-+            seq_lens_cpu=seq_lens_cpu,
-             rows_per_request=rows_per_request,
-             rows_per_request_device=rows_per_request_device,
-             out_raw_indices=core.sparse_raw_indices(layer.compress_ratio),
-@@ -3799,6 +3823,7 @@ class DeepseekV4AttnBackend(
-                 if self._low_ratio_prefill_reads_page_indices(forward_batch)
-                 else None
-             ),
-+            score_budget_bytes=meta.low_ratio_score_budget_bytes,
-         )
- 
-     def _low_ratio_prefill_reads_page_indices(self, forward_batch: ForwardBatch):
+     weights = weights.to(index_weights_dtype())
+     logits_dtype = index_logits_dtype()
 diff --git a/python/sglang/srt/layers/attention/dsv4/v41_indexer/dense_blocks.py b/python/sglang/srt/layers/attention/dsv4/v41_indexer/dense_blocks.py
-index 1e2394a1f9..5d0ac36e88 100644
+index 4477197699..294714e68c 100644
 --- a/python/sglang/srt/layers/attention/dsv4/v41_indexer/dense_blocks.py
 +++ b/python/sglang/srt/layers/attention/dsv4/v41_indexer/dense_blocks.py
-@@ -246,7 +246,13 @@ def _publish_prefill_blocks(
+@@ -244,7 +244,13 @@ def _publish_prefill_blocks(
      blocks = torch.full(
          (data.num_rows, width), -1, dtype=torch.int32, device=selected.device
      )
@@ -178,7 +91,7 @@ index 1e2394a1f9..5d0ac36e88 100644
          _publish_tile_blocks(
              data=data,
              tile=tile,
-@@ -277,9 +283,12 @@ def _publish_tile_blocks(
+@@ -275,9 +281,12 @@ def _publish_tile_blocks(
  ) -> None:
      lens = data.compress_lens[tile]
      for rows, lc in _requests_in_tile(data, tile):
@@ -193,7 +106,7 @@ index 1e2394a1f9..5d0ac36e88 100644
              -torch.inf,
          )
          ids = select_candidate_block_ids(
-@@ -302,7 +311,8 @@ def _consume_prefill_blocks(
+@@ -300,7 +309,8 @@ def _consume_prefill_blocks(
      selected = data.empty_selection(topk)
      # the block-aligned slices of `_consume_tile_blocks` stay within the logits width
      assert FLAT_LOGITS_WIDTH_ALIGN % block_size == 0
@@ -203,7 +116,7 @@ index 1e2394a1f9..5d0ac36e88 100644
          _consume_tile_blocks(
              data=data,
              tile=tile,
-@@ -342,6 +352,28 @@ def _consume_tile_blocks(
+@@ -340,6 +350,28 @@ def _consume_tile_blocks(
          )
  
  
@@ -233,7 +146,7 @@ index 1e2394a1f9..5d0ac36e88 100644
      start = 0
      for num_rows, lc in zip(data.rows_per_request, data.lens_per_request):
 diff --git a/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py b/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py
-index 0b97025587..163959a934 100644
+index a17ab68d60..a8bb5bf2b5 100644
 --- a/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py
 +++ b/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py
 @@ -5,7 +5,7 @@ a selection back into pool slots."""
@@ -245,7 +158,7 @@ index 0b97025587..163959a934 100644
  
  import msgspec
  import torch
-@@ -22,6 +22,15 @@ from sglang.kernels.ops.attention.dsv4.topk import (
+@@ -23,6 +23,15 @@ from sglang.kernels.ops.attention.dsv4.topk import (
      plan_topk_v2,
      topk_transform_paged_v2,
  )
@@ -261,7 +174,7 @@ index 0b97025587..163959a934 100644
  from sglang.srt.runtime_context import get_platform
  from sglang.srt.utils.common import async_h2d
  
-@@ -31,11 +40,28 @@ if TYPE_CHECKING:
+@@ -32,11 +41,41 @@ if TYPE_CHECKING:
      from sglang.srt.layers.attention.dsv4.dsv41_sparse import DeepseekV41Indexer
      from sglang.srt.mem_cache.deepseek_v4_memory_pool import DeepSeekV4TokenToKVPool
  
@@ -270,42 +183,42 @@ index 0b97025587..163959a934 100644
  _DEEP_GEMM_SCORE_BUDGET_BYTES = 2 << 30
  
  
-+def prefill_score_budget_bytes(
-+    *, num_rows: int, max_seq_len: int, device: torch.device
-+) -> int:
-+    """Budget for logits and declared scratch; skip the free-memory query for
-+    small or captured forwards."""
-+    cap = _DEEP_GEMM_SCORE_BUDGET_BYTES
-+    if not mqa_logits_needs_budget_check(num_rows=num_rows, num_cols=max_seq_len):
-+        return cap
-+    # Not get_is_capture_mode(): breakable-graph replay runs this eagerly and
-+    # can afford the free-memory query.
-+    if (
++def _capturing() -> bool:
++    # Not get_is_capture_mode(): breakable-graph replay runs the scorers eagerly.
++    return (
 +        capture_mode.is_capture_mode
 +        or torch.cuda.is_current_stream_capturing()
 +        or is_in_tc_piecewise_cuda_graph()
-+    ):
-+        return min(cap, mqa_logits_static_budget_bytes(device_index=device.index))
-+    return min(cap, mqa_logits_budget_bytes(device_index=device.index, allow_sync=True))
++    )
++
++
++def prefill_score_budget_bytes(
++    *, num_rows: int, max_seq_len: int, device: torch.device
++) -> int:
++    """Budget for one score tile and its declared scratch: the static budget
++    under graph capture, else a share of the memory the forward can allocate,
++    at most the fixed cap. Small forwards skip the query."""
++    cap = _DEEP_GEMM_SCORE_BUDGET_BYTES
++    if not mqa_logits_needs_budget_check(num_rows=num_rows, num_cols=max_seq_len):
++        return cap
++    index = torch.cuda.current_device() if device.index is None else device.index
++    if _capturing():
++        return min(cap, mqa_logits_static_budget_bytes(device_index=index))
++    budget = min(cap, mqa_logits_budget_bytes(device_index=index, allow_sync=True))
++    if budget < cap:
++        # Free device memory leaves out the caching allocator's unused blocks, and
++        # a running server's allocator ends up holding nearly all of it, which would
++        # shrink every tile to a few rows. Return those blocks and read again, so
++        # the budget follows the memory that is actually in use.
++        torch.cuda.empty_cache()
++        budget = min(cap, mqa_logits_budget_bytes(device_index=index, allow_sync=True))
++    return budget
 +
 +
  class DeepGEMMDecodeData(msgspec.Struct, frozen=True):
      q_fp4: torch.Tensor  # [rows, 1, heads, 64] int8, packed fp4
      q_sf: torch.Tensor  # [rows, 1, heads] int32, packed ue8m0
-@@ -55,6 +81,8 @@ class DeepGEMMPrefillData(msgspec.Struct, frozen=True):
-     q_fp4: torch.Tensor  # [rows, heads, 64] int8, packed fp4
-     q_sf: torch.Tensor  # [rows, heads] int32, packed ue8m0
-     weights: torch.Tensor  # [rows, heads] fp32 head weights
-+    # This forward's prefill_score_budget_bytes; None takes the fixed cap.
-+    score_budget_bytes: Optional[int] = None
- 
-     @property
-     def num_rows(self) -> int:
-@@ -205,10 +233,19 @@ def get_deep_gemm_prefill_data(
-         q_fp4=q_fp4,
-         q_sf=q_sf,
-         weights=weights,
-+        score_budget_bytes=inputs.score_budget_bytes,
+@@ -268,7 +307,19 @@ def get_deep_gemm_prefill_data(inputs: PrefillInputs) -> Optional[DeepGEMMPrefil
      )
  
  
@@ -316,13 +229,17 @@ index 0b97025587..163959a934 100644
 +    *,
 +    scratch_bytes: Callable[[int], Tuple[int, int]] = lambda width: (0, 0),
 +) -> Generator[Tuple[slice, torch.Tensor], None, None]:
-+    budget = _DEEP_GEMM_SCORE_BUDGET_BYTES
-+    if data.score_budget_bytes is not None:
-+        budget = min(budget, data.score_budget_bytes)
++    """``flat_index_logits_tiles`` over the prefill rows, each tile with the
++    caller's declared scratch within ``prefill_score_budget_bytes``."""
++    budget = prefill_score_budget_bytes(
++        num_rows=data.num_rows,
++        max_seq_len=max(data.lens_per_request, default=0),
++        device=data.q_fp4.device,
++    )
      yield from flat_index_logits_tiles(
          q=(data.q_fp4, data.q_sf),
          kv=kv,
-@@ -216,7 +253,8 @@ def score_tiles(data: DeepGEMMPrefillData, kv: Tuple[torch.Tensor, torch.Tensor]
+@@ -276,7 +327,8 @@ def score_tiles(data: DeepGEMMPrefillData, kv: Tuple[torch.Tensor, torch.Tensor]
          starts=data.request_starts,
          lengths=data.compress_lens,
          context_lengths=data.lens_per_request,
@@ -333,10 +250,10 @@ index 0b97025587..163959a934 100644
  
  
 diff --git a/python/sglang/srt/layers/attention/dsv4/v41_indexer/sparse_table.py b/python/sglang/srt/layers/attention/dsv4/v41_indexer/sparse_table.py
-index cbdca3e415..66e4cca3b2 100644
+index 63c19a6daf..3d720025bd 100644
 --- a/python/sglang/srt/layers/attention/dsv4/v41_indexer/sparse_table.py
 +++ b/python/sglang/srt/layers/attention/dsv4/v41_indexer/sparse_table.py
-@@ -486,6 +486,11 @@ def _row_pair_ids(rows_per_request: List[int], *, device: torch.device) -> torch
+@@ -499,6 +499,11 @@ def _row_pair_ids(rows_per_request: List[int], *, device: torch.device) -> torch
      return (row - ((row - first_row[request]) & 1)).to(torch.int32)
  
  
@@ -348,7 +265,7 @@ index cbdca3e415..66e4cca3b2 100644
  # TODO(dark): support fusion of publish + topk of publish layer
  def publish_prefill_table(
      *,
-@@ -505,7 +510,9 @@ def publish_prefill_table(
+@@ -518,7 +523,9 @@ def publish_prefill_table(
      blocks = torch.empty(rows, topk_blocks, dtype=torch.int32, device=device)
      zero_offsets = torch.zeros(rows, dtype=torch.int32, device=device)
      # the block keys read the score rows through 32-byte vectors
@@ -359,7 +276,7 @@ index cbdca3e415..66e4cca3b2 100644
          lens = data.compress_lens[tile]
          topk_ragged(logits, lens, out=out_positions[tile], offsets=zero_offsets[tile])
          # keys past a row's block count stay unset; the top-k reads a row
-@@ -523,6 +530,8 @@ def publish_prefill_table(
+@@ -536,6 +543,8 @@ def publish_prefill_table(
              out_offsets=zero_offsets[: logits.shape[0]],
              out_indices=blocks[tile],
          )
@@ -368,34 +285,22 @@ index cbdca3e415..66e4cca3b2 100644
      return _build_prefill_table(
          blocks=blocks,
          compress_lens=data.compress_lens,
-diff --git a/python/sglang/srt/layers/attention/dsv4/v41_indexer/types.py b/python/sglang/srt/layers/attention/dsv4/v41_indexer/types.py
-index 7800b366ac..9965b4c27d 100644
---- a/python/sglang/srt/layers/attention/dsv4/v41_indexer/types.py
-+++ b/python/sglang/srt/layers/attention/dsv4/v41_indexer/types.py
-@@ -62,6 +62,9 @@ class PrefillInputs(msgspec.Struct, frozen=True, kw_only=True):
-     out_raw_indices: torch.Tensor
-     out_page_indices: Optional[torch.Tensor]
- 
-+    # None uses the fixed cap.
-+    score_budget_bytes: Optional[int] = None
-+
-     def reset_outputs(self) -> None:
-         self.out_raw_indices.fill_(-1)
-         if self.out_page_indices is not None:
 diff --git a/test/registered/kernels/ops/attention/test_dense_prefill_indexer.py b/test/registered/kernels/ops/attention/test_dense_prefill_indexer.py
-index 77df9c4670..a6657c3a72 100644
+index db11598ad5..7cdffca09f 100644
 --- a/test/registered/kernels/ops/attention/test_dense_prefill_indexer.py
 +++ b/test/registered/kernels/ops/attention/test_dense_prefill_indexer.py
-@@ -3,12 +3,16 @@ from unittest.mock import patch
+@@ -3,6 +3,10 @@ from unittest.mock import patch
  
  import torch
  
 +from sglang.kernels.ops.attention.dsv4.candidate_blocks import (
 +    select_candidate_block_ids,
 +)
- from sglang.kernels.ops.attention.dsv4.fp4_indexer import quantize_fp4_indexer_tensor
 +from sglang.kernels.ops.attention.dsv4.index_logits import FLAT_LOGITS_WIDTH_ALIGN
- from sglang.srt.layers.attention.dsv4.v41_indexer import dense_blocks, scoring
+ from sglang.kernels.ops.quantization.fp4_indexer_quant import (
+     quantize_fp4_indexer_tensor,
+ )
+@@ -10,7 +14,7 @@ from sglang.srt.layers.attention.dsv4.v41_indexer import dense_blocks, scoring
  from sglang.test.ci.ci_register import register_cuda_ci
  from sglang.test.test_utils import CustomTestCase
  
@@ -404,7 +309,7 @@ index 77df9c4670..a6657c3a72 100644
  
  
  def make_inputs(request_lengths, ratio=1, zero_queries=False, seed=17):
-@@ -48,10 +52,8 @@ def make_inputs(request_lengths, ratio=1, zero_queries=False, seed=17):
+@@ -50,10 +54,8 @@ def make_inputs(request_lengths, ratio=1, zero_queries=False, seed=17):
      )
  
  
@@ -417,7 +322,7 @@ index 77df9c4670..a6657c3a72 100644
          k_slots=torch.arange(inputs["kv"][0].shape[0], device="cuda"),
          request_starts=inputs["starts"],
          lens_per_request=[n for _, n in inputs["request_lengths"]],
-@@ -61,6 +63,12 @@ def run_dense(inputs, *, publish_candidates, candidates):
+@@ -63,6 +65,12 @@ def run_dense(inputs, *, publish_candidates, candidates):
          q_sf=inputs["q"][1],
          weights=inputs["weights"],
      )
@@ -430,7 +335,7 @@ index 77df9c4670..a6657c3a72 100644
      if publish_candidates:
          selected, blocks = dense_blocks._publish_prefill_blocks(
              data=data,
-@@ -368,5 +376,154 @@ class TestDensePrefillIndexer(CustomTestCase):
+@@ -377,5 +385,212 @@ class TestDensePrefillIndexer(CustomTestCase):
                  del inputs, candidates
  
  
@@ -583,14 +488,72 @@ index 77df9c4670..a6657c3a72 100644
 +                self.assertLessEqual(peak_past(baseline, 0), logits + slack)
 +
 +
++def budget_logits(inputs):
++    """Tiles under the real forward budget (no patched cap), on the host."""
++    data = prefill_data(inputs)
++    parts = []
++    for tile, logits in scoring.score_tiles(data, inputs["kv"]):
++        parts.append(logits.cpu())
++        del logits
++    return torch.cat(parts), len(parts)
++
++
++@unittest.skipUnless(
++    torch.cuda.is_available() and torch.cuda.get_device_capability()[0] in (10, 12),
++    "requires SM100 or SM120",
++)
++class TestPrefillScoreBudgetOnDevice(CustomTestCase):
++    request_lengths = [(3, 4093), (2045, 485_123)]
++
++    def park_free_memory(self, keep_bytes):
++        """Leave keep_bytes free to the driver, the rest in the allocator's cache."""
++        torch.cuda.synchronize()
++        free, _ = torch.cuda.mem_get_info()
++        held = torch.empty(max(0, free - keep_bytes), dtype=torch.uint8, device="cuda")
++        del held
++
++    def test_cached_memory_does_not_shrink_the_tiles(self):
++        inputs = make_inputs(self.request_lengths)
++        torch.cuda.empty_cache()
++        reference, tiles = budget_logits(inputs)
++        self.park_free_memory(64 << 20)
++        parked, parked_tiles = budget_logits(inputs)
++        self.assertEqual(parked_tiles, tiles)
++        valid = (
++            torch.arange(reference.shape[1])[None, :] < inputs["lengths"].cpu()[:, None]
++        )
++        self.assertTrue(torch.equal(parked[valid], reference[valid]))
++
++    def test_memory_in_use_shrinks_the_tiles_with_the_same_scores(self):
++        inputs = make_inputs(self.request_lengths)
++        torch.cuda.empty_cache()
++        reference, tiles = budget_logits(inputs)
++        torch.cuda.synchronize()
++        free, _ = torch.cuda.mem_get_info()
++        # In use, not cached: about 1.2 GiB stays free, a 0.24 GiB budget.
++        held = torch.empty(
++            max(0, free - (1200 << 20)), dtype=torch.uint8, device="cuda"
++        )
++        try:
++            small, small_tiles = budget_logits(inputs)
++        finally:
++            del held
++            torch.cuda.empty_cache()
++        self.assertGreater(small_tiles, tiles)
++        valid = (
++            torch.arange(reference.shape[1])[None, :] < inputs["lengths"].cpu()[:, None]
++        )
++        self.assertTrue(torch.equal(small[valid], reference[valid]))
++
++
  if __name__ == "__main__":
      unittest.main()
 diff --git a/test/registered/unit/layers/test_dsv41_prefill_score_tiles.py b/test/registered/unit/layers/test_dsv41_prefill_score_tiles.py
 new file mode 100644
-index 0000000000..e080b6002c
+index 0000000000..9ec5bb6fb2
 --- /dev/null
 +++ b/test/registered/unit/layers/test_dsv41_prefill_score_tiles.py
-@@ -0,0 +1,616 @@
+@@ -0,0 +1,490 @@
 +"""CPU checks for prefill tile budgets and selection equivalence."""
 +
 +import contextlib
@@ -600,7 +563,6 @@ index 0000000000..e080b6002c
 +import weakref
 +from unittest.mock import patch
 +
-+import msgspec
 +import torch
 +
 +import sglang.kernels.ops.attention.dsv4 as dsv4_ops
@@ -611,11 +573,6 @@ index 0000000000..e080b6002c
 +from sglang.kernels.ops.attention.dsv4.index_logits import (
 +    FLAT_LOGITS_WIDTH_ALIGN,
 +    flat_index_logits_rows_per_tile,
-+)
-+from sglang.srt.layers.attention import deepseek_v4_backend
-+from sglang.srt.layers.attention.deepseek_v4_backend import (
-+    DeepseekV4AttnBackend,
-+    DSV4Metadata,
 +)
 +from sglang.srt.layers.attention.dsv4.v41_indexer import (
 +    dense_blocks,
@@ -845,33 +802,6 @@ index 0000000000..e080b6002c
 +                        del logits
 +                    self.assertEqual(covered, list(range(data.num_rows)))
 +
-+    def test_forward_budget_lowers_but_never_raises_the_cap(self):
-+        data, kv, _ = make_case(CASES[0], ratio=1)
-+        width = ceil_align(max(data.lens_per_request), FLAT_LOGITS_WIDTH_ALIGN)
-+        group = ROW_ALIGN * mqa_logits_row_bytes(width)
-+        for cap_groups, forward_groups, expected_rows in (
-+            (100, None, data.num_rows),
-+            (100, 2, 2 * ROW_ALIGN),
-+            (2, 100, 2 * ROW_ALIGN),
-+        ):
-+            with self.subTest(cap=cap_groups, forward=forward_groups):
-+                fake = FakeDeepGEMM()
-+                budget_data = msgspec.structs.replace(
-+                    data,
-+                    score_budget_bytes=(
-+                        None if forward_groups is None else forward_groups * group
-+                    ),
-+                )
-+                with (
-+                    patch.dict(sys.modules, {"deep_gemm": fake.module()}),
-+                    patch.object(
-+                        scoring, "_DEEP_GEMM_SCORE_BUDGET_BYTES", cap_groups * group
-+                    ),
-+                ):
-+                    for _ in scoring.score_tiles(budget_data, kv):
-+                        pass
-+                self.assertEqual(fake.allocations[0][0], expected_rows)
-+
 +
 +class TestSelectionIgnoresTiling(CustomTestCase):
 +    def run_all(self, data, kv):
@@ -1016,17 +946,19 @@ index 0000000000..e080b6002c
 +class TestPrefillScoreBudget(CustomTestCase):
 +    device = torch.device("cuda", 0)
 +
-+    def budget(
-+        self,
-+        *,
-+        rows=8192,
-+        seq_len=485_000,
-+        capturing=None,
-+        free=1 << 30,
-+        static=3 << 30,
-+    ):
-+        def no_query(**_):
-+            raise AssertionError("the free-memory budget was queried")
++    def budget(self, *, reads=(1 << 30,), capturing=None, rows=8192, seq_len=485_000):
++        """The budget with free-memory reads replaced by ``reads`` (one per query)
++        and the allocator's empty_cache recorded."""
++        calls = {"reads": 0, "empty_cache": 0}
++        values = list(reads)
++
++        def read(*, device_index, allow_sync):
++            assert allow_sync and device_index == 0
++            calls["reads"] += 1
++            return values.pop(0)
++
++        def empty_cache():
++            calls["empty_cache"] += 1
 +
 +        with contextlib.ExitStack() as stack:
 +            stack.enter_context(
@@ -1034,175 +966,80 @@ index 0000000000..e080b6002c
 +            )
 +            if capturing:
 +                stack.enter_context(CAPTURE_STATES[capturing]())
++            stack.enter_context(patch.object(scoring, "mqa_logits_budget_bytes", read))
 +            stack.enter_context(
 +                patch.object(
-+                    scoring,
-+                    "mqa_logits_budget_bytes",
-+                    (
-+                        no_query
-+                        if capturing
-+                        else lambda *, device_index, allow_sync: (
-+                            free if allow_sync else static
-+                        )
-+                    ),
++                    scoring, "mqa_logits_static_budget_bytes", lambda **_: 3 << 30
 +                )
 +            )
-+            stack.enter_context(
-+                patch.object(
-+                    scoring, "mqa_logits_static_budget_bytes", lambda **_: static
-+                )
-+            )
-+            return scoring.prefill_score_budget_bytes(
++            stack.enter_context(patch.object(torch.cuda, "empty_cache", empty_cache))
++            value = scoring.prefill_score_budget_bytes(
 +                num_rows=rows, max_seq_len=seq_len, device=self.device
 +            )
++        return value, calls
 +
-+    def test_free_memory_lowers_the_cap(self):
-+        self.assertEqual(self.budget(free=400 << 20), 400 << 20)
-+        self.assertEqual(self.budget(free=8 << 30), 2 << 30)
++    def test_ample_free_memory_takes_the_cap_without_reclaiming(self):
++        value, calls = self.budget(reads=(8 << 30,))
++        self.assertEqual(value, 2 << 30)
++        self.assertEqual(calls, {"reads": 1, "empty_cache": 0})
 +
-+    def test_capture_uses_the_static_budget_capped(self):
++    def test_low_free_memory_returns_unused_blocks_and_reads_again(self):
++        """A running server's allocator holds nearly all free memory: the second
++        read, after empty_cache, decides."""
++        value, calls = self.budget(reads=(10 << 20, 700 << 20))
++        self.assertEqual(value, 700 << 20)
++        self.assertEqual(calls, {"reads": 2, "empty_cache": 1})
++        value, _ = self.budget(reads=(10 << 20, 8 << 30))
++        self.assertEqual(value, 2 << 30)
++
++    def test_capture_uses_the_static_budget_without_querying(self):
 +        for name in CAPTURE_STATES:
 +            with self.subTest(capturing=name):
-+                self.assertEqual(self.budget(capturing=name), 2 << 30)
-+                self.assertEqual(self.budget(capturing=name, static=1 << 30), 1 << 30)
++                value, calls = self.budget(reads=(), capturing=name)
++                self.assertEqual(value, 2 << 30)
++                self.assertEqual(calls, {"reads": 0, "empty_cache": 0})
 +
-+    def test_breakable_replay_queries_free_memory(self):
++    def test_breakable_replay_reads_free_memory(self):
 +        with enable_breakable_cuda_graph():
-+            self.assertEqual(self.budget(free=400 << 20), 400 << 20)
++            value, calls = self.budget(reads=(10 << 20, 400 << 20))
++        self.assertEqual(value, 400 << 20)
++        self.assertEqual(calls["empty_cache"], 1)
 +
 +    def test_small_forward_skips_the_query(self):
-+        with patch.object(
-+            scoring,
-+            "mqa_logits_budget_bytes",
-+            lambda **_: self.fail("queried"),
-+        ):
-+            self.assertEqual(
-+                scoring.prefill_score_budget_bytes(
-+                    num_rows=16, max_seq_len=4096, device=self.device
-+                ),
-+                2 << 30,
-+            )
++        value, calls = self.budget(reads=(), rows=16, seq_len=4096)
++        self.assertEqual(value, 2 << 30)
++        self.assertEqual(calls["reads"], 0)
 +
 +
-+def fake_metadata(late_layer_tail=None):
-+    core = types.SimpleNamespace(
-+        page_table=torch.zeros(1),
-+        low_ratios=(),
-+        sparse_raw_indices=lambda ratio: torch.zeros(1),
-+        sparse_page_indices=lambda ratio: None,
-+    )
-+    return DSV4Metadata(
-+        core_attn_metadata=core,
-+        indexer_metadata=None,
-+        late_layer_tail=late_layer_tail,
-+    )
-+
-+
-+class TestBackendReadsTheBudgetOncePerForward(CustomTestCase):
-+    def make_inputs(self, backend, rows=8192):
-+        layer = types.SimpleNamespace(
-+            indexer=None, layer_id=0, compress_ratio=1, freqs_cis=None
-+        )
-+        forward_batch = types.SimpleNamespace(
-+            extend_seq_lens_cpu=[rows],
-+            extend_seq_lens=torch.tensor([rows]),
-+            seq_lens_cpu=[485_000],
-+            req_pool_indices=torch.zeros(1, dtype=torch.int64),
-+        )
-+        return DeepseekV4AttnBackend._make_low_ratio_prefill_indexer_inputs(
-+            backend, layer, torch.zeros(rows, 1), None, None, None, forward_batch, None
-+        )
-+
-+    def make_backend(self, deep_gemm):
-+        return types.SimpleNamespace(
-+            forward_metadata=fake_metadata(),
-+            full_topk_indexer=types.SimpleNamespace(use_deep_gemm_prefill=deep_gemm),
-+            _low_ratio_prefill_reads_page_indices=lambda forward_batch: False,
-+        )
-+
-+    def test_one_read_per_forward_shared_with_the_tail(self):
-+        reads = []
++class TestScoreTilesTakeTheForwardBudget(CustomTestCase):
++    def test_tiles_are_sized_by_the_budget_for_their_rows_and_width(self):
++        data, kv, _ = make_case(CASES[0], ratio=1)
++        width = ceil_align(max(data.lens_per_request), FLAT_LOGITS_WIDTH_ALIGN)
++        group = ROW_ALIGN * mqa_logits_row_bytes(width)
++        asked = []
 +
 +        def budget(**kwargs):
-+            reads.append(kwargs)
-+            return 123 << 20
++            asked.append(kwargs)
++            return 2 * group
 +
-+        backend = self.make_backend(deep_gemm=True)
-+        with patch.object(deepseek_v4_backend, "prefill_score_budget_bytes", budget):
-+            first = self.make_inputs(backend)
-+            second = self.make_inputs(backend)
-+            self.assertEqual(len(reads), 1)
-+            self.assertEqual(reads[0]["num_rows"], 8192)
-+            self.assertEqual(reads[0]["max_seq_len"], 485_000)
-+            self.assertEqual(first.score_budget_bytes, 123 << 20)
-+            self.assertEqual(second.score_budget_bytes, 123 << 20)
-+            tail = types.SimpleNamespace(
-+                cp_metadata=None,
-+                extend_seq_lens_cpu=[128],
-+                extend_seq_lens=torch.tensor([128]),
-+                real_rows_count=None,
-+            )
-+            backend.tail_forward_metadata = fake_metadata(late_layer_tail=tail)
-+            backend.token_to_kv_pool = types.SimpleNamespace(request_window=None)
-+            saved = DeepseekV4AttnBackend.enter_late_layer_tail(
-+                backend,
-+                types.SimpleNamespace(
-+                    attn_cp_metadata=None,
-+                    global_num_token_non_padded_cpu=None,
-+                    global_num_token_non_padded=None,
-+                    num_token_non_padded=None,
-+                ),
-+            )
-+            self.assertIs(saved[0].core_attn_metadata.page_table, first.kv_page_table)
-+            self.assertEqual(
-+                backend.forward_metadata.low_ratio_score_budget_bytes, 123 << 20
-+            )
-+            self.make_inputs(backend, rows=128)
-+            self.assertEqual(len(reads), 1)
-+            backend.forward_metadata = fake_metadata()
-+            self.make_inputs(backend)
-+            self.assertEqual(len(reads), 2)
-+
-+    def test_torch_scorers_do_not_read(self):
-+        backend = self.make_backend(deep_gemm=False)
-+        with patch.object(
-+            deepseek_v4_backend,
-+            "prefill_score_budget_bytes",
-+            lambda **_: self.fail("read"),
++        fake = FakeDeepGEMM()
++        with (
++            patch.dict(sys.modules, {"deep_gemm": fake.module()}),
++            patch.object(scoring, "prefill_score_budget_bytes", budget),
 +        ):
-+            self.assertIsNone(self.make_inputs(backend).score_budget_bytes)
-+
-+    def test_budget_reaches_the_prefill_data(self):
-+        backend = self.make_backend(deep_gemm=True)
-+        with patch.object(
-+            deepseek_v4_backend, "prefill_score_budget_bytes", lambda **_: 123 << 20
-+        ):
-+            inputs = self.make_inputs(backend, rows=4)
-+        inputs = msgspec.structs.replace(
-+            inputs,
-+            positions=torch.arange(4, 8),
-+            seq_lens_cpu=[8],
-+            rows_per_request=[4],
-+            rows_per_request_device=torch.tensor([4]),
++            for _ in scoring.score_tiles(data, kv):
++                pass
++        self.assertEqual(
++            asked,
++            [
++                {
++                    "num_rows": data.num_rows,
++                    "max_seq_len": max(data.lens_per_request),
++                    "device": data.q_fp4.device,
++                }
++            ],
 +        )
-+        q = (torch.zeros(4, HEADS, 64), torch.zeros(4, HEADS), torch.zeros(4, HEADS))
-+        with patch.object(scoring, "_index_q_and_weights", lambda **_: q):
-+            data = scoring.get_deep_gemm_prefill_data(
-+                inputs, req_to_token=torch.arange(8)[None]
-+            )
-+        self.assertEqual(data.score_budget_bytes, 123 << 20)
-+
-+    def test_graph_replay_copies_clear_the_budget(self):
-+        for method, kwargs in (
-+            ("copy_", {}),
-+            ("refresh_for_breakable_cuda_graph_replay_", {"two_level": False}),
-+        ):
-+            with self.subTest(method=method):
-+                metadata = fake_metadata()
-+                metadata.low_ratio_score_budget_bytes = 1 << 20
-+                setattr(metadata.core_attn_metadata, method, lambda other: None)
-+                getattr(metadata, method)(fake_metadata(), **kwargs)
-+                self.assertIsNone(metadata.low_ratio_score_budget_bytes)
++        self.assertEqual(fake.allocations[0][0], 2 * ROW_ALIGN)
 +
 +
 +if __name__ == "__main__":

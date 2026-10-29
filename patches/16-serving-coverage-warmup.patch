@@ -519,7 +519,7 @@ index 2608621f6a..6c6bcd19b8 100644
      """Warmup Triton kernels across a wide range of prefill seq_lens (up to 32K).
 diff --git a/test/registered/unit/entrypoints/test_serving_coverage_warmup.py b/test/registered/unit/entrypoints/test_serving_coverage_warmup.py
 new file mode 100644
-index 0000000000..26748fbc39
+index 0000000000..caef1bc700
 --- /dev/null
 +++ b/test/registered/unit/entrypoints/test_serving_coverage_warmup.py
 @@ -0,0 +1,713 @@
@@ -798,7 +798,7 @@ index 0000000000..26748fbc39
 +        tm = FakeTokenizerManager(image_token="<image>")
 +        with (
 +            self._replay_override(),
-+            override_platform(is_cuda=False),
++            override_platform(is_cuda=False, is_hip=False),
 +            self.assertLogs(warmup_module.logger, level="INFO") as cm,
 +        ):
 +            phases = _phases(tm)
@@ -811,7 +811,7 @@ index 0000000000..26748fbc39
 +
 +    async def test_encoder_swa_bounded_replay_on_cuda_keeps_the_image_phase(self):
 +        tm = FakeTokenizerManager(image_token="<image>")
-+        with self._replay_override(), override_platform(is_cuda=True):
++        with self._replay_override(), override_platform(is_cuda=True, is_hip=False):
 +            phases = _phases(tm)
 +            self.assertIn("image", phases)
 +            await phases["image"]()
