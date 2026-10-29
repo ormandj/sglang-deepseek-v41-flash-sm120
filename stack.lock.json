@@ -402,7 +402,7 @@
       "id": "dsv41-indexer-prefill-tile-budget",
       "kind": "pr",
       "pr": 43376,
-      "head": "c28c12fe053ede875934e8c8d22d4a2b009620d5",
+      "head": "5dab886f6be63a31ea3cacad3465636069f54a42",
       "upstream_pr": "https://github.com/sgl-project/sglang/pull/43376",
       "purpose": "DSv4.1 prefill indexer score tiles sized by memory in use (free memory read again after returning the caching allocator's unused blocks), with their scratch counted and no padded copy: the OOM fix without shrinking tiles on a long-running server.",
       "base": "974831643fd5a4944b506439d4404ae64fe69539",
