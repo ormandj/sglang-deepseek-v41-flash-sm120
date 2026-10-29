@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "lineage": "dsv41-platform",
-  "candidate_tag": "v0.5.0-rc.1",
+  "candidate_tag": "v0.5.0-rc.2",
   "platform": "linux/amd64",
   "base": {
     "tag": "docker.io/lmsysorg/sglang:nightly-dev-cu13-20261029-c10e0e17",
@@ -27,7 +27,7 @@
       "ref": "refs/heads/main",
       "commit": "974831643fd5a4944b506439d4404ae64fe69539",
       "tree": "5c11af255523779fddadd2d581a6e7cf098dbce7",
-      "effective_tree": "e4bab3deee21671f207811ddad92ffd2e03dfe3d"
+      "effective_tree": "9a59b6e86b133184492054f1cd8461c7a82e9dd3"
     },
     "triton": {
       "repository": "https://github.com/triton-lang/triton.git",
@@ -402,16 +402,16 @@
       "id": "dsv41-indexer-prefill-tile-budget",
       "kind": "pr",
       "pr": 43376,
-      "head": "5dab886f6be63a31ea3cacad3465636069f54a42",
+      "head": "b7b433967d7e18bb3892a17cc5724972bbd129a3",
       "upstream_pr": "https://github.com/sgl-project/sglang/pull/43376",
-      "purpose": "DSv4.1 prefill indexer score tiles sized by memory in use (free memory read again after returning the caching allocator's unused blocks), with their scratch counted and no padded copy: the OOM fix without shrinking tiles on a long-running server.",
+      "purpose": "DSv4.1 prefill indexer score tiles sized by memory in use (when free memory alone would leave tiles of fewer than 256 rows, the caching allocator's unused blocks are returned and it is read again), with their scratch counted and no padded copy: the OOM fix without shrinking tiles on a long-running server.",
       "base": "974831643fd5a4944b506439d4404ae64fe69539",
       "applied": "clean",
       "cpu_tests": [
         "test/registered/unit/layers/test_dsv41_prefill_score_tiles.py"
       ],
       "path": "patches/24-dsv41-indexer-prefill-tile-budget.patch",
-      "sha256": "ca441dafec54ab887e649b8b712ef07e886e80f2f7dd561aead0c79a7d0d6cca",
+      "sha256": "8a73a494eafd7251d191436880bf639b98287dba671ed9ed2c226589b60bc8ec",
       "note": "Free memory alone left out the allocator's cache, so on a running server deep chunks fell to tiles of a few rows (0.4.2-0.4.3); a fixed tile pool was measured and rejected (it starves the MoE workspace or costs ~500 KV tokens per MiB)."
     },
     {

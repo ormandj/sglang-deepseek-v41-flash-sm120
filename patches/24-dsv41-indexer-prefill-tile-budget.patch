@@ -146,7 +146,7 @@ index 4477197699..294714e68c 100644
      start = 0
      for num_rows, lc in zip(data.rows_per_request, data.lens_per_request):
 diff --git a/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py b/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py
-index a17ab68d60..a8bb5bf2b5 100644
+index a17ab68d60..6b02b6cfe6 100644
 --- a/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py
 +++ b/python/sglang/srt/layers/attention/dsv4/v41_indexer/scoring.py
 @@ -5,7 +5,7 @@ a selection back into pool slots."""
@@ -158,13 +158,14 @@ index a17ab68d60..a8bb5bf2b5 100644
  
  import msgspec
  import torch
-@@ -23,6 +23,15 @@ from sglang.kernels.ops.attention.dsv4.topk import (
+@@ -23,6 +23,16 @@ from sglang.kernels.ops.attention.dsv4.topk import (
      plan_topk_v2,
      topk_transform_paged_v2,
  )
 +from sglang.srt.layers.attention.mqa_logits_utils import (
 +    mqa_logits_budget_bytes,
 +    mqa_logits_needs_budget_check,
++    mqa_logits_row_bytes,
 +    mqa_logits_static_budget_bytes,
 +)
 +from sglang.srt.model_executor.runner_backend_utils.tc_piecewise_cuda_graph import (
@@ -174,15 +175,18 @@ index a17ab68d60..a8bb5bf2b5 100644
  from sglang.srt.runtime_context import get_platform
  from sglang.srt.utils.common import async_h2d
  
-@@ -32,11 +41,41 @@ if TYPE_CHECKING:
+@@ -32,9 +42,45 @@ if TYPE_CHECKING:
      from sglang.srt.layers.attention.dsv4.dsv41_sparse import DeepseekV41Indexer
      from sglang.srt.mem_cache.deepseek_v4_memory_pool import DeepSeekV4TokenToKVPool
  
 -# TODO: use a per-forward mqa_logits_budget_bytes() budget that also
 -# leaves room for candidate block ids and block-selection scratch.
  _DEEP_GEMM_SCORE_BUDGET_BYTES = 2 << 30
- 
- 
++# Below this many rows of the widest score row per tile, tiles get slow enough to
++# be worth returning the allocator's unused blocks before reading free memory.
++_RECLAIM_BELOW_ROWS = 256
++
++
 +def _capturing() -> bool:
 +    # Not get_is_capture_mode(): breakable-graph replay runs the scorers eagerly.
 +    return (
@@ -197,7 +201,9 @@ index a17ab68d60..a8bb5bf2b5 100644
 +) -> int:
 +    """Budget for one score tile and its declared scratch: the static budget
 +    under graph capture, else a share of the memory the forward can allocate,
-+    at most the fixed cap. Small forwards skip the query."""
++    at most the fixed cap. Small forwards skip the query, and the allocator's
++    cache is emptied first only when free memory alone would leave tiles of
++    fewer than ``_RECLAIM_BELOW_ROWS`` rows."""
 +    cap = _DEEP_GEMM_SCORE_BUDGET_BYTES
 +    if not mqa_logits_needs_budget_check(num_rows=num_rows, num_cols=max_seq_len):
 +        return cap
@@ -205,7 +211,8 @@ index a17ab68d60..a8bb5bf2b5 100644
 +    if _capturing():
 +        return min(cap, mqa_logits_static_budget_bytes(device_index=index))
 +    budget = min(cap, mqa_logits_budget_bytes(device_index=index, allow_sync=True))
-+    if budget < cap:
++    wanted = min(num_rows, _RECLAIM_BELOW_ROWS) * mqa_logits_row_bytes(max_seq_len)
++    if budget < min(cap, wanted):
 +        # Free device memory leaves out the caching allocator's unused blocks, and
 +        # a running server's allocator ends up holding nearly all of it, which would
 +        # shrink every tile to a few rows. Return those blocks and read again, so
@@ -213,12 +220,10 @@ index a17ab68d60..a8bb5bf2b5 100644
 +        torch.cuda.empty_cache()
 +        budget = min(cap, mqa_logits_budget_bytes(device_index=index, allow_sync=True))
 +    return budget
-+
-+
+ 
+ 
  class DeepGEMMDecodeData(msgspec.Struct, frozen=True):
-     q_fp4: torch.Tensor  # [rows, 1, heads, 64] int8, packed fp4
-     q_sf: torch.Tensor  # [rows, 1, heads] int32, packed ue8m0
-@@ -268,7 +307,19 @@ def get_deep_gemm_prefill_data(inputs: PrefillInputs) -> Optional[DeepGEMMPrefil
+@@ -268,7 +314,19 @@ def get_deep_gemm_prefill_data(inputs: PrefillInputs) -> Optional[DeepGEMMPrefil
      )
  
  
@@ -239,7 +244,7 @@ index a17ab68d60..a8bb5bf2b5 100644
      yield from flat_index_logits_tiles(
          q=(data.q_fp4, data.q_sf),
          kv=kv,
-@@ -276,7 +327,8 @@ def score_tiles(data: DeepGEMMPrefillData, kv: Tuple[torch.Tensor, torch.Tensor]
+@@ -276,7 +334,8 @@ def score_tiles(data: DeepGEMMPrefillData, kv: Tuple[torch.Tensor, torch.Tensor]
          starts=data.request_starts,
          lengths=data.compress_lens,
          context_lengths=data.lens_per_request,
@@ -550,10 +555,10 @@ index db11598ad5..7cdffca09f 100644
      unittest.main()
 diff --git a/test/registered/unit/layers/test_dsv41_prefill_score_tiles.py b/test/registered/unit/layers/test_dsv41_prefill_score_tiles.py
 new file mode 100644
-index 0000000000..9ec5bb6fb2
+index 0000000000..80bc7fe8cf
 --- /dev/null
 +++ b/test/registered/unit/layers/test_dsv41_prefill_score_tiles.py
-@@ -0,0 +1,490 @@
+@@ -0,0 +1,501 @@
 +"""CPU checks for prefill tile budgets and selection equivalence."""
 +
 +import contextlib
@@ -982,6 +987,17 @@ index 0000000000..9ec5bb6fb2
 +        value, calls = self.budget(reads=(8 << 30,))
 +        self.assertEqual(value, 2 << 30)
 +        self.assertEqual(calls, {"reads": 1, "empty_cache": 0})
++
++    def test_enough_rows_per_tile_skip_the_reclaim(self):
++        """Below the cap but at least _RECLAIM_BELOW_ROWS rows of the widest
++        score row: the first read stands."""
++        row = mqa_logits_row_bytes(485_000)
++        value, calls = self.budget(reads=(300 * row,))
++        self.assertEqual(value, 300 * row)
++        self.assertEqual(calls, {"reads": 1, "empty_cache": 0})
++        value, calls = self.budget(reads=(100 * row, 400 * row))
++        self.assertEqual(value, 400 * row)
++        self.assertEqual(calls, {"reads": 2, "empty_cache": 1})
 +
 +    def test_low_free_memory_returns_unused_blocks_and_reads_again(self):
 +        """A running server's allocator holds nearly all free memory: the second

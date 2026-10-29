@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.5.0-rc.2
+
+0.5.0-rc.1 with patch 24 (sgl-project/sglang#43376) returning the allocator's unused blocks only when free memory alone would leave score tiles of fewer than 256 rows. rc.1 did so on every deep prefill forward, which cost about 25 ms per 8K chunk on an idle server. Same stack.
+
 ## v0.5.0-rc.1
 
 0.4.3 rebuilt on current upstream sources, with prefill that no longer slows down on deep prompts once the server has been running. The model is unchanged; the launcher selects the Engram host tables with `--engram-config`.
