@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.5.0-rc.5
+
+0.5.0-rc.4 with patch 13 (sgl-project/sglang#42985 at e60bfae9de) no longer recording each residual on the mHC stats stream. The record made the caching allocator hold every freed residual until the GPU caught up with the CPU, so an 8K prefill chunk kept about twenty 320 MiB residuals (about 6 GiB) alive at once and every chunk, plus the startup warmups, went through the allocator's OOM retry. The post already joins the stats stream before it reads the residual. Same stack.
+
 ## v0.5.0-rc.4
 
 0.5.0-rc.3 with patch 30: the MXFP4 CUTLASS MoE passes FlashInfer one persistent workspace per stream, sized once by FlashInfer, instead of letting every call allocate and free about 1 GiB of scratch. On a running server rc.3 logged a caching-allocator OOM retry on every prefill chunk (each retry succeeded). Same stack.

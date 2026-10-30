@@ -123,10 +123,10 @@ index fa63e2758e..1fc94ee241 100644
          return hidden_states
  
 diff --git a/python/sglang/srt/models/deepseek_v4_mhc.py b/python/sglang/srt/models/deepseek_v4_mhc.py
-index c8b1df1696..a587d50575 100644
+index c8b1df1696..9a8fec6155 100644
 --- a/python/sglang/srt/models/deepseek_v4_mhc.py
 +++ b/python/sglang/srt/models/deepseek_v4_mhc.py
-@@ -301,6 +301,40 @@ def make_boundary(
+@@ -301,6 +301,52 @@ def make_boundary(
  # ---------------------------------------------------------------------------
  
  
@@ -159,9 +159,21 @@ index c8b1df1696..a587d50575 100644
 +) -> HcTriplet:
 +    """Fork the stats stream here, right before the sublayer's TP all-reduce, and
 +    issue the triplet on it. The caller joins the stream before the post reads
-+    the triplet."""
++    the triplet.
++
++    The residual is not recorded on the stats stream. The post joins that stream
++    before it reads the residual, and the residual is released only after the
++    post, so any main-stream reuse of its memory is already ordered after the mix
++    GEMM. Recording it would instead hold each freed residual until the GPU
++    caught up with the CPU, which in a prefill forward is most of the layers:
++    an 8K chunk would keep about twenty 320 MiB residuals alive at once."""
 +    fork_stats_stream(stats_stream)
-+    return mix_stats(hc, residual, stats_stream)
++    main_stream = torch.cuda.current_stream()
++    with torch.cuda.stream(stats_stream):
++        coefficients = _mix_stats_impl(hc, residual)
++    for coefficient in coefficients:
++        coefficient.record_stream(main_stream)
++    return coefficients
 +
 +
  def use_stats_stream(cfg: HcConfig, forward_batch: ForwardBatch, x: torch.Tensor):
@@ -196,10 +208,10 @@ index 1f5a9b28c8..e012ba4ec4 100644
              Layout(frozenset()),
 diff --git a/test/registered/unit/models/test_deepseek_v4_mhc_prefill_overlap.py b/test/registered/unit/models/test_deepseek_v4_mhc_prefill_overlap.py
 new file mode 100644
-index 0000000000..0d6f21a69e
+index 0000000000..89b0334d26
 --- /dev/null
 +++ b/test/registered/unit/models/test_deepseek_v4_mhc_prefill_overlap.py
-@@ -0,0 +1,352 @@
+@@ -0,0 +1,351 @@
 +"""DeepSeek-V4.1 mHC: in wide target prefill (4096 to 65536 rows) each sublayer's
 +triplet runs on the stats stream beside that sublayer's TP all-reduce. The boundary
 +transport forks the stream right before the sum it is about to complete (attention
@@ -435,12 +447,11 @@ index 0000000000..0d6f21a69e
 +
 +class TestMhcPrefillStatsOverlap(CustomTestCase):
 +    def _assert_side_stream_lifetimes(self, run):
-+        # The residual is read on the stats stream and the triplet on the main
-+        # stream; each must be recorded there so the caching allocator does not
-+        # reuse its memory early.
-+        self.assertEqual(
-+            run.residual.record_stream.call_args_list, [mock.call(run.side)]
-+        )
++        # The triplet is read on the main stream and must be recorded there. The
++        # residual is not recorded on the stats stream: the post joins that
++        # stream before the residual can be released, and recording it would
++        # hold every layer's residual until the GPU caught up.
++        run.residual.record_stream.assert_not_called()
 +        self.assertEqual(len(run.coefficients), 3)
 +        for coefficient in run.coefficients:
 +            coefficient.record_stream.assert_called_once_with(run.main)

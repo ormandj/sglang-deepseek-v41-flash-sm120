@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "lineage": "dsv41-platform",
-  "candidate_tag": "v0.5.0-rc.4",
+  "candidate_tag": "v0.5.0-rc.5",
   "platform": "linux/amd64",
   "base": {
     "tag": "docker.io/lmsysorg/sglang:nightly-dev-cu13-20261029-c10e0e17",
@@ -27,7 +27,7 @@
       "ref": "refs/heads/main",
       "commit": "974831643fd5a4944b506439d4404ae64fe69539",
       "tree": "5c11af255523779fddadd2d581a6e7cf098dbce7",
-      "effective_tree": "cd7a64788b4f968423030c442a22d3627124aa6b"
+      "effective_tree": "cfe856343427189365436e03c74c48d432f4a125"
     },
     "triton": {
       "repository": "https://github.com/triton-lang/triton.git",
@@ -223,7 +223,7 @@
       "id": "mhc-prefill-stats-overlap",
       "kind": "pr",
       "pr": 42985,
-      "head": "bf274a721198740aeb21be48869832af02a15703",
+      "head": "e60bfae9dea176fedf14a45d6c1b9108c2bba6c5",
       "upstream_pr": "https://github.com/sgl-project/sglang/pull/42985",
       "purpose": "Wide prefill computes the mHC mix stats while the TP all-reduce runs again (restores the overlap #42245 removed).",
       "base": "974831643fd5a4944b506439d4404ae64fe69539",
@@ -235,7 +235,7 @@
         "test/registered/unit/layer_boundary/test_moe_output_reduction.py"
       ],
       "path": "patches/13-mhc-prefill-stats-overlap.patch",
-      "sha256": "3fe11d69a3fdf1eb180cf5d03b17619aa57192612264359ac1a10bc489249a4d"
+      "sha256": "c122dfbf29116e066ccb91be6e50d9e64b8afc0ffff74a111af3c6fed7b0313b"
     },
     {
       "id": "pcie-ipc-gather",
