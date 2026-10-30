@@ -61,7 +61,17 @@ jobs:
             /usr/local/share/powershell \
             /usr/local/share/vcpkg \
             /usr/share/swift \
-            /usr/share/dotnet
+            /usr/share/dotnet \
+            /usr/lib/jvm \
+            /usr/local/lib/node_modules \
+            /opt/google \
+            /opt/microsoft \
+            /opt/pipx \
+            /usr/local/julia* \
+            /usr/share/miniconda \
+            /opt/mssql-tools \
+            /usr/local/aws-cli \
+            /usr/local/aws-sam-cli
           docker system prune --all --force
 
           # GitHub currently assigns this label two layouts: one has roughly
@@ -98,13 +108,16 @@ jobs:
             swap_dir=/mnt
             root_avail=$mnt_avail
           fi
-          # Retain at least 64 GiB for image extraction and build layers.
-          if (( root_avail < (32 + 64) * 1024 * 1024 )); then
+          # Retain at least 100 GiB for image extraction and build layers: the
+          # stack layer alone (FlashInfer cubins, DeepGEMM and Triton builds) peaks
+          # above 110 GiB. Three compiler jobs used well under 1 GiB of swap, so
+          # 8 GiB is headroom, not working memory.
+          if (( root_avail < (8 + 100) * 1024 * 1024 )); then
             echo "insufficient disk for compiler swap and image layers" >&2
             exit 1
           fi
           swap_file="${swap_dir%/}/dsv41-build.swap"
-          sudo fallocate -l 32G "$swap_file"
+          sudo fallocate -l 8G "$swap_file"
           sudo chmod 0600 "$swap_file"
           sudo mkswap "$swap_file"
           sudo swapon "$swap_file"
