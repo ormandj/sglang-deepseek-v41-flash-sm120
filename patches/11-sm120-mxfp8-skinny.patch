@@ -19,7 +19,7 @@ index 045adb0337..8e6c42d649 100644
          op="gemm.gptq_marlin_gemm",
 diff --git a/python/sglang/kernels/ops/gemm/sm120_mxfp8_skinny_gemm.py b/python/sglang/kernels/ops/gemm/sm120_mxfp8_skinny_gemm.py
 new file mode 100644
-index 0000000000..eb488617d6
+index 0000000000..a29af53b89
 --- /dev/null
 +++ b/python/sglang/kernels/ops/gemm/sm120_mxfp8_skinny_gemm.py
 @@ -0,0 +1,219 @@
@@ -47,7 +47,7 @@ index 0000000000..eb488617d6
 +import triton
 +import triton.language as tl
 +
-+from sglang.kernels.ops.layernorm.mxfp8_epilogue import ue8m0_scale
++from sglang.kernels.ops.quantization.mxfp8_epilogue import ue8m0_scale
 +
 +# Linear layers dispatch rows up to this count to the kernel.
 +MAX_M = 16

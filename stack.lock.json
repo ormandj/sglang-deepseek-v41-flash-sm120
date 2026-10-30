@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "lineage": "dsv41-platform",
-  "candidate_tag": "v0.5.0-rc.2",
+  "candidate_tag": "v0.5.0-rc.3",
   "platform": "linux/amd64",
   "base": {
     "tag": "docker.io/lmsysorg/sglang:nightly-dev-cu13-20261029-c10e0e17",
@@ -27,7 +27,7 @@
       "ref": "refs/heads/main",
       "commit": "974831643fd5a4944b506439d4404ae64fe69539",
       "tree": "5c11af255523779fddadd2d581a6e7cf098dbce7",
-      "effective_tree": "9a59b6e86b133184492054f1cd8461c7a82e9dd3"
+      "effective_tree": "9835210ca778e0e0e023e3d266ea6412fca3fe90"
     },
     "triton": {
       "repository": "https://github.com/triton-lang/triton.git",
@@ -192,7 +192,7 @@
       "id": "sm120-mxfp8-skinny",
       "kind": "pr",
       "pr": 42865,
-      "head": "391c2a8f4042e975ee49a453a98b9d1a37b43deb",
+      "head": "b2182fc605fb2752bec49dd1e451134aed09872c",
       "upstream_pr": "https://github.com/sgl-project/sglang/pull/42865",
       "purpose": "Split-K MXFP8 GEMM for tuned decode-sized linears at up to 16 rows (SGLANG_ENABLE_SM120_MXFP8_SKINNY_GEMM, default on).",
       "base": "974831643fd5a4944b506439d4404ae64fe69539",
@@ -201,7 +201,7 @@
         "test/registered/unit/kernels/test_kernels_namespace.py"
       ],
       "path": "patches/11-sm120-mxfp8-skinny.patch",
-      "sha256": "8382877f4da5c75838406a9e8c87920c1a53cdfdd165ea3f2033fe335acf0c7f",
+      "sha256": "45c0c008d54d1a5b49d315133f2791ec00c3b90f83d6747d95e3ff3023d8ca72",
       "note": "Registered with main's slimmer KernelSpec (#44690)."
     },
     {
@@ -527,11 +527,11 @@
       "The package `cosmos-guardrail` requires `imageio>=2.37.0`, but `2.36.0` is installed",
       "The package `cosmos-guardrail` requires `opencv-python>=4.10.0.84`, but it's not installed",
       "The package `retinaface-py` requires `opencv-python`, but it's not installed",
-      "The package `nixl` requires `nixl-cu12==1.5.0`, but it's not installed",
+      "The package `nixl` requires `nixl-cu12==1.5.1`, but it's not installed",
       "The package `ai-dynamo-runtime` requires `pydantic>=2.10.6,<=2.13.5`, but `2.14.1` is installed"
     ],
     "required": {
-      "nixl-cu13": "==1.5.0",
+      "nixl-cu13": "==1.5.1",
       "nvidia-nccl-cu13": "==2.30.7",
       "opencv-python-headless": ">=4.10.0.84",
       "pillow": ">=12.3.0"
@@ -541,7 +541,7 @@
       "nixl-cu12",
       "moviepy"
     ],
-    "rationale": "The vendor base deliberately substitutes headless OpenCV, CUDA 13 NIXL and NCCL 2.30.7, and SGLang's diffusion extra pins imageio 2.36.0. The 20261016 vendor base ships ai-dynamo-runtime (NVIDIA Dynamo, never imported by SGLang) with pydantic 2.14.1; this build changes neither package. Every other `uv pip check` result fails the build."
+    "rationale": "The vendor base deliberately substitutes headless OpenCV, CUDA 13 NIXL and NCCL 2.30.7, and SGLang's diffusion extra pins imageio 2.36.0. The vendor base ships ai-dynamo-runtime (NVIDIA Dynamo, never imported by SGLang) with pydantic 2.14.1; this build changes neither package. Every other `uv pip check` result fails the build."
   },
   "added_dependencies": [
     {

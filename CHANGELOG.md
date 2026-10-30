@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.5.0-rc.3
+
+0.5.0-rc.2 with patch 11 (sgl-project/sglang#42865) importing `ue8m0_scale` from SGLang `main`'s `kernels/ops/quantization` (rc.2 failed the installed-image import check), and the dependency gate expecting the 2026-10-29 vendor base's NIXL 1.5.1. Same stack.
+
 ## v0.5.0-rc.2
 
 0.5.0-rc.1 with patch 24 (sgl-project/sglang#43376) returning the allocator's unused blocks only when free memory alone would leave score tiles of fewer than 256 rows. rc.1 did so on every deep prefill forward, which cost about 25 ms per 8K chunk on an idle server. Same stack.
