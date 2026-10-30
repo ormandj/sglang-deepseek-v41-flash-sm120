@@ -2,11 +2,11 @@
 
 An SGLang image, built from pinned sources, for [`deepseek-ai/DeepSeek-V4.1-Flash-1017`](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017) on four RTX PRO 6000 Blackwell (SM120) GPUs over PCIe: tensor parallelism 4 with expert parallelism 2, FP8 KV cache, DSpark speculative decoding, a 1,048,576-token context, image input and a host-RAM prefix cache.
 
-The current published stable image is `v0.4.3`.
+The current published stable image is `v0.5.0`.
 
 | | |
 |---|---|
-| Image | `ghcr.io/ormandj/sglang-deepseek-v41-flash-sm120:v0.4.3` |
+| Image | `ghcr.io/ormandj/sglang-deepseek-v41-flash-sm120:v0.5.0` |
 | Model | `deepseek-ai/DeepSeek-V4.1-Flash-1017` at revision `1bae0e1088993b9b82de08f59de5be5a34e42170` |
 | GPUs | four 96 GB RTX PRO 6000 Blackwell (SM120) with working PCIe peer-to-peer; no NVLink needed |
 | Host RAM | about 250 GiB in use while serving (189 GiB of Engram tables plus the HiCache host tier); 384 GB or more recommended |
@@ -34,21 +34,18 @@ The first start compiles kernels and measures the speculative-decoding cost tabl
 
 ## Measured
 
-Validation runs on four RTX PRO 6000 Blackwell Max-Q GPUs at 250 W each, with the privately built 0.4.2 image (0.4.3 changes only the startup warmup), at the model card's sampling (temperature 1.0, `top_p` 1.0), three repetitions per cell:
+Hardware: four RTX PRO 6000 Blackwell Max-Q GPUs at 250 W each, using the launcher's settings. The measurements used the privately built 0.5.0 image from the same sources and patches; the published image was built separately.
 
-| Concurrency | C1 | C2 | C4 | C8 | C16 |
-|---|---|---|---|---|---|
-| Decode output tok/s | 202 | 322 | 497 | 674 | 1,051 |
+- Deep cold prefill on a running server: eight requests were decoding, and the memory allocator had been in use for five minutes. Nine cold prompts of 106K to 491K tokens were then sent at once, 2.07M prompt tokens in total. They finished in 147 s. The 8K prefill chunks took 0.55 s median and 0.67 s at most (258 chunks), about 14K prompt tok/s at every depth.
+- A long conversation read from the prefix cache, with eight requests decoding: a cold 491,520-token prompt took 35 s. Then 12 turns each added 2,000 tokens, up to 515,520, and took 0.37 to 0.40 s each.
+- Serving: over its first eight hours of real traffic, the server handled 5,981 requests, with up to 13 running at once and up to 5 queued. They carried 662M prompt tokens (93% read from the prefix cache) and 19.1M output tokens; 5-minute aggregate output peaked at 1,020 tok/s. There were no restarts, no server errors and no allocator out-of-memory retries.
+- Device KV pool: 2,926,848 tokens across requests; one request may use up to 1,048,576.
 
-- Cold prefill: about 14.1K, 14.9K and 14.7K prompt tok/s at 8K, 32K and 128K tokens.
-- Device KV pool: 2,931,712 tokens across requests; one request may use up to 1,048,576.
-- The DeepSeek-V4.1-Flash-1017 model writes shorter answers than the earlier V4.1-Flash checkpoint, so answers finish sooner than its output rate alone suggests.
-
-These are controlled measurements and do not necessarily represent real-world performance. Output rates include reasoning tokens and depend on speculative acceptance. Details and the benchmark scope are in [CHANGELOG.md](CHANGELOG.md).
+The concurrency panel (C1 to C16 decode output tok/s) and the cold-prefill table have not been rerun for 0.5.0 yet. [CHANGELOG.md](CHANGELOG.md) has 0.4.2's figures. These measurements do not necessarily represent other workloads. Output rates include reasoning tokens and depend on speculative acceptance.
 
 ## Source and patches
 
-The image is built from four upstream commits, recorded in [`stack.lock.json`](stack.lock.json) with their trees and every patch's hash: SGLang `main`, FlashInfer `main`, sgl-project DeepGEMM `release/v0.2.3` and Triton `release/3.8.x`, on the `lmsysorg/sglang` CUDA 13 nightly, which supplies CUDA, PyTorch and runtime libraries only. SGLang, FlashInfer, DeepGEMM and Triton are rebuilt from source. [`scripts/verify-patches.sh`](scripts/verify-patches.sh) fetches the official commits, applies the series and checks every resulting tree.
+The image is built from four upstream commits, recorded in [`stack.lock.json`](stack.lock.json) with their trees and every patch's hash: SGLang `main`, FlashInfer `main`, sgl-project DeepGEMM `v0.2.3.post2` and Triton `release/3.8.x`, on the `lmsysorg/sglang` CUDA 13 nightly, which supplies CUDA, PyTorch and runtime libraries only. SGLang, FlashInfer, DeepGEMM and Triton are rebuilt from source. [`scripts/verify-patches.sh`](scripts/verify-patches.sh) fetches the official commits, applies the series and checks every resulting tree.
 
 SGLang series, applied in order to the pinned SGLang commit:
 
@@ -83,7 +80,7 @@ SGLang series, applied in order to the pinned SGLang commit:
 | 27 | `27-openai-error-envelope.patch` | [sgl-project/sglang#45130](https://github.com/sgl-project/sglang/pull/45130) | OpenAI routes return errors in OpenAI's error format |
 | 28 | `28-openai-abort-finish-reason.patch` | [sgl-project/sglang#45132](https://github.com/sgl-project/sglang/pull/45132) | Aborted requests are reported as an error or a stop, never `finish_reason: "abort"` |
 | 29 | `29-openai-stream-exception-frame.patch` | [sgl-project/sglang#45133](https://github.com/sgl-project/sglang/pull/45133) | Failed chat and completion streams end with an error frame and `[DONE]` |
-| 30 | `30-flashinfer-cutlass-moe-workspace.patch` | not yet upstream | The MXFP4 CUTLASS MoE reuses one FlashInfer workspace per stream instead of allocating about 1 GiB of scratch on every call (no allocator OOM retries on a running server) |
+| 30 | `30-flashinfer-cutlass-moe-workspace.patch` | [sgl-project/sglang#47404](https://github.com/sgl-project/sglang/pull/47404) (first revision) | The MXFP4 CUTLASS MoE reuses one FlashInfer workspace per stream instead of allocating about 1 GiB of scratch on every call (no allocator OOM retries on a running server) |
 
 FlashInfer series, applied to the pinned FlashInfer commit:
 

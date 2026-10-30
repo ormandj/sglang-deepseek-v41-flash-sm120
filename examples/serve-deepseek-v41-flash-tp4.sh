@@ -5,7 +5,7 @@ set -euo pipefail
 : "${MODEL_DIR:?set MODEL_DIR to the local deepseek-ai/DeepSeek-V4.1-Flash checkpoint}"
 : "${CACHE_DIR:?set CACHE_DIR to a version-specific persistent cache directory}"
 
-IMAGE=${IMAGE:-ghcr.io/ormandj/sglang-deepseek-v41-flash-sm120:v0.4.3}
+IMAGE=${IMAGE:-ghcr.io/ormandj/sglang-deepseek-v41-flash-sm120:v0.5.0}
 PORT=${PORT:-8000}
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 TP_SIZE=${TP_SIZE:-4}
@@ -81,8 +81,6 @@ exec docker run --rm \
   --env SGLANG_RAGGED_VERIFY_SUB_WIDTH_TIERS=1 \
   --env SGLANG_DSPARK_BUDGET_SURVIVAL_EMA=0.15 \
   --env SGLANG_MOE_COPY_WEIGHT_VIEWS_BEFORE_H2D=1 \
-  --env SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE=1 \
-  --env SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT=per_rank \
   --env SGLANG_ENABLE_PCIE_IPC_ALLREDUCE=1 \
   --env SGLANG_PCIE_IPC_MAX_NUMEL=41943040 \
   --env SGLANG_SPEC_TP_SYNC=rng \
@@ -116,6 +114,7 @@ exec docker run --rm \
   --min-free-slots-delay 1 \
   --cuda-graph-max-bs-decode 16 \
   --load-format instanttensor \
+  --engram-config '{"placement": "cpu", "replication": "none"}' \
   --kv-cache-dtype fp8_e4m3 \
   --disable-custom-all-reduce \
   --fp8-gemm-backend flashinfer_cutlass \
