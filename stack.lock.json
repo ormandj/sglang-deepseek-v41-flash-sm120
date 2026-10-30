@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "lineage": "dsv41-platform",
-  "candidate_tag": "v0.5.0-rc.3",
+  "candidate_tag": "v0.5.0-rc.4",
   "platform": "linux/amd64",
   "base": {
     "tag": "docker.io/lmsysorg/sglang:nightly-dev-cu13-20261029-c10e0e17",
@@ -27,7 +27,7 @@
       "ref": "refs/heads/main",
       "commit": "974831643fd5a4944b506439d4404ae64fe69539",
       "tree": "5c11af255523779fddadd2d581a6e7cf098dbce7",
-      "effective_tree": "9835210ca778e0e0e023e3d266ea6412fca3fe90"
+      "effective_tree": "cd7a64788b4f968423030c442a22d3627124aa6b"
     },
     "triton": {
       "repository": "https://github.com/triton-lang/triton.git",
@@ -504,6 +504,22 @@
       ],
       "path": "patches/29-openai-stream-exception-frame.patch",
       "sha256": "400c1bf4763a1c2914c3106f0b3959d13c46b1c6c9a8471eb0937093262419b5"
+    },
+    {
+      "id": "flashinfer-cutlass-moe-workspace",
+      "kind": "branch",
+      "branch": "up/flashinfer-cutlass-moe-workspace",
+      "head": "135f8ec203d689bad575ca185bd7e498143f05e7",
+      "upstream_pr": "TBD",
+      "purpose": "The MXFP4 CUTLASS MoE passes FlashInfer one persistent workspace_buffer per device and stream, sized by cutlass_fused_moe_workspace_size, instead of letting it allocate and free about 1 GiB of scratch on every call, which on a running server went through the caching allocator's OOM retry on every prefill chunk.",
+      "base": "974831643fd5a4944b506439d4404ae64fe69539",
+      "applied": "clean",
+      "cpu_tests": [
+        "test/registered/unit/layers/moe/test_flashinfer_cutlass_moe_workspace.py",
+        "test/registered/unit/layers/moe/test_flashinfer_cutlass_swiglu_params.py"
+      ],
+      "path": "patches/30-flashinfer-cutlass-moe-workspace.patch",
+      "sha256": "83052a983a06135affbf28b798320f99aaa7c2b4287dc0a63aa7f4d11f69ca28"
     }
   ],
   "packaging": {

@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.5.0-rc.4
+
+0.5.0-rc.3 with patch 30: the MXFP4 CUTLASS MoE passes FlashInfer one persistent workspace per stream, sized once by FlashInfer, instead of letting every call allocate and free about 1 GiB of scratch. On a running server rc.3 logged a caching-allocator OOM retry on every prefill chunk (each retry succeeded). Same stack.
+
 ## v0.5.0-rc.3
 
 0.5.0-rc.2 with patch 11 (sgl-project/sglang#42865) importing `ue8m0_scale` from SGLang `main`'s `kernels/ops/quantization` (rc.2 failed the installed-image import check), and the dependency gate expecting the 2026-10-29 vendor base's NIXL 1.5.1. Same stack.

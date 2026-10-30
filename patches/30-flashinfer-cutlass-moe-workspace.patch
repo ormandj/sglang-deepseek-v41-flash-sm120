@@ -1,0 +1,318 @@
+diff --git a/python/sglang/srt/layers/moe/moe_runner/flashinfer_cutlass.py b/python/sglang/srt/layers/moe/moe_runner/flashinfer_cutlass.py
+index 89965886e1..aae7b808b4 100644
+--- a/python/sglang/srt/layers/moe/moe_runner/flashinfer_cutlass.py
++++ b/python/sglang/srt/layers/moe/moe_runner/flashinfer_cutlass.py
+@@ -8,6 +8,7 @@ small quant_info payload and route through ``MoeRunner``.
+ 
+ from __future__ import annotations
+ 
++import logging
+ from dataclasses import dataclass
+ from typing import TYPE_CHECKING, Optional
+ 
+@@ -36,6 +37,8 @@ from sglang.srt.runtime_context import (
+ from sglang.srt.utils import is_flashinfer_available
+ from sglang.srt.utils.common import is_sm120, next_power_of_2
+ 
++logger = logging.getLogger(__name__)
++
+ if TYPE_CHECKING:
+     from sglang.srt.layers.moe.token_dispatcher.flashinfer import (
+         FlashinferCombineInput,
+@@ -181,6 +184,74 @@ def _cutlass_moe_tune_max_num_tokens(num_tokens: int) -> int:
+     )
+ 
+ 
++# One workspace per (device, stream), reused across eager calls: without one,
++# FlashInfer allocates and frees about 1 GiB of scratch on every prefill MoE call,
++# which a running server's caching allocator often cannot serve from its cache
++# (it retries after an OOM on every chunk).
++_MXFP4_MOE_WORKSPACES: dict = {}
++# Set if FlashInfer ever rejects a queried size; calls then allocate per call.
++_MXFP4_MOE_WORKSPACE_REJECTED = False
++
++
++def _mxfp4_moe_workspace(
++    *,
++    x: torch.Tensor,
++    fc1_expert_weights: torch.Tensor,
++    w2_weight: torch.Tensor,
++    top_k: int,
++    runner_config: MoeRunnerConfig,
++    activation_type,
++    use_mxfp8_act_scaling: bool,
++    use_wfp4afp8_humming: bool,
++    use_fused_finalize: bool,
++) -> Optional[torch.Tensor]:
++    """The workspace buffer for this eager call, sized by FlashInfer for the
++    largest prefill on this stream; None under graph capture, where the call's
++    own allocation belongs to the graph's pool."""
++    if (
++        _MXFP4_MOE_WORKSPACE_REJECTED
++        or x.device.type != "cuda"
++        or torch.cuda.is_current_stream_capturing()
++    ):
++        return None
++    from flashinfer.fused_moe import cutlass_fused_moe_workspace_size
++
++    stream = torch.cuda.current_stream(x.device).cuda_stream
++    key = (x.device.index, stream)
++    max_tokens = max(x.shape[0], _cutlass_moe_tune_max_num_tokens(x.shape[0]))
++    held = _MXFP4_MOE_WORKSPACES.get(key)
++    if held is not None and held[0] >= x.shape[0]:
++        return held[1]
++    nbytes = cutlass_fused_moe_workspace_size(
++        max_tokens,
++        x.shape[1],
++        # w2 is packed FP4, two values a byte.
++        w2_weight.shape[2] * 2,
++        w2_weight.shape[0] * runner_config.moe_ep_size,
++        top_k,
++        x_dtype=x.dtype,
++        weight_dtype=fc1_expert_weights.dtype,
++        output_dtype=torch.bfloat16,
++        activation_type=activation_type,
++        tp_size=runner_config.moe_tp_size,
++        tp_rank=runner_config.moe_tp_rank,
++        ep_size=runner_config.moe_ep_size,
++        ep_rank=runner_config.moe_ep_rank,
++        use_w4_group_scaling=not use_mxfp8_act_scaling,
++        use_mxfp8_act_scaling=use_mxfp8_act_scaling,
++        use_fused_finalize=use_fused_finalize,
++        use_wfp4afp8_humming=use_wfp4afp8_humming,
++        device=x.device,
++    )
++    _MXFP4_MOE_WORKSPACES.pop(key, None)
++    # Taken once per stream: return the allocator's unused blocks first, so the
++    # buffer comes from free memory rather than an OOM retry.
++    torch.cuda.empty_cache()
++    workspace = torch.empty(nbytes, dtype=torch.uint8, device=x.device)
++    _MXFP4_MOE_WORKSPACES[key] = (max_tokens, workspace)
++    return workspace
++
++
+ def _activation_type(runner_config: MoeRunnerConfig):
+     from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import get_activation_type
+ 
+@@ -582,37 +653,67 @@ def _fused_experts_flashinfer_mxfp4_cutlass(
+     ):
+         out = torch.empty(x.shape[0], out_hidden, dtype=output_dtype, device=x.device)
+ 
+-    flashinfer_cutlass_fused_moe(
+-        input=x,
+-        token_selected_experts=topk_ids.to(torch.int32),
+-        token_final_scales=topk_weights,
++    activation_type = (
++        ActivationType.SwigluStep
++        if quant_info.use_swiglu_step
++        else ActivationType.Swiglu
++    )
++    use_fused_finalize = envs.SGLANG_FLASHINFER_MOE_FUSED_FINALIZE.get()
++    workspace = _mxfp4_moe_workspace(
++        x=x,
+         fc1_expert_weights=fc1_expert_weights,
+-        fc2_expert_weights=fc2_expert_weights,
+-        output_dtype=output_dtype,
+-        quant_scales=quant_scales,
+-        input_sf=input_sf,
+-        fc1_expert_biases=quant_info.w13_bias,
+-        fc2_expert_biases=quant_info.w2_bias,
+-        swiglu_alpha=quant_info.swiglu_alpha,
+-        swiglu_beta=quant_info.swiglu_beta,
+-        swiglu_limit=quant_info.swiglu_limit,
+-        tp_size=runner_config.moe_tp_size,
+-        tp_rank=runner_config.moe_tp_rank,
+-        ep_size=runner_config.moe_ep_size,
+-        ep_rank=runner_config.moe_ep_rank,
+-        use_w4_group_scaling=not use_mxfp8_act_scaling,
++        w2_weight=quant_info.w2_weight,
++        top_k=topk_ids.shape[1],
++        runner_config=runner_config,
++        activation_type=activation_type,
+         use_mxfp8_act_scaling=use_mxfp8_act_scaling,
+-        activation_type=(
+-            ActivationType.SwigluStep
+-            if quant_info.use_swiglu_step
+-            else ActivationType.Swiglu
+-        ),
+-        tune_max_num_tokens=_cutlass_moe_tune_max_num_tokens(x.shape[0]),
+-        output=out,
+-        use_fused_finalize=envs.SGLANG_FLASHINFER_MOE_FUSED_FINALIZE.get(),
+-        **humming_kwargs,
++        use_wfp4afp8_humming=use_wfp4afp8_humming,
++        use_fused_finalize=use_fused_finalize,
+     )
+ 
++    def run(ws):
++        flashinfer_cutlass_fused_moe(
++            input=x,
++            token_selected_experts=topk_ids.to(torch.int32),
++            token_final_scales=topk_weights,
++            fc1_expert_weights=fc1_expert_weights,
++            fc2_expert_weights=fc2_expert_weights,
++            output_dtype=output_dtype,
++            quant_scales=quant_scales,
++            input_sf=input_sf,
++            fc1_expert_biases=quant_info.w13_bias,
++            fc2_expert_biases=quant_info.w2_bias,
++            swiglu_alpha=quant_info.swiglu_alpha,
++            swiglu_beta=quant_info.swiglu_beta,
++            swiglu_limit=quant_info.swiglu_limit,
++            tp_size=runner_config.moe_tp_size,
++            tp_rank=runner_config.moe_tp_rank,
++            ep_size=runner_config.moe_ep_size,
++            ep_rank=runner_config.moe_ep_rank,
++            use_w4_group_scaling=not use_mxfp8_act_scaling,
++            use_mxfp8_act_scaling=use_mxfp8_act_scaling,
++            activation_type=activation_type,
++            tune_max_num_tokens=_cutlass_moe_tune_max_num_tokens(x.shape[0]),
++            output=out,
++            use_fused_finalize=use_fused_finalize,
++            workspace_buffer=ws,
++            **humming_kwargs,
++        )
++
++    try:
++        run(workspace)
++    except Exception as e:  # tvm-ffi check failures are not all RuntimeError
++        if workspace is None or "workspace_buffer too small" not in str(e):
++            raise
++        # A size query that disagrees with the call must not fail serving.
++        global _MXFP4_MOE_WORKSPACE_REJECTED
++        _MXFP4_MOE_WORKSPACE_REJECTED = True
++        _MXFP4_MOE_WORKSPACES.clear()
++        logger.warning(
++            "FlashInfer MoE workspace too small; using per-call scratch: %s", e
++        )
++        run(None)
++
+     if do_pad:
+         out = out[:, :origin_hidden].contiguous()
+ 
+diff --git a/test/registered/unit/layers/moe/test_flashinfer_cutlass_moe_workspace.py b/test/registered/unit/layers/moe/test_flashinfer_cutlass_moe_workspace.py
+new file mode 100644
+index 0000000000..c7bd69a653
+--- /dev/null
++++ b/test/registered/unit/layers/moe/test_flashinfer_cutlass_moe_workspace.py
+@@ -0,0 +1,121 @@
++"""The persistent FlashInfer MXFP4 CUTLASS MoE workspace: one buffer per device
++and stream, sized once by FlashInfer, reused by every eager call."""
++
++import types
++import unittest
++from unittest import mock
++
++import torch
++
++from sglang.srt.layers.moe.moe_runner import flashinfer_cutlass as fc
++from sglang.srt.layers.moe.moe_runner.base import MoeRunnerConfig
++from sglang.test.ci.ci_register import register_cpu_ci
++from sglang.test.test_utils import CustomTestCase
++
++register_cpu_ci(est_time=5, suite="base-a-test-cpu")
++
++
++class _Layer(torch.nn.Module):
++    moe_tp_size = 2
++    moe_tp_rank = 1
++    moe_ep_size = 2
++    moe_ep_rank = 0
++
++
++def fake_x(tokens, device=torch.device("cuda", 0)):
++    return types.SimpleNamespace(
++        shape=(tokens, 4096), device=device, dtype=torch.float8_e4m3fn
++    )
++
++
++class TestMxfp4MoeWorkspace(CustomTestCase):
++    def setUp(self):
++        fc._MXFP4_MOE_WORKSPACES.clear()
++        fc._MXFP4_MOE_WORKSPACE_REJECTED = False
++        self.addCleanup(fc._MXFP4_MOE_WORKSPACES.clear)
++        self.stream = types.SimpleNamespace(cuda_stream=7)
++        self.queries, self.allocations, self.flushes = [], [], []
++
++        def size(*args, **kwargs):
++            self.queries.append((args, kwargs))
++            return 1000 + args[0]
++
++        def empty(nbytes, **kwargs):
++            buffer = types.SimpleNamespace(nbytes=nbytes)
++            self.allocations.append(buffer)
++            return buffer
++
++        flashinfer_moe = types.SimpleNamespace(cutlass_fused_moe_workspace_size=size)
++        for target, value in (
++            ("sys.modules", None),
++            ("torch.cuda.is_current_stream_capturing", lambda: False),
++            ("torch.cuda.current_stream", lambda device: self.stream),
++            ("torch.cuda.empty_cache", lambda: self.flushes.append(1)),
++            (f"{fc.__name__}._cutlass_moe_tune_max_num_tokens", lambda n: 8192),
++        ):
++            if target == "sys.modules":
++                patcher = mock.patch.dict(
++                    "sys.modules", {"flashinfer.fused_moe": flashinfer_moe}
++                )
++            else:
++                patcher = mock.patch(target, value)
++            patcher.start()
++            self.addCleanup(patcher.stop)
++        self.empty = mock.patch.object(fc.torch, "empty", empty)
++        self.empty.start()
++        self.addCleanup(self.empty.stop)
++
++    def workspace(self, tokens, **kwargs):
++        return fc._mxfp4_moe_workspace(
++            x=fake_x(tokens, **kwargs),
++            fc1_expert_weights=types.SimpleNamespace(dtype=torch.int64),
++            w2_weight=types.SimpleNamespace(shape=(64, 4096, 576)),
++            top_k=6,
++            runner_config=MoeRunnerConfig(layer=_Layer()),
++            activation_type="swiglu",
++            use_mxfp8_act_scaling=True,
++            use_wfp4afp8_humming=False,
++            use_fused_finalize=True,
++        )
++
++    def test_one_buffer_sized_for_the_prefill_bound_is_reused(self):
++        first = self.workspace(8192)
++        for tokens in (1, 512, 8192):
++            self.assertIs(self.workspace(tokens), first)
++        self.assertEqual(len(self.queries), 1)
++        args, kwargs = self.queries[0]
++        # max tokens, hidden, logical intermediate (two FP4 a byte), global experts, top-k
++        self.assertEqual(args, (8192, 4096, 1152, 128, 6))
++        self.assertEqual(kwargs["weight_dtype"], torch.int64)
++        self.assertEqual((kwargs["tp_size"], kwargs["tp_rank"]), (2, 1))
++        self.assertEqual((kwargs["ep_size"], kwargs["ep_rank"]), (2, 0))
++        self.assertTrue(kwargs["use_mxfp8_act_scaling"])
++        self.assertFalse(kwargs["use_w4_group_scaling"])
++        self.assertEqual(first.nbytes, 1000 + 8192)
++        # The allocator's unused blocks are returned once, before the buffer is taken.
++        self.assertEqual(len(self.flushes), 1)
++
++    def test_a_larger_call_replaces_the_buffer(self):
++        first = self.workspace(8192)
++        second = self.workspace(16384)
++        self.assertIsNot(second, first)
++        self.assertEqual(second.nbytes, 1000 + 16384)
++        self.assertIs(self.workspace(100), second)
++
++    def test_each_stream_has_its_own_buffer(self):
++        first = self.workspace(8192)
++        self.stream = types.SimpleNamespace(cuda_stream=9)
++        self.assertIsNot(self.workspace(8192), first)
++        self.assertEqual(len(self.allocations), 2)
++
++    def test_no_buffer_under_capture_on_cpu_or_after_a_rejection(self):
++        with mock.patch("torch.cuda.is_current_stream_capturing", lambda: True):
++            self.assertIsNone(self.workspace(8192))
++        self.assertIsNone(self.workspace(8192, device=torch.device("cpu")))
++        fc._MXFP4_MOE_WORKSPACE_REJECTED = True
++        self.assertIsNone(self.workspace(8192))
++        self.assertEqual(self.allocations, [])
++
++
++if __name__ == "__main__":
++    unittest.main()

@@ -83,6 +83,7 @@ SGLang series, applied in order to the pinned SGLang commit:
 | 27 | `27-openai-error-envelope.patch` | [sgl-project/sglang#45130](https://github.com/sgl-project/sglang/pull/45130) | OpenAI routes return errors in OpenAI's error format |
 | 28 | `28-openai-abort-finish-reason.patch` | [sgl-project/sglang#45132](https://github.com/sgl-project/sglang/pull/45132) | Aborted requests are reported as an error or a stop, never `finish_reason: "abort"` |
 | 29 | `29-openai-stream-exception-frame.patch` | [sgl-project/sglang#45133](https://github.com/sgl-project/sglang/pull/45133) | Failed chat and completion streams end with an error frame and `[DONE]` |
+| 30 | `30-flashinfer-cutlass-moe-workspace.patch` | not yet upstream | The MXFP4 CUTLASS MoE reuses one FlashInfer workspace per stream instead of allocating about 1 GiB of scratch on every call (no allocator OOM retries on a running server) |
 
 FlashInfer series, applied to the pinned FlashInfer commit:
 
